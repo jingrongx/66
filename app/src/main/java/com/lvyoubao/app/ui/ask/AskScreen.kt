@@ -1,6 +1,8 @@
 package com.lvyoubao.app.ui.ask
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,6 +51,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -58,6 +61,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.data.observation.FatigueBand
+import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.AskViewModel
 
 private val Suggestions = listOf(
@@ -74,6 +79,7 @@ fun AskScreen(
     app: TravelApp,
     updateAvailable: Boolean = false,
     onUpdateClick: () -> Unit = {},
+    onOpenObservation: () -> Unit = {},
 ) {
     val vm: AskViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { AskViewModel(app) } } },
@@ -93,11 +99,24 @@ fun AskScreen(
                 .padding(top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 状态点：未记录=空心灰；记录中绿/黄=空心青描边；橙/红=实心（颜色语义，不给数字）
+            val sensingRunning by SensingBus.running.collectAsState()
+            val sensingBand by SensingBus.band.collectAsState()
             Box(
                 modifier = Modifier
-                    .size(10.dp)
+                    .size(12.dp)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary),
+                    .then(
+                        when {
+                            !sensingRunning -> Modifier.border(
+                                2.dp, MaterialTheme.colorScheme.outline, CircleShape,
+                            )
+                            sensingBand == FatigueBand.AMBER || sensingBand == FatigueBand.RED ->
+                                Modifier.background(Color(sensingBand.argb))
+                            else -> Modifier.border(2.dp, Color(sensingBand.argb), CircleShape)
+                        }
+                    )
+                    .clickable { onOpenObservation() },
             )
             Spacer(Modifier.width(10.dp))
             Text("旅游宝", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)

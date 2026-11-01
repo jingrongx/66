@@ -20,6 +20,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.ui.ask.AskScreen
+import com.lvyoubao.app.ui.observation.ObservationScreen
+import com.lvyoubao.app.ui.observation.ObservationViewModel
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import com.lvyoubao.app.ui.theme.LvyoubaoTheme
 import com.lvyoubao.app.ui.update.UpdateScreen
@@ -42,6 +44,7 @@ private fun AppRoot() {
     val app = LocalContext.current.applicationContext as TravelApp
     var showSettings by remember { mutableStateOf(false) }
     var showUpdate by remember { mutableStateOf(false) }
+    var showObservation by remember { mutableStateOf(false) }
 
     val updateVm: UpdateViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
@@ -52,12 +55,14 @@ private fun AppRoot() {
     LaunchedEffect(Unit) { updateVm.autoCheck() }
 
     AnimatedContent(
-        targetState = Triple(showSettings, showUpdate, updateState.release != null),
+        targetState = showSettings to (showUpdate to showObservation),
         transitionSpec = { fadeIn().togetherWith(fadeOut()) },
         label = "root",
-    ) { (settings, update, _) ->
+    ) { (settings, pages) ->
+        val (update, observation) = pages
         when {
             update -> UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
+            observation -> ObservationScreen(onClose = { showObservation = false }, app = app)
             settings -> SettingsScreen(
                 onClose = { showSettings = false },
                 onOpenUpdate = { showUpdate = true },
@@ -68,6 +73,7 @@ private fun AppRoot() {
                 app = app,
                 updateAvailable = updateState.release != null,
                 onUpdateClick = { showUpdate = true },
+                onOpenObservation = { showObservation = true },
             )
         }
     }
