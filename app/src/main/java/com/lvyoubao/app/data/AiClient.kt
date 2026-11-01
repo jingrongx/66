@@ -56,7 +56,7 @@ class AiClient(private val settings: AiSettings) {
     }
 
     /** 搜索失败时静默降级为无搜索（不阻断回答） */
-    private fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {
+    private suspend fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {
         if (query.isBlank()) return messages
         val results = runCatching { search(query.take(128)) }.getOrNull().orEmpty()
         if (results.isEmpty()) return messages
