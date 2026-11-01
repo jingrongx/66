@@ -4,12 +4,17 @@
 
 「旅游宝」的目标不是做"更聪明的行程规划器"，而是做**途中决策的接管器**：系统被动感知你的体力与情境，在你开口之前给出一个可以立刻执行的动作，你只保留否决权。
 
-## 当前进度（v0.1.x）
+## 当前进度（v0.3.x）
 
 - ✅ AI 接口层：OpenAI 兼容协议，**默认 DeepSeek**（当前模型 `deepseek-flash` / `deepseek-v4-pro`，已按官方文档核实），支持智谱 GLM、Kimi、通义千问与自定义 OpenAI 兼容端点
+- ✅ 联网搜索（v0.3）：接入 DeepSeek Search API（`/v1/tools/search`），提问前实时检索并把结果注入上下文——实时信息能力落地；主页开关"深度思考 / 联网搜索"
+- ✅ 视觉输入（v0.3）：拍照 / 相册（压缩为 base64 data URL，deepseek-flash 支持视觉）；文本类文件直接读内容
+- ✅ 会话系统（v0.3）：多会话、新建/删除、按标题和内容搜索、当前会话跨启动恢复；回答按"快问快答 ≤2 句 / 攻略类 3–5 条要点"分级输出
+- ✅ 位置上下文（v0.3）：提问自动附带当前时间与脱敏位置（城市/区域 + 约 1km 精度坐标），感知服务的实时定位优先
+- ✅ 个人信息飞轮 v0（v0.3）：回答可"收藏"为证据，本地记忆库按关键词相关性注入后续提问；公共飞轮待用户明示授权后接入
 - ✅ 规则校验层：AI 输出必须满足"≤2 句、含数字"，违例标记降级——规则层对模型有一票否决权
-- ✅ 现代化界面：Jetpack Compose + Material 3，动态取色，单卡交互（回答 + 一个动作 + ［就这么走］）
-- ✅ 应用内更新：启动静默检查 + 设置里的「应用更新」页手动检查/下载/安装；下载国内代理优先（gh-proxy.com → ghfast.top → 直连，自动换线）
+- ✅ 现代化界面：Jetpack Compose + Material 3，固定品牌配色（深海青 + 日出橙，弃用动态取色以保证对比度）
+- ✅ 应用内更新：启动静默检查 + 设置里的「应用更新」页手动检查/下载/安装；国内代理优先且多线路自动换线（API 直连 → 镜像 API → atom 兜底）
 - ✅ 疲劳积分观测版（v0.2.0）：被动感知前台服务（硬件计步 + GPS 距离/爬升/连续步行），每分钟计算 0–100 积分，样本/事件本地记录，可标记真实感受并导出 CSV 回测——只记录，不干预
 - ✅ 提交代码即自动发版：push 到 main 触发 GitHub Actions 构建 APK 并发布 Release
 - ⬜ 疲劳积分回测与标定（观测数据吻合度分析 → 调权重与阈值）
@@ -52,22 +57,24 @@ DeepSeek API Key 在 [platform.deepseek.com](https://platform.deepseek.com/api_k
 ```
 app/src/main/java/com/lvyoubao/app/
 ├── data/
-│   ├── AiClient.kt            # 统一 AI 接口（OpenAI 兼容，默认 DeepSeek；JSON 输出）
+│   ├── AiClient.kt            # 统一 AI 接口（OpenAI 兼容 + DeepSeek 搜索 API + 视觉）
 │   ├── RuleValidator.kt       # 规则校验层（≤2句/含数字），对模型输出一票否决
-│   ├── SettingsRepository.kt  # 服务商/Key/模型配置（DataStore，本地保存）
-│   ├── UpdateChecker.kt       # 应用内更新（GitHub Releases，代理优先）
-│   └── observation/           # 疲劳积分观测版
-│       ├── FatigueEngine.kt       # 被动信号 → 0–100 积分（步数40/步行25/爬升20/时长15）
-│       ├── FatigueSensingService  # 前台服务：计步 + 定位（见 sensing/）
-│       └── ObservationStore.kt    # JSONL 本地存储 + CSV 导出
+│   ├── SessionStore.kt        # 多会话存储（新建/删除/搜索）
+│   ├── MemoryStore.kt         # 个人飞轮：收藏证据 + 相关性检索注入
+│   ├── LocationContext.kt     # 位置上下文（脱敏坐标 + Geocoder 反解城市）
+│   ├── SettingsRepository.kt  # 服务商/Key/模型/开关配置（DataStore，本地保存）
+│   ├── UpdateChecker.kt       # 应用内更新（API + atom 双层检查，代理优先）
+│   └── observation/           # 疲劳积分观测版（引擎 + 本地存储）
 ├── sensing/
 │   └── FatigueSensingService.kt   # 被动感知前台服务（硬件计步 + LocationManager）
 ├── ui/
-│   ├── ask/                   # 问答层：一句话回答 + 单卡动作 + 状态点
+│   ├── ask/                   # 对话主界面：消息流 + 单卡动作 + 快捷开关 + 附件
+│   ├── sessions/              # 会话列表（搜索/新建/删除）
+│   ├── memory/                # 我的记忆（收藏的证据）
 │   ├── observation/           # 感知日志页：积分、指标、真实感受标记、事件时间线
 │   ├── settings/              # 设置层
 │   ├── update/                # 应用更新页
-│   └── theme/                 # Material 3 主题（动态取色 + 品牌 fallback）
+│   └── theme/                 # Material 3 品牌配色（固定，保证对比度）
 └── MainActivity.kt
 ```
 

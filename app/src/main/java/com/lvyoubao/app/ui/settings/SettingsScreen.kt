@@ -32,7 +32,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -164,28 +163,6 @@ fun SettingsScreen(onClose: () -> Unit, onOpenUpdate: () -> Unit, app: TravelApp
             }
         }
 
-        val currentPreset = presetById(state.draft.presetId)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("深度思考", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    "回答更深入但更慢（仅 DeepSeek）",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = state.draft.thinking,
-                onCheckedChange = { checked -> vm.updateDraft { it.copy(thinking = checked) } },
-                enabled = currentPreset.supportsThinkingToggle,
-            )
-        }
-
         state.testResult?.let { result ->
             Spacer(Modifier.height(12.dp))
             Text(
@@ -217,7 +194,7 @@ fun SettingsScreen(onClose: () -> Unit, onOpenUpdate: () -> Unit, app: TravelApp
 
         Spacer(Modifier.height(12.dp))
         Text(
-            "Key 只保存在本机（DataStore）。当前默认服务商 DeepSeek，模型 deepseek-flash，价格与模型详情见 api-docs.deepseek.com。",
+            "Key 只保存在本机（DataStore）。默认 DeepSeek，深度思考与联网搜索开关在主页输入框上方。搜索按次计费（官方 $0.75/千次）。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

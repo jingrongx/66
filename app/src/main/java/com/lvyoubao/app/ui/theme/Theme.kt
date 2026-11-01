@@ -1,69 +1,61 @@
 package com.lvyoubao.app.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 
-// 品牌 fallback：青碧（旅行/山水）+ 暖琥珀（行动/提示）
+// 品牌配色：深海青（主）+ 日出橙（行动/警示）。
+// 不使用动态取色：部分国产 ROM 的动态色实现对比度异常（深底深字），固定品牌方案保证可读性。
 private val LightColors = lightColorScheme(
-    primary = Color(0xFF0F766E),
+    primary = Color(0xFF0B7285),
     onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFA5F0E6),
-    onPrimaryContainer = Color(0xFF00201C),
-    secondary = Color(0xFF7C5800),
+    primaryContainer = Color(0xFFBDE9F7),
+    onPrimaryContainer = Color(0xFF002029),
+    secondary = Color(0xFFD9480F),
     onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFFFDEA8),
-    onSecondaryContainer = Color(0xFF271900),
-    background = Color(0xFFFCF9F4),
-    onBackground = Color(0xFF1B1C1B),
-    surface = Color(0xFFFCF9F4),
-    onSurface = Color(0xFF1B1C1B),
-    surfaceVariant = Color(0xFFEDEAE3),
-    onSurfaceVariant = Color(0xFF474B47),
-    outline = Color(0xFF777B76),
+    secondaryContainer = Color(0xFFFFDBCC),
+    onSecondaryContainer = Color(0xFF380D00),
+    tertiary = Color(0xFF0B7A4B),
+    background = Color(0xFFF6FAFC),
+    onBackground = Color(0xFF10242C),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF10242C),
+    surfaceVariant = Color(0xFFDFEBF0),
+    onSurfaceVariant = Color(0xFF3B545E),
+    outline = Color(0xFF6E8791),
+    error = Color(0xFFC0392B),
 )
 
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFF74D7C8),
-    onPrimary = Color(0xFF003731),
-    primaryContainer = Color(0xFF00504A),
-    onPrimaryContainer = Color(0xFF92F4E5),
-    secondary = Color(0xFFE7C26D),
-    onSecondary = Color(0xFF3F2E00),
-    secondaryContainer = Color(0xFF5B4300),
-    onSecondaryContainer = Color(0xFFFFDFAB),
-    background = Color(0xFF111413),
-    onBackground = Color(0xFFE2E3E1),
-    surface = Color(0xFF111413),
-    onSurface = Color(0xFFE2E3E1),
-    surfaceVariant = Color(0xFF3E4947),
-    onSurfaceVariant = Color(0xFFBEC9C5),
-    outline = Color(0xFF89938F),
+    primary = Color(0xFF5AD0E8),
+    onPrimary = Color(0xFF003544),
+    primaryContainer = Color(0xFF004D61),
+    onPrimaryContainer = Color(0xFFB8EBFF),
+    secondary = Color(0xFFFFB68F),
+    onSecondary = Color(0xFF4F1500),
+    secondaryContainer = Color(0xFF6E2F00),
+    onSecondaryContainer = Color(0xFFFFDBC8),
+    tertiary = Color(0xFF6FDCA5),
+    background = Color(0xFF0E1A20),
+    onBackground = Color(0xFFE4EEF3),
+    surface = Color(0xFF142229),
+    onSurface = Color(0xFFE4EEF3),
+    surfaceVariant = Color(0xFF1F333C),
+    onSurfaceVariant = Color(0xFFB2C9D2),
+    outline = Color(0xFF62818D),
+    error = Color(0xFFFF8A80),
 )
 
 @Composable
 fun LvyoubaoTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColors
-        else -> LightColors
-    }
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = if (darkTheme) DarkColors else LightColors,
         content = content,
     )
 }

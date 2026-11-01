@@ -20,8 +20,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.ui.ask.AskScreen
+import com.lvyoubao.app.ui.memory.MemoryScreen
 import com.lvyoubao.app.ui.observation.ObservationScreen
 import com.lvyoubao.app.ui.observation.ObservationViewModel
+import com.lvyoubao.app.ui.sessions.SessionListScreen
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import com.lvyoubao.app.ui.theme.LvyoubaoTheme
 import com.lvyoubao.app.ui.update.UpdateScreen
@@ -45,6 +47,8 @@ private fun AppRoot() {
     var showSettings by remember { mutableStateOf(false) }
     var showUpdate by remember { mutableStateOf(false) }
     var showObservation by remember { mutableStateOf(false) }
+    var showSessions by remember { mutableStateOf(false) }
+    var showMemory by remember { mutableStateOf(false) }
 
     val updateVm: UpdateViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
@@ -55,14 +59,22 @@ private fun AppRoot() {
     LaunchedEffect(Unit) { updateVm.autoCheck() }
 
     AnimatedContent(
-        targetState = showSettings to (showUpdate to showObservation),
+        targetState = showSettings to (showUpdate to (showObservation to (showSessions to showMemory))),
         transitionSpec = { fadeIn().togetherWith(fadeOut()) },
         label = "root",
-    ) { (settings, pages) ->
-        val (update, observation) = pages
+    ) { (settings, updateStack) ->
+        val (update, obsStack) = updateStack
+        val (observation, sessionStack) = obsStack
+        val (sessions, memory) = sessionStack
         when {
             update -> UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
             observation -> ObservationScreen(onClose = { showObservation = false }, app = app)
+            memory -> MemoryScreen(onClose = { showMemory = false }, app = app)
+            sessions -> SessionListScreen(
+                onClose = { showSessions = false },
+                onOpenMemory = { showMemory = true },
+                app = app,
+            )
             settings -> SettingsScreen(
                 onClose = { showSettings = false },
                 onOpenUpdate = { showUpdate = true },
@@ -70,6 +82,7 @@ private fun AppRoot() {
             )
             else -> AskScreen(
                 onOpenSettings = { showSettings = true },
+                onOpenSessions = { showSessions = true },
                 app = app,
                 updateAvailable = updateState.release != null,
                 onUpdateClick = { showUpdate = true },

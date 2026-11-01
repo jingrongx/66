@@ -12,7 +12,12 @@ import java.util.concurrent.TimeUnit
 /**
  * 应用内更新：检查 GitHub Releases + 下载 APK。
  * 国内网络下代理优先：按 [proxies] 顺序逐个尝试（前缀式加速镜像），末尾空串表示直连。
- * 注意：Release 检查要求仓库对匿名可读（公开仓库）。
+ *
+ * 检查策略（两层，都是匿名可读）：
+ *  1) API：api.github.com/repos/<repo>/releases/latest
+ *     —— 注意多数加速镜像不转发 api.github.com，镜像线路上的 404 视为线路失败而非“无版本”；
+ *        只有直连线路返回 404 才判定“仓库不可读/没有 Release”。
+ *  2) 兜底：releases.atom + expanded_assets（github.com 路径，镜像均支持）。
  */
 class UpdateChecker(private val repo: String = "jingrongx/66") {
 
@@ -36,33 +41,126 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
 
     suspend fun latestRelease(): Result<ReleaseInfo> = withContext(Dispatchers.IO) {
         guard {
-            for (proxy in proxies) {
-                val target = "https://api.github.com/repos/$repo/releases/latest"
-                val url = if (proxy.isEmpty()) target else "$proxy/$target"
-                try {
-                    val request = Request.Builder()
-                        .url(url)
-                        .header("Accept", "application/vnd.github+json")
-                        .header("User-Agent", "lvyoubao-app")
-                        .get()
-                        .build()
-                    client.newCall(request).execute().use { response ->
-                        val text = response.body?.string().orEmpty()
-                        if (response.isSuccessful) {
-                            return@withContext Result.success(json.decodeFromString<ReleaseInfo>(text))
-                        }
-                        if (response.code == 404) {
-                            throw ApiException("找不到更新信息：请确认仓库已公开且发布过 Release")
-                        }
-                        // 其他状态码换下一条线路
-                    }
-                } catch (e: ApiException) {
-                    throw e
-                } catch (e: IOException) {
-                    // 换下一条线路
-                }
-            }
+            val viaApi = runCatching { checkViaApi() }.getOrNull()
+            if (viaApi != null) return@withContext Result.success(viaApi)
+            val viaAtom = runCatching { checkViaAtom() }.getOrNull()
+            if (viaAtom != null) return@withContext Result.success(viaAtom)
             throw ApiException("连接不上更新服务（代理与直连均失败），请检查网络")
+        }
+    }
+
+    private fun checkViaApi(): ReleaseInfo {
+        var sawReal404 = false
+        for (proxy in proxies) {
+            val target = "https://api.github.com/repos/$repo/releases/latest"
+            val url = if (proxy.isEmpty()) target else "$proxy/$target"
+            try {
+                val request = Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/vnd.github+json")
+                    .header("User-Agent", "lvyoubao-app")
+                    .get()
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (response.isSuccessful) return json.decodeFromString<ReleaseInfo>(text)
+                    if (response.code == 404 && proxy.isEmpty()) {
+                        // 直连线路的 404 才是 GitHub 的真实回答
+                        sawReal404 = true
+                    }
+                }
+            } catch (e: IOException) {
+                // 换下一条线路
+            }
+        }
+        throw ApiException(
+            if (sawReal404) "找不到更新信息：请确认仓库已公开且发布过 Release"
+            else "连接不上更新服务（代理与直连均失败），请检查网络",
+        )
+    }
+
+    /** 兜底：atom feed 拿最新 tag，再从 expanded_assets 抓 APK 下载链接 */
+    private fun checkViaAtom(): ReleaseInfo {
+        var lastError: Exception? = null
+        for (proxy in proxies) {
+            try {
+                val feedUrl = "https://github.com/$repo/releases.atom"
+                val feed = fetchText(if (proxy.isEmpty()) feedUrl else "$proxy/$feedUrl")
+                val firstEntry = Regex("<entry>.*?</entry>", RegexOption.DOT_MATCHES_ALL)
+                    .find(feed)?.value
+                    ?: throw ApiException("更新源里还没有任何版本")
+                val tag = Regex("releases/tag/([^\"]+)")
+                    .find(firstEntry)?.groupValues?.get(1)
+                    ?: throw ApiException("更新源解析失败")
+                // 资产解析：优先按 tag 走 API（部分镜像可转发 api.github.com），失败再试 expanded_assets
+                val info = runCatching { fetchReleaseByTag(tag) }.getOrNull()
+                    ?: runCatching { fetchAssetsFromExpandedPage(tag) }.getOrNull()
+                val notes = Regex("<content[^>]*>(.*?)</content>", RegexOption.DOT_MATCHES_ALL)
+                    .find(firstEntry)?.groupValues?.get(1)
+                    ?.let { html ->
+                        html.replace(Regex("<[^>]+>"), "\n")
+                            .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                            .replace("&quot;", "\"").replace("&#39;", "'")
+                            .lines().map { it.trim() }.filter { it.isNotBlank() }.joinToString("\n")
+                    }
+                return ReleaseInfo(
+                    tag_name = tag,
+                    name = Regex("<title[^>]*>(.*?)</title>", RegexOption.DOT_MATCHES_ALL)
+                        .find(firstEntry)?.groupValues?.get(1)?.trim(),
+                    body = notes,
+                    assets = info?.assets ?: emptyList(),
+                )
+            } catch (e: IOException) {
+                lastError = e
+            }
+        }
+        throw lastError ?: ApiException("无法连接更新服务")
+    }
+
+    private fun fetchReleaseByTag(tag: String): ReleaseInfo {
+        var lastError: Exception? = null
+        for (proxy in proxies) {
+            try {
+                val target = "https://api.github.com/repos/$repo/releases/tags/$tag"
+                val url = if (proxy.isEmpty()) target else "$proxy/$target"
+                val text = fetchText(url)
+                return json.decodeFromString<ReleaseInfo>(text)
+            } catch (e: IOException) {
+                lastError = e
+            }
+        }
+        throw lastError ?: IOException("无法获取版本详情")
+    }
+
+    private fun fetchAssetsFromExpandedPage(tag: String): ReleaseInfo {
+        var lastError: Exception? = null
+        for (proxy in proxies) {
+            try {
+                val assetsUrl = "https://github.com/$repo/expanded_assets/$tag"
+                val html = fetchText(if (proxy.isEmpty()) assetsUrl else "$proxy/$assetsUrl")
+                val apkHref = Regex("href=\"(/?[^\"]*?/releases/download/[^\"]*?\\.apk)\"")
+                    .find(html)?.groupValues?.get(1) ?: throw IOException("没有 APK 附件")
+                val absolute = if (apkHref.startsWith("http")) apkHref else "https://github.com$apkHref"
+                return ReleaseInfo(
+                    tag_name = tag,
+                    assets = listOf(ReleaseAsset(name = absolute.substringAfterLast('/'), browser_download_url = absolute)),
+                )
+            } catch (e: IOException) {
+                lastError = e
+            }
+        }
+        throw lastError ?: IOException("无法获取附件列表")
+    }
+
+    private fun fetchText(url: String): String {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "lvyoubao-app")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            return response.body?.string() ?: throw IOException("空响应")
         }
     }
 

@@ -2,11 +2,19 @@ package com.lvyoubao.app.data
 
 import kotlinx.serialization.Serializable
 
-/** 单卡结构：一句短回答 + 一个可执行动作（对应推演方案里的“回答 + 单卡”） */
+/** 单卡结构：一句短回答 + 要点列表（攻略类）+ 一个可执行动作 */
 @Serializable
 data class AssistantReply(
     val answer: String,
+    val steps: List<String> = emptyList(),
     val action: String? = null,
+)
+
+/** 发给模型的一条消息；images 为 base64 data URL（仅 user 消息） */
+data class OutMessage(
+    val role: String,
+    val text: String,
+    val images: List<String> = emptyList(),
 )
 
 @Serializable
@@ -17,6 +25,12 @@ data class ResponseFormat(val type: String)
 
 @Serializable
 data class ThinkingMode(val type: String)
+
+@Serializable
+data class ImageUrlPart(val url: String, val detail: String = "low")
+
+@Serializable
+data class ContentPart(val type: String, val text: String? = null, val image_url: ImageUrlPart? = null)
 
 @Serializable
 data class ChatRequest(
@@ -46,3 +60,26 @@ data class ApiErrorBody(val error: ApiError? = null)
 
 @Serializable
 data class ApiError(val message: String? = null)
+
+// ---------- DeepSeek 联网搜索（POST /v1/tools/search） ----------
+
+@Serializable
+data class SearchRequestBody(
+    val query: String,
+    val count: Int = 5,
+    val need_content: Boolean = false,
+)
+
+@Serializable
+data class SearchResult(
+    val title: String = "",
+    val url: String = "",
+    val snippet: String = "",
+    val summary: String = "",
+    val date: String? = null,
+    val site_name: String? = null,
+    val authority: Int = -1,
+)
+
+@Serializable
+data class SearchResponseBody(val results: List<SearchResult> = emptyList())

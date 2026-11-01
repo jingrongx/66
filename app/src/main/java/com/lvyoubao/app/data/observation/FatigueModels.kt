@@ -51,4 +51,9 @@ object SensingBus {
     val running = MutableStateFlow(false)
     val band = MutableStateFlow(FatigueBand.GREEN)
     val startedAt = MutableStateFlow<Long?>(null)
+
+    /** 最近一次定位（感知服务与问答上下文共享） */
+    val lastLatitude = MutableStateFlow<Double?>(null)
+    val lastLongitude = MutableStateFlow<Double?>(null)
+    val lastLocationAt = MutableStateFlow<Long?>(null)
 }

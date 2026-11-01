@@ -6,4 +6,5 @@ data class AiSettings(
     val apiKey: String = "",
     val model: String = ProviderPresets.first().defaultModel,
     val thinking: Boolean = false,
+    val searchEnabled: Boolean = true,
 )

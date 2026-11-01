@@ -63,6 +63,9 @@ class FatigueSensingService : Service(), SensorEventListener {
                 altitude = if (location.hasAltitude()) location.altitude else null,
                 accuracyM = location.accuracy,
             )
+            SensingBus.lastLatitude.value = location.latitude
+            SensingBus.lastLongitude.value = location.longitude
+            SensingBus.lastLocationAt.value = System.currentTimeMillis()
         }
     }
 
