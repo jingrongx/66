@@ -140,16 +140,18 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
         if (map != null && map.exists()) {
             var routeOverlay by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
             var drawnPoints by remember { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
+            val mapViewFactory: (android.content.Context) -> com.mapsforge.map.android.view.MapView =
+                { ctx -> buildMapView(ctx, map) }
             key(map.absolutePath) {
-                AndroidView(
+                AndroidView<com.mapsforge.map.android.view.MapView>(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(16.dp)),
-                    factory = { ctx -> buildMapView(ctx, map) },
-                    onReset = { mapView -> runCatching { mapView.destroyAll() } },
-                    onRelease = { mapView -> runCatching { mapView.destroyAll() } },
-                    update = { mapView ->
+                    factory = mapViewFactory,
+                    onReset = { mapView: com.mapsforge.map.android.view.MapView -> mapView.destroyAll() },
+                    onRelease = { mapView: com.mapsforge.map.android.view.MapView -> mapView.destroyAll() },
+                    update = { mapView: com.mapsforge.map.android.view.MapView ->
                         if (state.routePoints != drawnPoints) {
                             routeOverlay?.let { overlay ->
                                 runCatching { mapView.layerManager.layers.remove(overlay) }
