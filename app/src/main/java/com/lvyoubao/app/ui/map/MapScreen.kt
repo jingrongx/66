@@ -147,6 +147,8 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(16.dp)),
                     factory = { ctx -> buildMapView(ctx, map) },
+                    onReset = { mapView -> runCatching { mapView.destroyAll() } },
+                    onRelease = { mapView -> runCatching { mapView.destroyAll() } },
                     update = { mapView ->
                         if (state.routePoints != drawnPoints) {
                             routeOverlay?.let { overlay ->
@@ -156,7 +158,6 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                             drawnPoints = state.routePoints
                         }
                     },
-                    onRelease = { mapView -> runCatching { mapView.destroyAll() } },
                 )
             }
             Spacer(Modifier.height(8.dp))
