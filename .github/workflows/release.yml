@@ -73,3 +73,14 @@ jobs:
           - 首次启动进入「设置」，选择服务商（默认 DeepSeek）并填入 API Key
           - 变更记录：https://github.com/${GITHUB_REPOSITORY}/commits/main" \
             --latest
+
+      - name: Remove older builds of the same version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 每个版本只保留最新一次构建的 Release，避免列表出现 v0.4.0-b12/v0.4.0-b11 之类的乱序
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
+            | grep -E "^v${VERSION}-b[0-9]+$" | grep -v "^${TAG}$" \
+            | while read -r OLD; do
+                gh release delete "$OLD" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+              done
