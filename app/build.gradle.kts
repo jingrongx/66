@@ -74,8 +74,21 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // 离线矢量地图（开源 OSM 生态，推演方案选型）
-    implementation("org.mapsforge:mapsforge-map-android:0.25.0")
-    implementation("org.mapsforge:mapsforge-themes:0.25.0")
+    // 强制走 POM + jar 解析：其 Gradle Module Metadata 变体选择偶发不命中
+    implementation("org.mapsforge:mapsforge-map-android:0.25.0") {
+        metadataSources {
+            mavenPom()
+            artifact()
+            ignoreGradleMetadataRedirection()
+        }
+    }
+    implementation("org.mapsforge:mapsforge-themes:0.25.0") {
+        metadataSources {
+            mavenPom()
+            artifact()
+            ignoreGradleMetadataRedirection()
+        }
+    }
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

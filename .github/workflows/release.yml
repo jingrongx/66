@@ -52,6 +52,8 @@ jobs:
       - name: Build release APK
         run: |
           chmod +x gradlew
+          ./gradlew :app:dependencies --configuration releaseCompileClasspath --no-daemon > deps.txt || true
+          grep -ci mapsforge deps.txt || echo "MAPSFORGE NOT IN CLASSPATH"
           ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Verify APK signature

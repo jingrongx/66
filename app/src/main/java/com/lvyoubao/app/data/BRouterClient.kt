@@ -11,8 +11,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * BRouter 联动（离线高程路由）：通过 AIDL 调用用户已安装的 BRouter 应用。
@@ -28,7 +27,7 @@ object BRouterClient {
     }.isSuccess
 
     suspend fun walkingRoute(context: Context, fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): AmapClient.RouteResult =
-        suspendCoroutine { cont ->
+        suspendCancellableCoroutine { cont ->
             var finished = false
             val done = CountDownLatch(1)
             val connRef = arrayOfNulls<ServiceConnection>(1)
