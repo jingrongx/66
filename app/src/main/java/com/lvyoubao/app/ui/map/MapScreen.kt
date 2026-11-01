@@ -271,7 +271,7 @@ private fun buildMapView(context: android.content.Context, mapFile: File): org.m
         "lvyoubao-map",
         mapView.model.displayModel.tileSize,
         1.0f,
-        1.5f,
+        1.5,
     )
     val mapDataStore = org.mapsforge.map.reader.MapFile(mapFile)
     val rendererLayer = org.mapsforge.map.layer.renderer.TileRendererLayer(
