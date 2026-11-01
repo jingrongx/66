@@ -115,6 +115,7 @@ fun AskScreen(
     updateAvailable: Boolean = false,
     onUpdateClick: () -> Unit = {},
     onOpenObservation: () -> Unit = {},
+    onOpenMap: () -> Unit = {},
 ) {
     val vm: ChatViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { ChatViewModel(app) } } },
@@ -269,6 +270,7 @@ fun AskScreen(
                     }
                     Spacer(Modifier.height(16.dp))
                     HorizontalDivider()
+                    DrawerEntry("离线地图与路线") { onOpenMap() }
                     DrawerEntry("我的记忆（收藏的证据）") { onOpenMemory() }
                     DrawerEntry("感知日志（疲劳观测）") { onOpenObservation() }
                     DrawerEntry("设置") { onOpenSettings() }

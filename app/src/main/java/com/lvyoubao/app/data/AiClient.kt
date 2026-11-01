@@ -3,6 +3,9 @@ package com.lvyoubao.app.data
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -15,12 +18,13 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class ApiException(message: String) : IOException(message)
+class ApiException(message: String, val code: Int = 0) : IOException(message)
 
 /**
  * 统一 AI 接口层（OpenAI 兼容，默认 DeepSeek）。
  * - 深度思考：thinking 参数（DeepSeek）
  * - 联网搜索：DeepSeek Search API（/v1/tools/search），结果注入上下文后再生成
+ * - Function Calling：工具定义 + tool_calls 协议循环（POI/天气/路线）
  * - 视觉：user 消息 content 数组 + base64 data URL 图片
  */
 class AiClient(private val settings: AiSettings) {
@@ -37,21 +41,26 @@ class AiClient(private val settings: AiSettings) {
     private val baseUrl get() = settings.baseUrl.trimEnd('/')
     private val authHeader get() = "Bearer ${settings.apiKey}"
 
+    /** 工具执行器：模型发起 tool_calls 时回调（在 IO 线程执行，允许阻塞） */
+    fun interface ToolExecutor {
+        fun execute(name: String, argumentsJson: String): String
+    }
+
     /** 主对话：messages 已含系统提示与上下文；searchEnabled 时先取实时搜索结果注入 */
     suspend fun chat(
         messages: List<OutMessage>,
         thinking: Boolean,
         searchEnabled: Boolean,
+        toolExecutor: ToolExecutor? = null,
     ): Result<AssistantReply> = withContext(Dispatchers.IO) {
         guard {
             val effective = if (searchEnabled && isDeepSeek) {
                 val lastUser = messages.lastOrNull { it.role == "user" }?.text.orEmpty()
-                val injected = trySearchInject(lastUser, messages)
-                injected
+                trySearchInject(lastUser, messages)
             } else {
                 messages
             }
-            generate(effective, thinking)
+            generate(effective, thinking, toolExecutor)
         }
     }
 
@@ -79,7 +88,7 @@ class AiClient(private val settings: AiSettings) {
     private fun host(url: String): String =
         runCatching { java.net.URI(url).host?.removePrefix("www.") }.getOrNull() ?: url
 
-    /** POST {base}/v1/tools/search */
+    /** POST {base}/v1/tools/search（DeepSeek 联网搜索，$0.75/千次成功请求） */
     suspend fun search(query: String): List<SearchResult> = withContext(Dispatchers.IO) {
         val body = json.encodeToJsonElement(
             SearchRequestBody(query = query, count = 5, need_content = false),
@@ -91,41 +100,131 @@ class AiClient(private val settings: AiSettings) {
             .build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw ApiException(mapError(response.code, text))
+            if (!response.isSuccessful) throw ApiException(mapError(response.code, text), response.code)
             json.decodeFromString<SearchResponseBody>(text).results
         }
     }
 
-    private fun generate(messages: List<OutMessage>, thinking: Boolean): AssistantReply {
-        // 三级降级：完整参数 → 去 JSON 模式 → 最小参数（部分兼容服务商不支持扩展参数）
+    /**
+     * 生成入口。
+     * - 有工具执行器且为 DeepSeek：走 Function Calling 循环（最多 3 轮），事实来自工具返回
+     * - 工具参数被拒（400）→ 降级为纯生成（三级参数降级）
+     */
+    private fun generate(
+        messages: List<OutMessage>,
+        thinking: Boolean,
+        toolExecutor: ToolExecutor?,
+    ): AssistantReply {
+        val useTools = toolExecutor != null && isDeepSeek
+        if (!useTools) return generateWithAttempts(messages, thinking, withTools = false, executor = null)
+
+        var convo: JsonArray = buildMessagesJson(messages)
+        var round = 0
+        while (true) {
+            val turn = try {
+                requestOnce(convo, thinking = thinking, withJson = false, withTools = true)
+            } catch (e: ApiException) {
+                if (e.code == 400) return generateWithAttempts(messages, thinking, withTools = false, executor = null)
+                throw e
+            }
+            if (turn.toolCalls.isEmpty() || round >= 3) {
+                return turn.content?.let { parseReply(it) } ?: AssistantReply(answer = "（模型没有返回内容）")
+            }
+            val results = turn.toolCalls.map { call ->
+                val name = call.function?.name.orEmpty()
+                val output = runCatching {
+                    toolExecutor.execute(name, call.function?.arguments ?: "{}")
+                }.getOrElse { e -> "工具执行失败：${e.message}" }
+                buildJsonObject {
+                    put("role", "tool")
+                    put("tool_call_id", call.id)
+                    put("content", output)
+                }
+            }
+            convo = JsonArray(convo + listOf(turn.rawAssistant) + results)
+            round++
+        }
+    }
+
+    private data class Attempt(val withJson: Boolean, val withThinking: Boolean, val withTools: Boolean)
+
+    /** 无工具（或工具被拒后）的生成：三级参数降级，兼容不支持扩展参数的服务商 */
+    private fun generateWithAttempts(
+        messages: List<OutMessage>,
+        thinking: Boolean,
+        withTools: Boolean,
+        executor: ToolExecutor?,
+    ): AssistantReply {
         val attempts = listOf(
-            Attempt(withJson = true, withThinking = true),
-            Attempt(withJson = false, withThinking = true),
-            Attempt(withJson = false, withThinking = false),
+            Attempt(withJson = true, withThinking = true, withTools = false),
+            Attempt(withJson = false, withThinking = true, withTools = false),
+            Attempt(withJson = false, withThinking = false, withTools = false),
         )
         var lastError: ApiException? = null
-        for ((index, attempt) in attempts.withIndex()) {
-            val body = buildJsonObject {
-                put("model", settings.model)
-                put("messages", buildMessagesJson(messages, attempt))
-                if (attempt.withJson) {
-                    put("response_format", json.encodeToJsonElement(ResponseFormat("json_object")))
-                }
-                if (attempt.withThinking && isDeepSeek) {
-                    put("thinking", json.encodeToJsonElement(ThinkingMode(if (thinking) "enabled" else "disabled")))
-                }
-            }.toString()
-            val result = postForReply(body)
-            if (result != null) return result
-            lastError = lastError ?: ApiException("请求参数被拒绝")
-            if (index == attempts.lastIndex) throw lastError
+        attempts.forEach { attempt ->
+            try {
+                val turn = requestOnce(
+                    buildMessagesJson(messages),
+                    thinking = attempt.withThinking && thinking,
+                    withJson = attempt.withJson,
+                    withTools = false,
+                )
+                turn.content?.let { return parseReply(it) }
+                lastError = ApiException("服务端没有返回内容")
+            } catch (e: ApiException) {
+                lastError = e
+            }
         }
         throw lastError ?: ApiException("服务端没有返回内容")
     }
 
-    private data class Attempt(val withJson: Boolean, val withThinking: Boolean)
+    private data class ChatTurn(
+        val content: String?,
+        val toolCalls: List<ToolCall>,
+        val rawAssistant: JsonElement,
+    )
 
-    private fun buildMessagesJson(messages: List<OutMessage>, attempt: Attempt) = buildJsonArray {
+    private fun requestOnce(
+        messagesJson: JsonArray,
+        thinking: Boolean,
+        withJson: Boolean,
+        withTools: Boolean,
+    ): ChatTurn {
+        val body = buildJsonObject {
+            put("model", settings.model)
+            put("messages", messagesJson)
+            if (withJson) {
+                put("response_format", json.encodeToJsonElement(ResponseFormat("json_object")))
+            }
+            if (isDeepSeek) {
+                put("thinking", json.encodeToJsonElement(ThinkingMode(if (thinking) "enabled" else "disabled")))
+            }
+            if (withTools) {
+                put("tools", json.encodeToJsonElement(AppTools.definitions.map {
+                    ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))
+                }))
+            }
+        }.toString()
+        val request = Request.Builder()
+            .url("$baseUrl/chat/completions")
+            .header("Authorization", authHeader)
+            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            val bodyText = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(mapError(response.code, bodyText), response.code)
+            val message = json.decodeFromString<ChatResponse>(bodyText)
+                .choices.firstOrNull()?.message
+                ?: throw ApiException("服务端没有返回内容")
+            return ChatTurn(
+                content = message.content,
+                toolCalls = message.tool_calls,
+                rawAssistant = json.encodeToJsonElement(message),
+            )
+        }
+    }
+
+    private fun buildMessagesJson(messages: List<OutMessage>) = buildJsonArray {
         messages.forEach { m ->
             add(
                 buildJsonObject {
@@ -153,28 +252,6 @@ class AiClient(private val settings: AiSettings) {
         }
     }
 
-    /** 返回 null 表示该组参数被 400 拒绝，调用方降级重试 */
-    private fun postForReply(body: String): AssistantReply? {
-        val request = Request.Builder()
-            .url("$baseUrl/chat/completions")
-            .header("Authorization", authHeader)
-            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-        client.newCall(request).execute().use { response ->
-            val bodyText = response.body?.string().orEmpty()
-            if (response.code == 400) {
-                val serverMessage = extractErrorMessage(bodyText)
-                if (serverMessage != null) return null
-                throw ApiException(mapError(400, bodyText))
-            }
-            if (!response.isSuccessful) throw ApiException(mapError(response.code, bodyText))
-            val content = json.decodeFromString<ChatResponse>(bodyText)
-                .choices.firstOrNull()?.message?.content
-                ?: throw ApiException("服务端没有返回内容")
-            return parseReply(content)
-        }
-    }
-
     suspend fun listModels(): Result<List<String>> = withContext(Dispatchers.IO) {
         guard {
             val request = Request.Builder()
@@ -184,7 +261,7 @@ class AiClient(private val settings: AiSettings) {
                 .build()
             client.newCall(request).execute().use { response ->
                 val bodyText = response.body?.string().orEmpty()
-                if (!response.isSuccessful) throw ApiException(mapError(response.code, bodyText))
+                if (!response.isSuccessful) throw ApiException(mapError(response.code, bodyText), response.code)
                 json.decodeFromString<ModelsResponse>(bodyText).data.map { it.id }.filter { it.isNotBlank() }
             }
         }
@@ -244,7 +321,8 @@ class AiClient(private val settings: AiSettings) {
             按问题类型组织回答：
             1. 快问快答（还要走多久、附近有没有吃的、该不该回）：answer 用 1-2 句话，必须包含具体数字（距离/时间/价格/排队分钟），steps 留空。
             2. 攻略与路线（怎么玩、怎么上去、有什么好玩的、值不值得去）：answer 给一句总述，steps 给 3-5 条要点，每条都要具体可执行并带数字（耗时、费用、距离、班次、发车时间），按先后顺序排列；上山路线要写清入口位置、方式（徒步/索道/车）、大致耗时和体力要求。
-            3. 不确定的数字绝不编造：优先使用搜索结果中的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。
+            3. 需要实时信息（附近地点、天气、去某地的路线）时，先调用工具查真实数据，再回答；绝不编造数字。
+            4. 不确定的数字绝不编造：优先使用搜索结果或工具返回的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。
             以 json 格式输出：{"answer": "一句话总结，不超过2句", "steps": ["要点1", "要点2", ...]，快问快答时为空数组, "action": "一句话的下一步动作建议，没有则为 null"}
         """.trimIndent()
     }

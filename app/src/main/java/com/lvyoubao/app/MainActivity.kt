@@ -24,6 +24,8 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.ui.ask.AskScreen
+import com.lvyoubao.app.ui.elder.ElderScreen
+import com.lvyoubao.app.ui.map.MapScreen
 import com.lvyoubao.app.ui.memory.MemoryScreen
 import com.lvyoubao.app.ui.observation.ObservationScreen
 import com.lvyoubao.app.ui.observation.ObservationViewModel
@@ -44,7 +46,11 @@ class MainActivity : ComponentActivity() {
                 // Surface 统一提供主题背景色和内容色（LocalContentColor）：
                 // 否则未显式指定颜色的标题/图标会用默认黑色，深色主题下不可读
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    AppRoot(app)
+                    if (appSettings.elderMode) {
+                        ElderScreen(app = app, onExit = {})
+                    } else {
+                        AppRoot(app)
+                    }
                 }
             }
         }
@@ -57,6 +63,7 @@ private fun AppRoot(app: TravelApp) {
     var showUpdate by remember { mutableStateOf(false) }
     var showObservation by remember { mutableStateOf(false) }
     var showMemory by remember { mutableStateOf(false) }
+    var showMap by remember { mutableStateOf(false) }
 
     val updateVm: UpdateViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
@@ -67,16 +74,18 @@ private fun AppRoot(app: TravelApp) {
     LaunchedEffect(Unit) { updateVm.autoCheck() }
 
     AnimatedContent(
-        targetState = showSettings to (showUpdate to (showObservation to showMemory)),
+        targetState = showSettings to (showUpdate to (showObservation to (showMemory to showMap))),
         transitionSpec = { fadeIn().togetherWith(fadeOut()) },
         label = "root",
     ) { (settings, updateStack) ->
         val (update, obsStack) = updateStack
-        val (observation, memory) = obsStack
+        val (observation, memStack) = obsStack
+        val (memory, map) = memStack
         when {
             update -> UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
             observation -> ObservationScreen(onClose = { showObservation = false }, app = app)
             memory -> MemoryScreen(onClose = { showMemory = false }, app = app)
+            map -> MapScreen(onClose = { showMap = false }, app = app)
             settings -> SettingsScreen(
                 onClose = { showSettings = false },
                 onOpenUpdate = { showUpdate = true },
@@ -89,6 +98,7 @@ private fun AppRoot(app: TravelApp) {
                 updateAvailable = updateState.release != null,
                 onUpdateClick = { showUpdate = true },
                 onOpenObservation = { showObservation = true },
+                onOpenMap = { showMap = true },
             )
         }
     }

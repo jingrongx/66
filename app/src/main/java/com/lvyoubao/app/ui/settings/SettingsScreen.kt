@@ -159,6 +159,16 @@ fun SettingsScreen(
                     },
                     shape = RoundedCornerShape(14.dp),
                 )
+                Spacer(Modifier.height(12.dp))
+                FieldLabel("高德 Key（可选，启用 POI 检索与步行路线）")
+                OutlinedTextField(
+                    value = state.draft.amapKey,
+                    onValueChange = { value -> vm.updateDraft { it.copy(amapKey = value.trim()) } },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("在 lbs.amap.com 免费申请") },
+                    shape = RoundedCornerShape(14.dp),
+                )
                 if (state.fetchedModels.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     FlowRow(
@@ -216,6 +226,29 @@ fun SettingsScreen(
                     },
                     onClick = { themeDialog = true },
                 )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("长辈模式", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "超大字体 · 语音优先 · 回答自动朗读",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.elderMode,
+                        onCheckedChange = { checked ->
+                            vm.updateDraft { it.copy(elderMode = checked) }
+                            vm.save(onSaved = {})
+                        },
+                    )
+                }
             }
         }
 

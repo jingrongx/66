@@ -245,9 +245,67 @@ fun ObservationScreen(onClose: () -> Unit, app: TravelApp) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        // ---------- 回测分析：越线时刻 vs 自报“我累了”的提前量 ----------
+        val backtest = remember(events) { computeBacktest(events) }
+        if (backtest.labels > 0) {
+            Spacer(Modifier.height(20.dp))
+            Text("回测分析", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        "你自报累了 ${backtest.labels} 次，其中 ${backtest.warned} 次在越线后 2 小时内收到过预警（覆盖率 ${backtest.coveragePct}%）",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (backtest.warned > 0) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "提前量：平均 ${backtest.avgLeadMin} 分钟 · 最短 ${backtest.minLeadMin} 分钟 · 最长 ${backtest.maxLeadMin} 分钟",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "目标：平均提前 15–30 分钟。长期偏低就把 FatigueEngine 的阈值调低或提高权重；频繁误报（覆盖率低）则收紧。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(40.dp))
     }
 }
+
+/** 回测：每次自报“我累了”之前，最近一次越线事件领先了多少分钟（2 小时窗口内算有效预警） */
+private fun computeBacktest(events: List<ObservationEvent>): BacktestResult {
+    val thresholds = events.filter { it.type == ObservationEvent.THRESHOLD }.sortedBy { it.ts }
+    val tiredLabels = events.filter { it.type == ObservationEvent.LABEL_TIRED }
+    val leads = tiredLabels.mapNotNull { label ->
+        thresholds.lastOrNull { it.ts <= label.ts && label.ts - it.ts <= WARN_WINDOW_MS }
+            ?.let { ((label.ts - it.ts) / 60000L).toInt() }
+    }
+    return BacktestResult(
+        labels = tiredLabels.size,
+        warned = leads.size,
+        coveragePct = if (tiredLabels.isEmpty()) 0 else leads.size * 100 / tiredLabels.size,
+        avgLeadMin = if (leads.isEmpty()) 0 else leads.sum() / leads.size,
+        minLeadMin = leads.minOrNull() ?: 0,
+        maxLeadMin = leads.maxOrNull() ?: 0,
+    )
+}
+
+private data class BacktestResult(
+    val labels: Int,
+    val warned: Int,
+    val coveragePct: Int,
+    val avgLeadMin: Int,
+    val minLeadMin: Int,
+    val maxLeadMin: Int,
+)
+
+private const val WARN_WINDOW_MS = 2 * 60 * 60 * 1000L
 
 @Composable
 private fun BandDot(band: FatigueBand) {

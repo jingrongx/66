@@ -24,6 +24,12 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Remind README sync
+        run: |
+          if git diff --name-only HEAD~1 HEAD | grep -q "^app/" && ! git diff --name-only HEAD~1 HEAD | grep -q "README.md"; then
+            echo "::warning::本次提交改了 app/ 但没有更新 README.md，请保持进度清单与架构说明同步"
+          fi
+
       - name: Restore signing keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}

@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.AiClient
 import com.lvyoubao.app.data.AiSettings
+import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.MemoryStore
 import com.lvyoubao.app.data.OutMessage
@@ -80,6 +81,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     fun setThinking(value: Boolean) = updateSettings { it.copy(thinking = value) }
 
     fun setSearchEnabled(value: Boolean) = updateSettings { it.copy(searchEnabled = value) }
+
+    fun setElderMode(value: Boolean) = updateSettings { it.copy(elderMode = value) }
 
     private fun updateSettings(transform: (AiSettings) -> AiSettings) {
         viewModelScope.launch { repo.save(transform(settings.value)) }
@@ -163,6 +166,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 messages = payload,
                 thinking = settingsValue.thinking,
                 searchEnabled = settingsValue.searchEnabled,
+                toolExecutor = { name, args -> AppTools.execute(context, settingsValue, name, args) },
             ).fold(
                 onSuccess = { reply ->
                     sessions.appendMessage(

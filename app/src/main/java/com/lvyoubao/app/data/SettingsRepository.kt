@@ -21,6 +21,8 @@ class SettingsRepository(private val context: Context) {
         val thinking = booleanPreferencesKey("thinking")
         val search = booleanPreferencesKey("search_enabled")
         val themeMode = stringPreferencesKey("theme_mode")
+        val amapKey = stringPreferencesKey("amap_key")
+        val elderMode = booleanPreferencesKey("elder_mode")
     }
 
     val settings: Flow<AiSettings> = context.dataStore.data.map { p ->
@@ -33,6 +35,8 @@ class SettingsRepository(private val context: Context) {
             thinking = p[Keys.thinking] ?: false,
             searchEnabled = p[Keys.search] ?: defaults.searchEnabled,
             themeMode = p[Keys.themeMode] ?: defaults.themeMode,
+            amapKey = p[Keys.amapKey] ?: "",
+            elderMode = p[Keys.elderMode] ?: false,
         )
     }
 
@@ -45,6 +49,8 @@ class SettingsRepository(private val context: Context) {
             p[Keys.thinking] = settings.thinking
             p[Keys.search] = settings.searchEnabled
             p[Keys.themeMode] = settings.themeMode
+            p[Keys.amapKey] = settings.amapKey
+            p[Keys.elderMode] = settings.elderMode
         }
     }
 

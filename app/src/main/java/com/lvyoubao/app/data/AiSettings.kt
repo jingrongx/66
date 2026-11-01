@@ -8,4 +8,6 @@ data class AiSettings(
     val thinking: Boolean = false,
     val searchEnabled: Boolean = true,
     val themeMode: String = "system",
+    val amapKey: String = "",
+    val elderMode: Boolean = false,
 )

@@ -41,7 +41,30 @@ data class ChatRequest(
 )
 
 @Serializable
-data class AssistantMessage(val content: String? = null)
+data class AssistantMessage(
+    val content: String? = null,
+    val tool_calls: List<ToolCall> = emptyList(),
+)
+
+@Serializable
+data class ToolCall(val id: String = "", val type: String = "function", val function: FunctionCall? = null)
+
+@Serializable
+data class FunctionCall(val name: String = "", val arguments: String = "{}")
+
+/** Function Calling 里的工具定义与工具结果消息 */
+@Serializable
+data class ToolFunction(val name: String, val description: String, val parameters: String)
+
+@Serializable
+data class ToolDefinition(val type: String, val function: ToolFunction)
+
+@Serializable
+data class ToolResultMessage(
+    val role: String = "tool",
+    val tool_call_id: String,
+    val content: String,
+)
 
 @Serializable
 data class ChatChoice(val message: AssistantMessage? = null)
