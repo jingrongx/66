@@ -1,6 +1,9 @@
 package com.lvyoubao.app.ui.ask
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,19 +29,26 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
@@ -47,16 +57,21 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,17 +79,25 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.data.ChatSession
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.observation.FatigueBand
 import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.ChatViewModel
+import com.lvyoubao.app.ui.common.TtsPlayer
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import kotlinx.coroutines.launch
 
 private val Suggestions = listOf(
     "附近有啥好吃的？",
@@ -87,7 +110,7 @@ private val Suggestions = listOf(
 @Composable
 fun AskScreen(
     onOpenSettings: () -> Unit,
-    onOpenSessions: () -> Unit,
+    onOpenMemory: () -> Unit,
     app: TravelApp,
     updateAvailable: Boolean = false,
     onUpdateClick: () -> Unit = {},
@@ -99,17 +122,19 @@ fun AskScreen(
     val state by vm.ui.collectAsState()
     val messages by vm.messages.collectAsState()
     val settings by vm.settings.collectAsState()
+    val sessionList by vm.sessionList.collectAsState()
+    val currentSessionId by vm.currentSessionId.collectAsState()
     val context = LocalContext.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
 
     var locationDismissed by remember { mutableStateOf(false) }
     var locationGranted by remember { mutableStateOf(LocationContext.hasPermission(context)) }
     val locationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        locationGranted = granted || LocationContext.hasPermission(context)
-    }
+    ) { granted -> locationGranted = granted || LocationContext.hasPermission(context) }
 
     // 相机拍照
     var pendingCameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
@@ -117,26 +142,49 @@ fun AskScreen(
         ActivityResultContracts.TakePicture(),
     ) { ok ->
         val uri = pendingCameraUri
-        if (ok && uri != null) {
-            ChatViewModel.readAttachment(context, uri)?.let { vm.addAttachment(it) }
-        }
+        if (ok && uri != null) ChatViewModel.readAttachment(context, uri)?.let { vm.addAttachment(it) }
     }
     val galleryLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
-    ) { uri ->
-        uri?.let { ChatViewModel.readAttachment(context, it)?.let { a -> vm.addAttachment(a) } }
-    }
+    ) { uri -> uri?.let { ChatViewModel.readAttachment(context, it)?.let { a -> vm.addAttachment(a) } } }
     val fileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
         uri?.let {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
-                    it,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    it, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
             }
             ChatViewModel.readAttachment(context, it)?.let { a -> vm.addAttachment(a) }
+        }
+    }
+
+    // 语音提问（创新：解放双手，走系统语音识别，无需权限声明）
+    val voiceLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val text = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!text.isNullOrBlank()) vm.updateQuestion(text)
+        }
+    }
+    fun startVoice() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "说出来，我帮你问")
+        }
+        runCatching { voiceLauncher.launch(intent) }
+            .onFailure { vm.setTransientError("此设备不支持语音识别") }
+    }
+
+    var searchQuery by remember { mutableStateOf("") }
+    val filteredSessions = remember(searchQuery, sessionList) {
+        if (searchQuery.isBlank()) sessionList else sessionList.filter { s ->
+            s.title.contains(searchQuery, true) || s.messages.any { it.text.contains(searchQuery, true) }
         }
     }
 
@@ -149,294 +197,489 @@ fun AskScreen(
 
     val isDeepSeek = settings.presetId == "deepseek"
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(horizontal = 20.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 状态点：未记录=空心灰；记录中绿/黄=描边；橙/红=实心
-            val sensingRunning by SensingBus.running.collectAsState()
-            val sensingBand by SensingBus.band.collectAsState()
-            Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .clip(CircleShape)
-                    .then(
-                        when {
-                            !sensingRunning -> Modifier.border(
-                                2.dp, MaterialTheme.colorScheme.outline, CircleShape,
-                            )
-                            sensingBand == FatigueBand.AMBER || sensingBand == FatigueBand.RED ->
-                                Modifier.background(Color(sensingBand.argb))
-                            else -> Modifier.border(2.dp, Color(sensingBand.argb), CircleShape)
-                        }
-                    )
-                    .clickable { onOpenObservation() },
-            )
-            Spacer(Modifier.width(10.dp))
-            Text("旅游宝", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(8.dp))
-            Text(
-                "零决策旅行助手",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = { vm.newSession() }) {
-                Icon(Icons.Default.Add, contentDescription = "新建会话")
-            }
-            IconButton(onClick = onOpenSessions) {
-                Icon(Icons.Default.List, contentDescription = "会话记录")
-            }
-            IconButton(onClick = onOpenSettings) {
-                Icon(Icons.Default.Settings, contentDescription = "设置")
-            }
-        }
-
-        if (updateAvailable) {
-            Spacer(Modifier.height(12.dp))
-            ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerContentColor = MaterialTheme.colorScheme.onSurface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp),
                 ) {
-                    Icon(
-                        Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text("发现新版本", style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onUpdateClick) { Text("去更新") }
-                }
-            }
-        }
-
-        if (!locationGranted && !locationDismissed) {
-            Spacer(Modifier.height(12.dp))
-            ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        Icons.Default.LocationOn,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        "开启定位后，回答自动带上你的位置",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(onClick = { locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) {
-                        Text("开启")
-                    }
-                    IconButton(onClick = { locationDismissed = true }, modifier = Modifier.size(24.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = "关闭提示", modifier = Modifier.size(14.dp))
-                    }
-                }
-            }
-        }
-
-        // 消息列表
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (messages.isEmpty()) {
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 64.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            vm.newSession { scope.launch { drawerState.close() } }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
                     ) {
-                        Text(
-                            "想去哪，问一句",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold,
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("新建会话")
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("搜索对话内容…") },
+                        shape = RoundedCornerShape(24.dp),
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Default.Close, contentDescription = "清空", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    var lastGroup = ""
+                    filteredSessions.forEach { session ->
+                        val group = groupLabel(session.updatedAt)
+                        if (group != lastGroup) {
+                            lastGroup = group
+                            Text(
+                                group,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 12.dp, bottom = 4.dp, start = 4.dp),
+                            )
+                        }
+                        SessionDrawerRow(
+                            session = session,
+                            selected = session.id == currentSessionId,
+                            onClick = {
+                                vm.switchSession(session.id) { scope.launch { drawerState.close() } }
+                            },
+                            onDelete = { vm.deleteSession(session.id) },
                         )
-                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (filteredSessions.isEmpty()) {
                         Text(
-                            "答得短，带数字，能照做。",
-                            style = MaterialTheme.typography.bodyMedium,
+                            if (searchQuery.isBlank()) "还没有会话" else "没有匹配的会话",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp),
                         )
-                        Spacer(Modifier.height(28.dp))
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Suggestions.forEach { suggestion ->
-                                AssistChip(
-                                    onClick = { vm.updateQuestion(suggestion); vm.send(context) },
-                                    label = { Text(suggestion) },
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider()
+                    DrawerEntry("我的记忆（收藏的证据）") { onOpenMemory() }
+                    DrawerEntry("感知日志（疲劳观测）") { onOpenObservation() }
+                    DrawerEntry("设置") { onOpenSettings() }
+                    Spacer(Modifier.height(24.dp))
+                }
+            }
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(horizontal = 16.dp),
+        ) {
+            // 顶栏：抽屉 | 状态点 | 新建 | 设置
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                    Icon(Icons.Default.Menu, contentDescription = "会话列表")
+                }
+                Spacer(Modifier.weight(1f))
+                val sensingRunning by SensingBus.running.collectAsState()
+                val sensingBand by SensingBus.band.collectAsState()
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .then(
+                            when {
+                                !sensingRunning -> Modifier.border(
+                                    2.dp, MaterialTheme.colorScheme.outline, CircleShape,
                                 )
+                                sensingBand == FatigueBand.AMBER || sensingBand == FatigueBand.RED ->
+                                    Modifier.background(Color(sensingBand.argb))
+                                else -> Modifier.border(2.dp, Color(sensingBand.argb), CircleShape)
+                            }
+                        )
+                        .clickable { onOpenObservation() },
+                )
+                Spacer(Modifier.width(6.dp))
+                IconButton(onClick = { vm.newSession() }) {
+                    Icon(Icons.Default.Add, contentDescription = "新建会话")
+                }
+                IconButton(onClick = onOpenSettings) {
+                    Icon(Icons.Default.Settings, contentDescription = "设置")
+                }
+            }
+
+            if (updateAvailable) {
+                Spacer(Modifier.height(8.dp))
+                ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("发现新版本", style = MaterialTheme.typography.bodyMedium)
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = onUpdateClick) { Text("去更新") }
+                    }
+                }
+            }
+
+            if (!locationGranted && !locationDismissed) {
+                Spacer(Modifier.height(8.dp))
+                ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "开启定位后，回答自动带上你的位置",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) {
+                            Text("开启")
+                        }
+                        IconButton(onClick = { locationDismissed = true }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "关闭提示", modifier = Modifier.size(14.dp))
+                        }
+                    }
+                }
+            }
+
+            // 消息区 / 欢迎区
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (messages.isEmpty()) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 72.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(MaterialTheme.colorScheme.primary),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Default.LocationOn,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(32.dp),
+                                )
+                            }
+                            Spacer(Modifier.height(20.dp))
+                            Text(
+                                greeting(),
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "答得短，带数字，能照做。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(28.dp))
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Suggestions.forEach { suggestion ->
+                                    AssistChip(
+                                        onClick = {
+                                            vm.updateQuestion(suggestion)
+                                            vm.send(context)
+                                        },
+                                        label = { Text(suggestion) },
+                                    )
+                                }
                             }
                         }
                     }
                 }
-            }
-            items(messages) { message ->
-                when (message.role) {
-                    "user" -> UserBubble(message)
-                    else -> AssistantCard(message, onSaveMemory = { vm.saveToMemory(message) })
+                items(messages) { message ->
+                    when (message.role) {
+                        "user" -> UserBubble(message)
+                        else -> AssistantCard(message, onSaveMemory = { vm.saveToMemory(message) })
+                    }
                 }
-            }
-            if (state.sending) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
+                if (state.sending) {
+                    item {
                         LinearProgressIndicator(
                             modifier = Modifier
                                 .fillMaxWidth(0.6f)
                                 .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp)),
+                                .clip(RoundedCornerShape(2.dp))
+                                .padding(horizontal = 64.dp),
                         )
                     }
                 }
             }
-        }
 
-        state.error?.let { error ->
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.Warning,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    error,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.weight(1f),
-                )
+            state.error?.let { error ->
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
-        }
 
-        // 附件与输入区
-        if (state.attachments.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                state.attachments.forEach { a ->
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+            // 已选附件
+            if (state.attachments.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    state.attachments.forEach { a ->
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
                         ) {
-                            Text(
-                                (if (a.isImage) "🖼 " else "📄 ") + a.name.take(16),
-                                style = MaterialTheme.typography.labelMedium,
-                            )
-                            IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Default.Close, contentDescription = "移除", modifier = Modifier.size(14.dp))
+                            Row(
+                                modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    (if (a.isImage) "🖼 " else "📄 ") + a.name.take(16),
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                                IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(24.dp)) {
+                                    Icon(Icons.Default.Close, contentDescription = "移除", modifier = Modifier.size(14.dp))
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            AssistChip(
-                onClick = {
-                    val uri = newCameraImageUri(context)
-                    pendingCameraUri = uri
-                    cameraLauncher.launch(uri)
-                },
-                label = { Text("拍照") },
-            )
-            AssistChip(
-                onClick = {
-                    galleryLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                },
-                label = { Text("相册") },
-            )
-            AssistChip(
-                onClick = { fileLauncher.launch(arrayOf("*/*")) },
-                label = { Text("文件") },
-            )
-            Spacer(Modifier.weight(1f))
-            if (isDeepSeek) {
-                FilterChip(
-                    selected = settings.thinking,
-                    onClick = { vm.setThinking(!settings.thinking) },
-                    label = { Text("深度思考") },
-                )
-                FilterChip(
-                    selected = settings.searchEnabled,
-                    onClick = { vm.setSearchEnabled(!settings.searchEnabled) },
-                    label = { Text("联网搜索") },
-                )
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp, bottom = 16.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            OutlinedTextField(
-                value = state.question,
-                onValueChange = vm::updateQuestion,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("问一句…") },
-                shape = RoundedCornerShape(26.dp),
-                maxLines = 3,
-                keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                    onSend = {
-                        keyboard?.hide()
-                        vm.send(context)
-                    },
+            // 底部合并输入卡（参考官方样式）：输入 + 开关 + 附件 + 语音
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 12.dp),
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
                 ),
-            )
-            Spacer(Modifier.width(10.dp))
-            FilledIconButton(
-                onClick = {
-                    keyboard?.hide()
-                    vm.send(context)
-                },
-                enabled = (state.question.isNotBlank() || state.attachments.isNotEmpty()) && !state.sending,
-                modifier = Modifier.size(56.dp),
             ) {
-                Icon(Icons.Default.Send, contentDescription = "发送")
+                Column(Modifier.padding(horizontal = 12.dp)) {
+                    OutlinedTextField(
+                        value = state.question,
+                        onValueChange = vm::updateQuestion,
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("发消息，或说说你想去哪…") },
+                        maxLines = 4,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = {
+                            keyboard?.hide()
+                            vm.send(context)
+                        }),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            disabledIndicatorColor = Color.Transparent,
+                        ),
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 4.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        FilterChip(
+                            selected = settings.thinking,
+                            onClick = { vm.setThinking(!settings.thinking) },
+                            label = { Text("深度思考") },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        FilterChip(
+                            selected = settings.searchEnabled,
+                            onClick = { vm.setSearchEnabled(!settings.searchEnabled) },
+                            label = { Text("联网搜索") },
+                        )
+                        Spacer(Modifier.weight(1f))
+                        var menuOpen by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { menuOpen = true }) {
+                                Icon(Icons.Default.Add, contentDescription = "添加附件")
+                            }
+                            androidx.compose.material3.DropdownMenu(
+                                expanded = menuOpen,
+                                onDismissRequest = { menuOpen = false },
+                            ) {
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text("拍照") },
+                                    onClick = {
+                                        menuOpen = false
+                                        val uri = newCameraImageUri(context)
+                                        pendingCameraUri = uri
+                                        cameraLauncher.launch(uri)
+                                    },
+                                )
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text("相册") },
+                                    onClick = {
+                                        menuOpen = false
+                                        galleryLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                        )
+                                    },
+                                )
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text("文件") },
+                                    onClick = {
+                                        menuOpen = false
+                                        fileLauncher.launch(arrayOf("*/*"))
+                                    },
+                                )
+                            }
+                        }
+                        IconButton(onClick = { startVoice() }) {
+                            Text("🎤", fontSize = 18.sp)
+                        }
+                    }
+                }
             }
+        }
+    }
+}
+
+private fun greeting(): String {
+    val hour = java.time.LocalTime.now().hour
+    return when (hour) {
+        in 5..10 -> "早上好，今天去哪玩？"
+        in 11..13 -> "中午好，想吃点啥？"
+        in 14..17 -> "下午好，慢慢逛。"
+        in 18..22 -> "晚上好，聊聊明天的行程？"
+        else -> "夜深了，早点休息。"
+    }
+}
+
+private fun groupLabel(ts: Long): String {
+    val date = Instant.ofEpochMilli(ts).atZone(ZoneId.systemDefault()).toLocalDate()
+    val today = LocalDate.now()
+    return when {
+        date == today -> "今天"
+        date == today.minusDays(1) -> "昨天"
+        date.isAfter(today.minusDays(7)) -> "近 7 天"
+        else -> "更早"
+    }
+}
+
+@Composable
+private fun DrawerEntry(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.weight(1f))
+        Icon(
+            Icons.Default.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+@Composable
+private fun SessionDrawerRow(
+    session: ChatSession,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (selected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                else Color.Transparent,
+            )
+            .clickable { onClick() }
+            .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                session.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                session.messages.lastOrNull()?.text?.take(30) ?: "（空会话）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = "删除",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
         }
     }
 }
@@ -463,6 +706,8 @@ private fun UserBubble(message: SessionMessage) {
 
 @Composable
 private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
+    val context = LocalContext.current
+    var speaking by remember { mutableStateOf(false) }
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.padding(20.dp)) {
             Text(
@@ -534,6 +779,16 @@ private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
             )
         }
         Spacer(Modifier.weight(1f))
+        TextButton(onClick = {
+            speaking = TtsPlayer.toggle(
+                context,
+                buildString {
+                    append(message.text)
+                    message.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
+                    message.action?.let { append("。建议：$it") }
+                },
+            )
+        }) { Text(if (speaking) "停止" else "朗读") }
         TextButton(onClick = onSaveMemory) { Text("收藏") }
     }
 }

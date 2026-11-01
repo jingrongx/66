@@ -13,16 +13,32 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.4.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            // CI 注入正式签名（GitHub Secrets）；本地/无密钥环境回退 debug 签名
+            val ksFile = System.getenv("KEYSTORE_FILE")
+            if (!ksFile.isNullOrBlank()) {
+                storeFile = file(ksFile)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // 发版阶段先用 debug 签名保证 APK 可安装；接入正式签名后替换
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (!System.getenv("KEYSTORE_FILE").isNullOrBlank()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

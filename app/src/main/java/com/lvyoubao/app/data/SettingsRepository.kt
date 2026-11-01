@@ -20,6 +20,7 @@ class SettingsRepository(private val context: Context) {
         val model = stringPreferencesKey("model")
         val thinking = booleanPreferencesKey("thinking")
         val search = booleanPreferencesKey("search_enabled")
+        val themeMode = stringPreferencesKey("theme_mode")
     }
 
     val settings: Flow<AiSettings> = context.dataStore.data.map { p ->
@@ -31,6 +32,7 @@ class SettingsRepository(private val context: Context) {
             model = p[Keys.model] ?: defaults.model,
             thinking = p[Keys.thinking] ?: false,
             searchEnabled = p[Keys.search] ?: defaults.searchEnabled,
+            themeMode = p[Keys.themeMode] ?: defaults.themeMode,
         )
     }
 
@@ -42,6 +44,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.model] = settings.model
             p[Keys.thinking] = settings.thinking
             p[Keys.search] = settings.searchEnabled
+            p[Keys.themeMode] = settings.themeMode
         }
     }
 

@@ -68,6 +68,9 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     fun updateQuestion(value: String) = _ui.update { it.copy(question = value) }
 
+    /** 语音识别不支持等瞬时提示，走统一 error 条展示 */
+    fun setTransientError(message: String) = _ui.update { it.copy(error = message) }
+
     fun addAttachment(attachment: PendingAttachment) =
         _ui.update { it.copy(attachments = it.attachments + attachment) }
 

@@ -8,6 +8,8 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -15,15 +17,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.ui.ask.AskScreen
 import com.lvyoubao.app.ui.memory.MemoryScreen
 import com.lvyoubao.app.ui.observation.ObservationScreen
 import com.lvyoubao.app.ui.observation.ObservationViewModel
-import com.lvyoubao.app.ui.sessions.SessionListScreen
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import com.lvyoubao.app.ui.theme.LvyoubaoTheme
 import com.lvyoubao.app.ui.update.UpdateScreen
@@ -34,20 +37,25 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            LvyoubaoTheme {
-                AppRoot()
+            val app = LocalContext.current.applicationContext as TravelApp
+            val appSettings by app.settingsRepository.settings
+                .collectAsState(initial = AiSettings())
+            LvyoubaoTheme(themeMode = appSettings.themeMode) {
+                // Surface 统一提供主题背景色和内容色（LocalContentColor）：
+                // 否则未显式指定颜色的标题/图标会用默认黑色，深色主题下不可读
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    AppRoot(app)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AppRoot() {
-    val app = LocalContext.current.applicationContext as TravelApp
+private fun AppRoot(app: TravelApp) {
     var showSettings by remember { mutableStateOf(false) }
     var showUpdate by remember { mutableStateOf(false) }
     var showObservation by remember { mutableStateOf(false) }
-    var showSessions by remember { mutableStateOf(false) }
     var showMemory by remember { mutableStateOf(false) }
 
     val updateVm: UpdateViewModel = viewModel(
@@ -59,22 +67,16 @@ private fun AppRoot() {
     LaunchedEffect(Unit) { updateVm.autoCheck() }
 
     AnimatedContent(
-        targetState = showSettings to (showUpdate to (showObservation to (showSessions to showMemory))),
+        targetState = showSettings to (showUpdate to (showObservation to showMemory)),
         transitionSpec = { fadeIn().togetherWith(fadeOut()) },
         label = "root",
     ) { (settings, updateStack) ->
         val (update, obsStack) = updateStack
-        val (observation, sessionStack) = obsStack
-        val (sessions, memory) = sessionStack
+        val (observation, memory) = obsStack
         when {
             update -> UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
             observation -> ObservationScreen(onClose = { showObservation = false }, app = app)
             memory -> MemoryScreen(onClose = { showMemory = false }, app = app)
-            sessions -> SessionListScreen(
-                onClose = { showSessions = false },
-                onOpenMemory = { showMemory = true },
-                app = app,
-            )
             settings -> SettingsScreen(
                 onClose = { showSettings = false },
                 onOpenUpdate = { showUpdate = true },
@@ -82,7 +84,7 @@ private fun AppRoot() {
             )
             else -> AskScreen(
                 onOpenSettings = { showSettings = true },
-                onOpenSessions = { showSessions = true },
+                onOpenMemory = { showMemory = true },
                 app = app,
                 updateAvailable = updateState.release != null,
                 onUpdateClick = { showUpdate = true },
