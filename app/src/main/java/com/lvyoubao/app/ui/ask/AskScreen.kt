@@ -525,10 +525,10 @@ fun AskScreen(
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedContainerColor = Color.Transparent,
                             unfocusedContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
+                            focusedBorderColor = Color.Transparent,
+                            unfocusedBorderColor = Color.Transparent,
                             disabledContainerColor = Color.Transparent,
-                            disabledIndicatorColor = Color.Transparent,
+                            disabledBorderColor = Color.Transparent,
                         ),
                     )
                     Row(
