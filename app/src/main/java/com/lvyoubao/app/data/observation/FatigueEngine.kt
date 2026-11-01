@@ -79,7 +79,7 @@ class FatigueEngine(private val baselineSteps: Int = 10_000) {
                 when {
                     // 只累计明显上升；小幅波动保持参考点不动，防 GPS 高程漂移
                     delta > 2f -> {
-                        climbM += delta
+                        climbM += delta.toFloat()
                         lastAlt = alt
                     }
                     // 明显下降时重置参考点，避免漂移持续累计
