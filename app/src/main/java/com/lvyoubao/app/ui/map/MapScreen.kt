@@ -140,18 +140,18 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
         if (map != null && map.exists()) {
             var routeOverlay by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
             var drawnPoints by remember { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
-            val mapViewFactory: (android.content.Context) -> com.mapsforge.map.android.view.MapView =
+            val mapViewFactory: (android.content.Context) -> org.mapsforge.map.android.view.MapView =
                 { ctx -> buildMapView(ctx, map) }
             key(map.absolutePath) {
-                AndroidView<com.mapsforge.map.android.view.MapView>(
+                AndroidView<org.mapsforge.map.android.view.MapView>(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(16.dp)),
                     factory = mapViewFactory,
-                    onReset = { mapView: com.mapsforge.map.android.view.MapView -> mapView.destroyAll() },
-                    onRelease = { mapView: com.mapsforge.map.android.view.MapView -> mapView.destroyAll() },
-                    update = { mapView: com.mapsforge.map.android.view.MapView ->
+                    onReset = { mapView: org.mapsforge.map.android.view.MapView -> mapView.destroyAll() },
+                    onRelease = { mapView: org.mapsforge.map.android.view.MapView -> mapView.destroyAll() },
+                    update = { mapView: org.mapsforge.map.android.view.MapView ->
                         if (state.routePoints != drawnPoints) {
                             routeOverlay?.let { overlay ->
                                 runCatching { mapView.layerManager.layers.remove(overlay) }
@@ -259,14 +259,14 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
 }
 
 /** 构建 mapsforge 地图视图：离线底图 + 当前位置标记 */
-private fun buildMapView(context: android.content.Context, mapFile: File): com.mapsforge.map.android.view.MapView {
+private fun buildMapView(context: android.content.Context, mapFile: File): org.mapsforge.map.android.view.MapView {
     if (!graphicsFactoryReady) {
-        com.mapsforge.map.android.graphics.AndroidGraphicFactory.createInstance(context.applicationContext)
+        org.mapsforge.map.android.graphics.AndroidGraphicFactory.createInstance(context.applicationContext)
         graphicsFactoryReady = true
     }
-    val mapView = com.mapsforge.map.android.view.MapView(context)
+    val mapView = org.mapsforge.map.android.view.MapView(context)
     mapView.isClickable = true
-    val tileCache = com.mapsforge.map.android.util.AndroidUtil.createTileCache(
+    val tileCache = org.mapsforge.map.android.util.AndroidUtil.createTileCache(
         context,
         "lvyoubao-map",
         mapView.model.displayModel.tileSize,
@@ -281,7 +281,7 @@ private fun buildMapView(context: android.content.Context, mapFile: File): com.m
         false,
         true,
         false,
-        com.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE,
+        org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE,
     )
     rendererLayer.setXmlRenderTheme(org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT)
     mapView.layerManager.layers.add(rendererLayer)
@@ -290,7 +290,7 @@ private fun buildMapView(context: android.content.Context, mapFile: File): com.m
     LocationContext.current(context)?.let { place ->
         val drawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_launcher_foreground)
         if (drawable != null) {
-            val bitmap = com.mapsforge.map.android.graphics.AndroidGraphicFactory.convertToBitmap(drawable)
+            val bitmap = org.mapsforge.map.android.graphics.AndroidGraphicFactory.convertToBitmap(drawable)
             val marker = org.mapsforge.map.layer.overlay.Marker(
                 org.mapsforge.core.model.LatLong(place.lat, place.lon),
                 bitmap,
@@ -307,16 +307,16 @@ private fun buildMapView(context: android.content.Context, mapFile: File): com.m
 
 /** 在地图上追加路线折线（由 [MapScreen] 的 update 阶段调用），返回折线引用便于替换 */
 private fun drawRoute(
-    mapView: com.mapsforge.map.android.view.MapView,
+    mapView: org.mapsforge.map.android.view.MapView,
     points: List<Pair<Double, Double>>,
 ): org.mapsforge.map.layer.overlay.Polyline? {
     if (points.size < 2) return null
-    val paint = com.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE.createPaint()
+    val paint = org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE.createPaint()
     paint.setColor(android.graphics.Color.argb(230, 13, 115, 133))
     paint.setStrokeWidth(14f)
     val polyline = org.mapsforge.map.layer.overlay.Polyline(
         paint,
-        com.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE,
+        org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE,
     )
     points.forEach { (lon, lat) -> polyline.addPoint(org.mapsforge.core.model.LatLong(lat, lon)) }
     mapView.layerManager.layers.add(polyline)
