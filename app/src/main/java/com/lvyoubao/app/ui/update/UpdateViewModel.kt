@@ -122,8 +122,8 @@ class UpdateViewModel(app: TravelApp) : ViewModel() {
         val intent = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, "application/vnd.android.package-archive")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        runCatching { context.startActivity(intent) }.onFailure {
-            _ui.update { it.copy(error = "无法启动安装：${it.message ?: "未知原因"}") }
+        runCatching { context.startActivity(intent) }.onFailure { e ->
+            _ui.update { state -> state.copy(error = "无法启动安装：${e.message ?: "未知原因"}") }
         }
     }
 }
