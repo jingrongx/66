@@ -1,5 +1,6 @@
 package com.lvyoubao.app.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -20,6 +21,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -55,7 +57,7 @@ import com.lvyoubao.app.ui.SettingsViewModel
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(onClose: () -> Unit, app: TravelApp) {
+fun SettingsScreen(onClose: () -> Unit, onOpenUpdate: () -> Unit, app: TravelApp) {
     val vm: SettingsViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { SettingsViewModel(app) } } },
     )
@@ -218,7 +220,31 @@ fun SettingsScreen(onClose: () -> Unit, app: TravelApp) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(40.dp))
+
+        Spacer(Modifier.height(24.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenUpdate() }
+                .padding(vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("应用更新", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "检查并下载安装新版本",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                Icons.Default.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 

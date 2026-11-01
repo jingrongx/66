@@ -69,7 +69,12 @@ private val Suggestions = listOf(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun AskScreen(onOpenSettings: () -> Unit, app: TravelApp) {
+fun AskScreen(
+    onOpenSettings: () -> Unit,
+    app: TravelApp,
+    updateAvailable: Boolean = false,
+    onUpdateClick: () -> Unit = {},
+) {
     val vm: AskViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { AskViewModel(app) } } },
     )
@@ -105,6 +110,27 @@ fun AskScreen(onOpenSettings: () -> Unit, app: TravelApp) {
             Spacer(Modifier.weight(1f))
             IconButton(onClick = onOpenSettings) {
                 Icon(Icons.Default.Settings, contentDescription = "设置")
+            }
+        }
+
+        if (updateAvailable) {
+            Spacer(Modifier.height(12.dp))
+            ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text("发现新版本", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onUpdateClick) { Text("去更新") }
+                }
             }
         }
 

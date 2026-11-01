@@ -9,6 +9,7 @@
 - ✅ AI 接口层：OpenAI 兼容协议，**默认 DeepSeek**（当前模型 `deepseek-flash` / `deepseek-v4-pro`，已按官方文档核实），支持智谱 GLM、Kimi、通义千问与自定义 OpenAI 兼容端点
 - ✅ 规则校验层：AI 输出必须满足"≤2 句、含数字"，违例标记降级——规则层对模型有一票否决权
 - ✅ 现代化界面：Jetpack Compose + Material 3，动态取色，单卡交互（回答 + 一个动作 + ［就这么走］）
+- ✅ 应用内更新：启动静默检查 + 设置里的「应用更新」页手动检查/下载/安装；下载国内代理优先（gh-proxy.com → ghfast.top → 直连，自动换线）
 - ✅ 提交代码即自动发版：push 到 main 触发 GitHub Actions 构建 APK 并发布 Release
 - ⬜ 疲劳积分（被动感知 → 三级降级）——Phase 0 核心，先做"只记录不干预"的观测版
 - ⬜ mapsforge 离线地图 + BRouter 高程路由
@@ -37,6 +38,13 @@ DeepSeek API Key 在 [platform.deepseek.com](https://platform.deepseek.com/api_k
 
 - 发版 APK 当前用 debug 签名（保证可安装）；接入正式签名后替换 `app/build.gradle.kts` 中的 signingConfig
 - 发新版本时修改 `app/build.gradle.kts` 里的 `versionName`，tag 会自动跟着变
+
+## 应用内更新
+
+启动时静默检查 GitHub Releases（有新版本才在主页出「发现新版本」单卡，失败不打扰）；「设置 → 应用更新」里可手动检查、查看更新日志、带进度下载并调起安装（首次需允许「安装未知应用」）。
+
+- 检查/下载国内代理优先：`gh-proxy.com` → `ghfast.top` → 直连，任一线路成功即用，代理列表在 `data/UpdateChecker.kt`
+- **前提：仓库需为公开**（匿名可读 Release）；私有仓库时应用内检查会提示"找不到更新信息"
 
 ## 架构
 

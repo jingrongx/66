@@ -9,14 +9,21 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.ui.ask.AskScreen
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import com.lvyoubao.app.ui.theme.LvyoubaoTheme
+import com.lvyoubao.app.ui.update.UpdateScreen
+import com.lvyoubao.app.ui.update.UpdateViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -34,16 +41,34 @@ class MainActivity : ComponentActivity() {
 private fun AppRoot() {
     val app = LocalContext.current.applicationContext as TravelApp
     var showSettings by remember { mutableStateOf(false) }
+    var showUpdate by remember { mutableStateOf(false) }
+
+    val updateVm: UpdateViewModel = viewModel(
+        factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
+    )
+    val updateState by updateVm.ui.collectAsState()
+
+    // 启动静默检查更新：发现新版本才在主页出提示，失败不打扰
+    LaunchedEffect(Unit) { updateVm.autoCheck() }
 
     AnimatedContent(
-        targetState = showSettings,
+        targetState = Triple(showSettings, showUpdate, updateState.release != null),
         transitionSpec = { fadeIn().togetherWith(fadeOut()) },
         label = "root",
-    ) { settingsVisible ->
-        if (settingsVisible) {
-            SettingsScreen(onClose = { showSettings = false }, app = app)
-        } else {
-            AskScreen(onOpenSettings = { showSettings = true }, app = app)
+    ) { (settings, update, _) ->
+        when {
+            update -> UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
+            settings -> SettingsScreen(
+                onClose = { showSettings = false },
+                onOpenUpdate = { showUpdate = true },
+                app = app,
+            )
+            else -> AskScreen(
+                onOpenSettings = { showSettings = true },
+                app = app,
+                updateAvailable = updateState.release != null,
+                onUpdateClick = { showUpdate = true },
+            )
         }
     }
 }
