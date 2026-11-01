@@ -73,9 +73,10 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
-    // 离线矢量地图（开源 OSM 生态，推演方案选型）
-    implementation("org.mapsforge:mapsforge-map-android:0.21.0")
-    implementation("org.mapsforge:mapsforge-themes:0.21.0")
+    // 离线矢量地图（开源 OSM 生态，推演方案选型）——mapsforge 0.21.0 的 Maven 变体解析
+    // 在 AGP 消费端不可靠（依赖图可见但字节码不可见），改为 vendor jar 保证确定性
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
+    implementation("com.caverock:androidsvg:1.4")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
