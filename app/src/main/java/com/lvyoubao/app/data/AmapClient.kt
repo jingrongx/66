@@ -1,5 +1,6 @@
 package com.lvyoubao.app.data
 
+import com.lvyoubao.app.data.observation.FatigueEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -104,12 +105,12 @@ class AmapClient(private val key: String) {
     companion object {
         /** 解析 GPX 轨迹（BRouter 返回），同时算累计爬升 */
         fun parseGpx(gpx: String): RouteResult {
-            val points = Regex("<trkpt[^>]*lat=\"([-\d.]+)\"[^>]*lon=\"([-\d.]+)\"[^>]*>(.*?)</trkpt>", RegexOption.DOT_MATCHES_ALL)
+            val points = Regex("<trkpt[^>]*lat=\"(-?[\\d.]+)\"[^>]*lon=\"(-?[\\d.]+)\"[^>]*>(.*?)</trkpt>", RegexOption.DOT_MATCHES_ALL)
                 .findAll(gpx)
                 .mapNotNull { m ->
                     val lat = m.groupValues[1].toDoubleOrNull() ?: return@mapNotNull null
                     val lon = m.groupValues[2].toDoubleOrNull() ?: return@mapNotNull null
-                    val ele = Regex("<ele>([-\d.]+)</ele>").find(m.groupValues[3])?.groupValues?.get(1)?.toDoubleOrNull()
+                    val ele = Regex("<ele>(-?[\\d.]+)</ele>").find(m.groupValues[3])?.groupValues?.get(1)?.toDoubleOrNull()
                     Triple(lat, lon, ele)
                 }
                 .toList()

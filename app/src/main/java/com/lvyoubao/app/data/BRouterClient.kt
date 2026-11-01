@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.isActive
 
 /**
  * BRouter 联动（离线高程路由）：通过 AIDL 调用用户已安装的 BRouter 应用。
@@ -61,8 +62,11 @@ object BRouterClient {
                             putString("engineMode", "2") // 含高程
                         }
                         val gpx = router.getTrackFromParams(params)
-                        if (gpx.isNullOrBlank()) finish(Result.failure(ApiException("BRouter 没有给出路线")))
-                        else finish(Result.success(gpx))
+                        if (gpx.isNullOrBlank()) {
+                            finish(Result.failure<String>(ApiException("BRouter 没有给出路线")))
+                        } else {
+                            finish(Result.success(gpx))
+                        }
                     } catch (e: Exception) {
                         finish(Result.failure(ApiException("BRouter 调用失败：${e.message}")))
                     } finally {
