@@ -60,18 +60,54 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
     )
     val state by vm.ui.collectAsState()
     val messages by vm.messages.collectAsState()
+    val settings by vm.settings.collectAsState()
     val context = LocalContext.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val scope = rememberCoroutineScope()
     var typing by remember { mutableStateOf(false) }
     var spokenTs by remember { mutableStateOf(0L) }
     var listening by remember { mutableStateOf(false) }
+    var recording by remember { mutableStateOf<SpeechInput.Recording?>(null) }
+
+    fun beginCloudRecord() {
+        SpeechInput.startRecording(context)
+            .onSuccess { recording = it }
+            .onFailure { vm.setTransientError("录音启动失败，请再试一次") }
+    }
+
+    val recordPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) beginCloudRecord() else vm.setTransientError("没有录音权限，无法把语音转成文字")
+    }
 
     fun startVoice() {
-        if (listening || state.sending) return
+        if (listening || recording != null || state.sending) return
+        if (SpeechInput.isAvailable(context)) {
+            listening = true
+            scope.launch {
+                SpeechInput.listen(context, "请说话")
+                    .onSuccess { spoken ->
+                        vm.updateQuestion(spoken)
+                        vm.send(context)
+                    }
+                    .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
+                listening = false
+            }
+        } else if (settings.asrKey.isNotBlank()) {
+            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
+            else recordPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        } else {
+            vm.setTransientError("这台手机没有语音识别。可让家人在设置里填「语音识别 Key」（免费），或点下面的「打字提问」")
+        }
+    }
+
+    fun stopVoice() {
+        val rec = recording ?: return
+        recording = null
         listening = true
         scope.launch {
-            SpeechInput.listen(context, "请说话")
+            SpeechInput.stopAndTranscribe(rec, settings.asrKey)
                 .onSuccess { spoken ->
                     vm.updateQuestion(spoken)
                     vm.send(context)
@@ -79,6 +115,10 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                 .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
             listening = false
         }
+    }
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { recording?.let { SpeechInput.cancelRecording(it) } }
     }
 
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
@@ -127,25 +167,25 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
         }
         Spacer(Modifier.height(24.dp))
 
-        // 巨大语音按钮
+        // 巨大语音按钮（录音中再点一下即停止并转文字）
         Box(contentAlignment = Alignment.Center) {
             if (state.sending) {
                 CircularProgressIndicator(Modifier.size(150.dp))
             }
             FilledIconButton(
-                onClick = { startVoice() },
-                enabled = !state.sending,
+                onClick = { if (recording != null) stopVoice() else startVoice() },
+                enabled = !state.sending && !listening,
                 modifier = Modifier.size(150.dp),
                 shape = RoundedCornerShape(75.dp),
             ) {
-                Text("🎤", fontSize = 56.sp)
+                Text(if (recording != null) "⏹" else "🎤", fontSize = 56.sp)
             }
         }
         Spacer(Modifier.height(16.dp))
         Text(
             when {
-                listening -> "正在听你说…"
-                state.sending -> "正在帮你问…"
+                listening -> "正在帮你问…"
+                recording != null -> "正在听你说，说完再点一下"
                 else -> "点一下，说话就行"
             },
             fontSize = 26.sp,

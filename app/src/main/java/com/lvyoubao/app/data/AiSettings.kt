@@ -9,5 +9,6 @@ data class AiSettings(
     val searchEnabled: Boolean = true,
     val themeMode: String = "system",
     val amapKey: String = "",
+    val asrKey: String = "",
     val elderMode: Boolean = false,
 )

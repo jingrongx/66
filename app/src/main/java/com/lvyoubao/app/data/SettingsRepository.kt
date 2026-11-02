@@ -22,6 +22,7 @@ class SettingsRepository(private val context: Context) {
         val search = booleanPreferencesKey("search_enabled")
         val themeMode = stringPreferencesKey("theme_mode")
         val amapKey = stringPreferencesKey("amap_key")
+        val asrKey = stringPreferencesKey("asr_key")
         val elderMode = booleanPreferencesKey("elder_mode")
     }
 
@@ -36,6 +37,7 @@ class SettingsRepository(private val context: Context) {
             searchEnabled = p[Keys.search] ?: defaults.searchEnabled,
             themeMode = p[Keys.themeMode] ?: defaults.themeMode,
             amapKey = p[Keys.amapKey] ?: "",
+            asrKey = p[Keys.asrKey] ?: "",
             elderMode = p[Keys.elderMode] ?: false,
         )
     }
@@ -50,6 +52,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.search] = settings.searchEnabled
             p[Keys.themeMode] = settings.themeMode
             p[Keys.amapKey] = settings.amapKey
+            p[Keys.asrKey] = settings.asrKey
             p[Keys.elderMode] = settings.elderMode
         }
     }

@@ -1,28 +1,58 @@
 package com.lvyoubao.app.ui.common
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import androidx.core.content.ContextCompat
+import java.io.File
 import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
+import java.util.concurrent.TimeUnit
 
 /**
- * 语音输入统一入口：优先用应用内 [SpeechRecognizer]（兼容国产 ROM 自带识别服务、错误可见）。
- * 识别失败一定回调失败原因，绝不静默。挂在主线程调用即可（回调在主线程）。
+ * 语音输入统一入口：
+ * 1. 优先系统 [SpeechRecognizer]（零体积、离线可用，国产 ROM 多有自带识别服务）；
+ * 2. 没有系统识别时，用大模型云端转文字兜底：录音 → 硅基流动 SenseVoice（免费、效果好、零 APK 体积），
+ *    需用户在设置里填「语音识别 Key」。
+ * 所有失败都带直白原因回调，绝不静默。
  */
 object SpeechInput {
+
+    private const val ASR_BASE_URL = "https://api.siliconflow.cn/v1"
+    private const val ASR_MODEL = "FunAudioLLM/SenseVoiceSmall"
+    private const val MAX_RECORD_MS = 30_000
+
+    /** 云端转文字进行中的一段录音 */
+    data class Recording(val recorder: MediaRecorder, val file: File)
 
     fun isAvailable(context: Context): Boolean =
         runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false)
 
-    /** 开始聆听并在结果出来后返回；取消由协程取消自动处理 */
+    fun hasRecordPermission(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /** 系统识别：起内置 UI 聆听并返回结果 */
     suspend fun listen(context: Context, prompt: String): Result<String> =
         suspendCancellableCoroutine { cont ->
             if (!isAvailable(context)) {
-                cont.resume(Result.failure(IllegalStateException("这台手机没有可用的语音识别服务，请改用打字提问")))
+                cont.resume(Result.failure(IllegalStateException("这台手机没有系统语音识别，请改用其他方式")))
                 return@suspendCancellableCoroutine
             }
             val recognizer = runCatching {
@@ -69,6 +99,89 @@ object SpeechInput {
             cont.invokeOnCancellation { runCatching { recognizer.destroy() } }
             recognizer.startListening(intent)
         }
+
+    /** 开始录音（云端转文字路径；调用前确保已授予 RECORD_AUDIO） */
+    fun startRecording(context: Context): Result<Recording> = runCatching {
+        val file = File(context.cacheDir, "asr_${System.currentTimeMillis()}.m4a")
+        val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(context)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
+        }
+        recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+        recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+        recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+        recorder.setAudioEncodingBitRate(96_000)
+        recorder.setAudioSamplingRate(44_100)
+        recorder.setMaxDuration(MAX_RECORD_MS)
+        recorder.setOutputFile(file.absolutePath)
+        recorder.prepare()
+        recorder.start()
+        Recording(recorder, file)
+    }
+
+    /** 停止录音并上传大模型转文字；成功返回识别文本 */
+    suspend fun stopAndTranscribe(recording: Recording, asrKey: String): Result<String> {
+        val stopped = runCatching { recording.recorder.stop() }
+        runCatching { recording.recorder.release() }
+        val result = if (stopped.isFailure || recording.file.length() < 2_000) {
+            Result.failure(IllegalStateException("没录到声音，请贴近手机再说一次"))
+        } else {
+            transcribe(recording.file, asrKey)
+        }
+        recording.file.delete()
+        return result
+    }
+
+    fun cancelRecording(recording: Recording) {
+        runCatching { recording.recorder.stop() }
+        runCatching { recording.recorder.release() }
+        recording.file.delete()
+    }
+
+    private suspend fun transcribe(file: File, asrKey: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val body = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("model", ASR_MODEL)
+                    .addFormDataPart("file", file.name, file.asRequestBody("audio/mp4".toMediaType()))
+                    .build()
+                val request = Request.Builder()
+                    .url("$ASR_BASE_URL/audio/transcriptions")
+                    .header("Authorization", "Bearer $asrKey")
+                    .post(body)
+                    .build()
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val hint = when (response.code) {
+                            401 -> "语音识别 Key 无效，请到设置里检查"
+                            429 -> "语音识别太频繁，稍后再试"
+                            else -> "语音识别服务异常（HTTP ${response.code}）"
+                        }
+                        error(hint)
+                    }
+                    val parsed = runCatching {
+                        json.decodeFromString<TranscribeResponse>(text).text
+                    }.getOrDefault("")
+                    parsed.trim().ifBlank { error("没听清你说什么，再试一次？") }
+                }
+            }.recoverCatching { e ->
+                if (e is IllegalStateException) throw e
+                throw IllegalStateException("语音识别失败：${e.message ?: "网络异常"}，请再试一次")
+            }
+        }
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    @Serializable
+    private data class TranscribeResponse(val text: String = "")
 
     private fun friendlyError(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听到你说话，请靠近一点再试"

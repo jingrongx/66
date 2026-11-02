@@ -64,6 +64,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -178,17 +179,56 @@ fun AskScreen(
         }
     }
 
-    // 语音提问：应用内语音识别（兼容国产 ROM），失败一定给出直白原因
+    // 语音提问：系统识别优先；没有系统识别时录音 → 大模型云端转文字（设置里填「语音识别 Key」）
     var listening by remember { mutableStateOf(false) }
+    var recording by remember { mutableStateOf<SpeechInput.Recording?>(null) }
+
+    fun beginCloudRecord() {
+        SpeechInput.startRecording(context)
+            .onSuccess { recording = it }
+            .onFailure { vm.setTransientError("录音启动失败，请再试一次") }
+    }
+
+    val recordPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) beginCloudRecord() else vm.setTransientError("没有录音权限，无法把语音转成文字")
+    }
+
     fun startVoice() {
-        if (listening) return
+        if (listening || recording != null) return
+        if (SpeechInput.isAvailable(context)) {
+            listening = true
+            scope.launch {
+                SpeechInput.listen(context, "说出来，我帮你问")
+                    .onSuccess { vm.updateQuestion(it) }
+                    .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
+                listening = false
+            }
+        } else if (settings.asrKey.isNotBlank()) {
+            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
+            else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            vm.setTransientError(
+                "这台手机没有语音识别。可在设置里填「语音识别 Key」（siliconflow.cn 免费申请）用大模型转文字，或直接打字",
+            )
+        }
+    }
+
+    fun stopVoice() {
+        val rec = recording ?: return
+        recording = null
         listening = true
         scope.launch {
-            SpeechInput.listen(context, "说出来，我帮你问")
+            SpeechInput.stopAndTranscribe(rec, settings.asrKey)
                 .onSuccess { vm.updateQuestion(it) }
                 .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
             listening = false
         }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { recording?.let { SpeechInput.cancelRecording(it) } }
     }
 
     var searchQuery by remember { mutableStateOf("") }
@@ -596,8 +636,18 @@ fun AskScreen(
                                 )
                             }
                         }
-                        IconButton(onClick = { startVoice() }, enabled = !listening) {
-                            Text(if (listening) "…" else "🎤", fontSize = 18.sp)
+                        IconButton(
+                            onClick = { if (recording != null) stopVoice() else startVoice() },
+                            enabled = !listening,
+                        ) {
+                            Text(
+                                when {
+                                    recording != null -> "⏹"
+                                    listening -> "…"
+                                    else -> "🎤"
+                                },
+                                fontSize = 18.sp,
+                            )
                         }
                         if (state.question.isNotBlank() || state.attachments.isNotEmpty()) {
                             IconButton(

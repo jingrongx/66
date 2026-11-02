@@ -169,6 +169,24 @@ fun SettingsScreen(
                     placeholder = { Text("在 lbs.amap.com 免费申请") },
                     shape = RoundedCornerShape(14.dp),
                 )
+                Spacer(Modifier.height(12.dp))
+                FieldLabel("语音识别 Key（可选，手机没有语音识别时用大模型转文字）")
+                OutlinedTextField(
+                    value = state.draft.asrKey,
+                    onValueChange = { value -> vm.updateDraft { it.copy(asrKey = value.trim()) } },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("在 siliconflow.cn 免费申请") },
+                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    shape = RoundedCornerShape(14.dp),
+                )
+                Text(
+                    "朗读已内置云端高质量语音（免费，无需 Key）；这里的 Key 只用于手机缺少语音识别时的兜底转文字。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
                 if (state.fetchedModels.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     FlowRow(

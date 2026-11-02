@@ -114,7 +114,7 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     FilterChip(
                         selected = selectedMap?.path == map.path,
                         onClick = { selectedMap = map },
-                        label = { Text(map.name.removeSuffix(".map")) },
+                        label = { Text(MapRegions.displayName(map.name)) },
                     )
                 }
             }
@@ -136,7 +136,7 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
             ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("正在下载 $region（省流量建议 Wi-Fi）", style = MaterialTheme.typography.bodySmall)
+                        Text("正在下载 ${MapRegions.displayName(region)}（省流量建议 Wi-Fi）", style = MaterialTheme.typography.bodySmall)
                         Spacer(Modifier.weight(1f))
                         TextButton(onClick = { vm.cancelDownload() }) { Text("取消") }
                     }
@@ -282,7 +282,7 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                region,
+                                MapRegions.displayName(region),
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.weight(1f),
                                 maxLines = 1,
