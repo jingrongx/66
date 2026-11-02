@@ -2,8 +2,10 @@ package com.lvyoubao.app
 
 import android.app.Application
 import com.lvyoubao.app.data.MemoryStore
+import com.lvyoubao.app.data.NoteStore
 import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.SettingsRepository
+import com.lvyoubao.app.data.TrackStore
 import com.lvyoubao.app.data.observation.ObservationStore
 
 class TravelApp : Application() {
@@ -11,4 +13,6 @@ class TravelApp : Application() {
     val sessionStore: SessionStore by lazy { SessionStore(this, settingsRepository) }
     val memoryStore: MemoryStore by lazy { MemoryStore(this) }
     val observationStore: ObservationStore by lazy { ObservationStore(this) }
+    val trackStore: TrackStore by lazy { TrackStore(this) }
+    val noteStore: NoteStore by lazy { NoteStore(this) }
 }

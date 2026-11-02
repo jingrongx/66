@@ -27,6 +27,7 @@ import com.lvyoubao.app.ui.ask.AskScreen
 import com.lvyoubao.app.ui.elder.ElderScreen
 import com.lvyoubao.app.ui.map.MapScreen
 import com.lvyoubao.app.ui.memory.MemoryScreen
+import com.lvyoubao.app.ui.notes.NotesScreen
 import com.lvyoubao.app.ui.observation.ObservationScreen
 import com.lvyoubao.app.ui.observation.ObservationViewModel
 import com.lvyoubao.app.ui.settings.SettingsScreen
@@ -64,6 +65,7 @@ private fun AppRoot(app: TravelApp) {
     var showObservation by remember { mutableStateOf(false) }
     var showMemory by remember { mutableStateOf(false) }
     var showMap by remember { mutableStateOf(false) }
+    var showNotes by remember { mutableStateOf(false) }
 
     val updateVm: UpdateViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
@@ -74,18 +76,20 @@ private fun AppRoot(app: TravelApp) {
     LaunchedEffect(Unit) { updateVm.autoCheck() }
 
     AnimatedContent(
-        targetState = showSettings to (showUpdate to (showObservation to (showMemory to showMap))),
+        targetState = showSettings to (showUpdate to (showObservation to (showMemory to (showMap to showNotes)))),
         transitionSpec = { fadeIn().togetherWith(fadeOut()) },
         label = "root",
     ) { (settings, updateStack) ->
         val (update, obsStack) = updateStack
         val (observation, memStack) = obsStack
-        val (memory, map) = memStack
+        val (memory, mapStack) = memStack
+        val (map, notes) = mapStack
         when {
             update -> UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
             observation -> ObservationScreen(onClose = { showObservation = false }, app = app)
             memory -> MemoryScreen(onClose = { showMemory = false }, app = app)
             map -> MapScreen(onClose = { showMap = false }, app = app)
+            notes -> NotesScreen(onClose = { showNotes = false }, app = app)
             settings -> SettingsScreen(
                 onClose = { showSettings = false },
                 onOpenUpdate = { showUpdate = true },
@@ -99,6 +103,7 @@ private fun AppRoot(app: TravelApp) {
                 onUpdateClick = { showUpdate = true },
                 onOpenObservation = { showObservation = true },
                 onOpenMap = { showMap = true },
+                onOpenNotes = { showNotes = true },
             )
         }
     }

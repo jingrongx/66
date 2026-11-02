@@ -29,6 +29,7 @@ import com.lvyoubao.app.data.observation.FatigueSample
 import com.lvyoubao.app.data.observation.ObservationEvent
 import com.lvyoubao.app.data.observation.ObservationStore
 import com.lvyoubao.app.data.observation.SensingBus
+import com.lvyoubao.app.data.TrackStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,12 +48,16 @@ class FatigueSensingService : Service(), SensorEventListener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var engine: FatigueEngine
     private lateinit var store: ObservationStore
+    private lateinit var trackStore: TrackStore
 
     private var tickJob: Job? = null
     private var sensorManager: SensorManager? = null
     private var locationManager: LocationManager? = null
     private var lastBand = FatigueBand.GREEN
     private var lastScore = 0
+    private var lastTrackTs = 0L
+    private var lastTrackLat = Double.NaN
+    private var lastTrackLon = Double.NaN
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
@@ -66,7 +71,28 @@ class FatigueSensingService : Service(), SensorEventListener {
             SensingBus.lastLatitude.value = location.latitude
             SensingBus.lastLongitude.value = location.longitude
             SensingBus.lastLocationAt.value = System.currentTimeMillis()
+            maybeRecordTrack(location)
         }
+    }
+
+    /** 轨迹落点节流：移动 ≥15 米或距上一点 ≥60 秒才记（供离线地图叠加足迹） */
+    private fun maybeRecordTrack(location: Location) {
+        val now = System.currentTimeMillis()
+        val moved = lastTrackLat.isNaN() ||
+            distanceMeters(lastTrackLat, lastTrackLon, location.latitude, location.longitude) >= 15f
+        if (!moved && now - lastTrackTs < 60_000L) return
+        lastTrackTs = now
+        lastTrackLat = location.latitude
+        lastTrackLon = location.longitude
+        scope.launch(Dispatchers.IO) {
+            trackStore.append(TrackStore.TrackPoint(ts = now, lat = location.latitude, lon = location.longitude))
+        }
+    }
+
+    private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Float {
+        val result = FloatArray(1)
+        android.location.Location.distanceBetween(lat1, lon1, lat2, lon2, result)
+        return result[0]
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -74,7 +100,9 @@ class FatigueSensingService : Service(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()
         engine = FatigueEngine()
-        store = (application as TravelApp).observationStore
+        val app = application as TravelApp
+        store = app.observationStore
+        trackStore = app.trackStore
         createChannel()
     }
 

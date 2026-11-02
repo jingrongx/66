@@ -1,10 +1,5 @@
 package com.lvyoubao.app.ui.elder
 
-import android.app.Activity
-import android.content.Intent
-import android.speech.RecognizerIntent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,6 +32,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,7 +45,9 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.ui.ChatViewModel
+import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
+import kotlinx.coroutines.launch
 
 /**
  * 长辈模式：语音优先、超大字体、回答自动朗读——推演方案"老人端"的实现。
@@ -64,30 +62,23 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
     val messages by vm.messages.collectAsState()
     val context = LocalContext.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val scope = rememberCoroutineScope()
     var typing by remember { mutableStateOf(false) }
     var spokenTs by remember { mutableStateOf(0L) }
+    var listening by remember { mutableStateOf(false) }
 
-    val voiceLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val text = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!text.isNullOrBlank()) {
-                vm.updateQuestion(text)
-                vm.send(context)
-            }
-        }
-    }
     fun startVoice() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话")
+        if (listening || state.sending) return
+        listening = true
+        scope.launch {
+            SpeechInput.listen(context, "请说话")
+                .onSuccess { spoken ->
+                    vm.updateQuestion(spoken)
+                    vm.send(context)
+                }
+                .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
+            listening = false
         }
-        runCatching { voiceLauncher.launch(intent) }
-            .onFailure { vm.setTransientError("这个手机不支持语音，请点下面的「打字提问」") }
     }
 
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
@@ -97,7 +88,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
         val msg = lastAssistant ?: return@LaunchedEffect
         if (msg.ts != spokenTs) {
             spokenTs = msg.ts
-            TtsPlayer.toggle(
+            TtsPlayer.speak(
                 context,
                 buildString {
                     append(msg.text)
@@ -152,10 +143,19 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
         }
         Spacer(Modifier.height(16.dp))
         Text(
-            if (state.sending) "正在帮你问…" else "点一下，说话就行",
+            when {
+                listening -> "正在听你说…"
+                state.sending -> "正在帮你问…"
+                else -> "点一下，说话就行"
+            },
             fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
         )
+        val ttsState by TtsPlayer.state.collectAsState()
+        (ttsState as? TtsPlayer.State.Unavailable)?.let { unavailable ->
+            Spacer(Modifier.height(8.dp))
+            Text(unavailable.reason, fontSize = 20.sp, color = MaterialTheme.colorScheme.error)
+        }
         state.question.takeIf { it.isNotBlank() }?.let {
             Spacer(Modifier.height(8.dp))
             Text("你问：$it", fontSize = 22.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -193,7 +193,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = {
-                        TtsPlayer.toggle(
+                        TtsPlayer.speak(
                             context,
                             buildString {
                                 append(msg.text)

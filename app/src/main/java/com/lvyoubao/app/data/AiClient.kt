@@ -10,6 +10,7 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -64,9 +65,26 @@ class AiClient(private val settings: AiSettings) {
         }
     }
 
+    /**
+     * 无结构化输出的普通对话（随手记生成游记、纯聊天场景），返回模型原文。
+     * 不带 response_format/tool，兼容所有 OpenAI 兼容服务商。
+     */
+    suspend fun chatPlain(messages: List<OutMessage>, thinking: Boolean): Result<String> =
+        withContext(Dispatchers.IO) {
+            guard {
+                val turn = requestOnce(
+                    buildMessagesJson(messages),
+                    thinking = thinking && isDeepSeek,
+                    withJson = false,
+                    withTools = false,
+                )
+                turn.content?.takeIf { it.isNotBlank() }
+                    ?: throw ApiException("这次没有生成出内容，请重试一次")
+            }
+        }
+
     /** 搜索失败时静默降级为无搜索（不阻断回答） */
-    private suspend fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {
-        if (query.isBlank()) return messages
+    private suspend fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {        if (query.isBlank()) return messages
         val results = runCatching { search(query.take(128)) }.getOrNull().orEmpty()
         if (results.isEmpty()) return messages
         val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA)
@@ -128,7 +146,10 @@ class AiClient(private val settings: AiSettings) {
                 throw e
             }
             if (turn.toolCalls.isEmpty() || round >= 3) {
-                return turn.content?.let { parseReply(it) } ?: AssistantReply(answer = "（模型没有返回内容）")
+                val content = turn.content?.takeIf { it.isNotBlank() }
+                    ?: turn.rawAssistant.let { extractReasoning(it) }?.takeIf { it.isNotBlank() }
+                return content?.let { parseReply(it) }
+                    ?: AssistantReply(answer = "这次没有生成出回答内容，请重试一次或换个问法。")
             }
             val results = turn.toolCalls.map { call ->
                 val name = call.function?.name.orEmpty()
@@ -169,13 +190,14 @@ class AiClient(private val settings: AiSettings) {
                     withJson = attempt.withJson,
                     withTools = false,
                 )
-                turn.content?.let { return parseReply(it) }
-                lastError = ApiException("服务端没有返回内容")
+                turn.content?.takeIf { it.isNotBlank() }?.let { return parseReply(it) }
+                // content 为空白时视为本次没生成出内容，继续下一次尝试（避免返回空卡片）
+                lastError = ApiException("这次没有生成出回答内容，请重试一次或换个问法。")
             } catch (e: ApiException) {
                 lastError = e
             }
         }
-        throw lastError ?: ApiException("服务端没有返回内容")
+        throw lastError ?: ApiException("这次没有生成出回答内容，请重试一次或换个问法。")
     }
 
     private data class ChatTurn(
@@ -215,7 +237,7 @@ class AiClient(private val settings: AiSettings) {
             if (!response.isSuccessful) throw ApiException(mapError(response.code, bodyText), response.code)
             val message = json.decodeFromString<ChatResponse>(bodyText)
                 .choices.firstOrNull()?.message
-                ?: throw ApiException("服务端没有返回内容")
+                ?: throw ApiException("这次没有生成出回答内容，请重试一次或换个问法。")
             return ChatTurn(
                 content = message.content,
                 toolCalls = message.tool_calls,
@@ -274,7 +296,7 @@ class AiClient(private val settings: AiSettings) {
             val parsed = runCatching {
                 json.decodeFromString<AssistantReply>(content.substring(start, end + 1))
             }.getOrNull()
-            if (parsed != null) {
+            if (parsed != null && (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() })) {
                 return parsed.copy(
                     answer = parsed.answer.trim(),
                     steps = parsed.steps.map { it.trim() }.filter { it.isNotEmpty() },
@@ -282,9 +304,14 @@ class AiClient(private val settings: AiSettings) {
                 )
             }
         }
-        // 模型没按 JSON 输出时兜底：整段当回答，交给规则校验层标记降级
+        // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答，交给规则校验层标记
         return AssistantReply(answer = content.trim())
     }
+
+    /** 兜底读取思考模型放在 reasoning_content 里的正文（部分服务商在 content 留空时用） */
+    private fun extractReasoning(rawAssistant: JsonElement): String? = runCatching {
+        (rawAssistant as? JsonObject)?.get("reasoning_content")?.jsonPrimitive?.content
+    }.getOrNull()
 
     private fun extractErrorMessage(bodyText: String): String? = runCatching {
         json.decodeFromString<ApiErrorBody>(bodyText).error?.message

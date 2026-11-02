@@ -275,7 +275,7 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(12.dp))
         Text(
-            "Key 只保存在本机（DataStore）。深度思考与联网搜索开关在主页输入卡内；联网搜索按次计费（官方 $0.75/千次）。",
+            "Key 只保存在本机（DataStore）。深度思考与联网搜索开关在主页输入卡内；联网搜索按次计费（官方约 ¥5.4/千次成功请求）。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

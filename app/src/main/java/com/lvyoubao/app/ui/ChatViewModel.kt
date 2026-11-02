@@ -218,24 +218,45 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     companion object {
-        /** 从 Uri 构建附件：图片压缩为 base64 data URL；文本文件读前 60KB */
-        fun readAttachment(context: Context, uri: Uri): PendingAttachment? {
-            return runCatching {
-                val resolver = context.contentResolver
-                val name = queryName(resolver, uri) ?: "附件"
-                val mime = resolver.getType(uri) ?: ""
-                if (mime.startsWith("image/")) {
-                    val dataUrl = imageToDataUrl(resolver, uri) ?: return null
-                    PendingAttachment(uri = uri, name = name, isImage = true, dataUrl = dataUrl)
+        /**
+         * 从 Uri 构建附件：图片压缩为 base64 data URL；文本文件读前 60KB。
+         * 失败不再静默返回 null，而是带原因回传，界面明示用户。
+         */
+        fun readAttachment(context: Context, uri: Uri): Pair<PendingAttachment, String?> {
+            val resolver = context.contentResolver
+            val name = queryName(resolver, uri) ?: "附件"
+            val mime = resolver.getType(uri).orEmpty().lowercase()
+            val lowerName = name.lowercase()
+            val looksImage = mime.startsWith("image/") ||
+                listOf(".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp").any { lowerName.endsWith(it) }
+            return if (looksImage) {
+                val dataUrl = imageToDataUrl(resolver, uri)
+                if (dataUrl == null) {
+                    Pair(
+                        PendingAttachment(uri = uri, name = name, isImage = true),
+                        "这张图片读取失败（可能是不支持的格式），发送后 AI 可能看不到内容，建议换一张试试",
+                    )
                 } else {
-                    val text = resolver.openInputStream(uri)?.use { input ->
+                    Pair(PendingAttachment(uri = uri, name = name, isImage = true, dataUrl = dataUrl), null)
+                }
+            } else {
+                val text = runCatching {
+                    resolver.openInputStream(uri)?.use { input ->
                         val bytes = input.readBytes()
                         val head = bytes.take(60 * 1024).toByteArray()
                         String(head, Charsets.UTF_8) + if (bytes.size > 60 * 1024) "\n（内容过长，已截断）" else ""
                     }
-                    PendingAttachment(uri = uri, name = name, isImage = false, textContent = text?.takeIf { it.isNotBlank() && isMostlyPrintable(it) })
+                }.getOrNull()
+                val printable = text?.takeIf { it.isNotBlank() && isMostlyPrintable(it) }
+                if (printable == null) {
+                    Pair(
+                        PendingAttachment(uri = uri, name = name, isImage = false, textContent = null),
+                        "「$name」读不出文本内容（目前支持图片和文本文件），先带着附件试试",
+                    )
+                } else {
+                    Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = printable), null)
                 }
-            }.getOrNull()
+            }
         }
 
         private fun isMostlyPrintable(text: String): Boolean {
@@ -250,9 +271,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
             }
 
-        private fun imageToDataUrl(resolver: android.content.ContentResolver, uri: Uri): String? {
+        private fun imageToDataUrl(resolver: android.content.ContentResolver, uri: Uri): String? = runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
             var sample = 1
             while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
             val options = BitmapFactory.Options().apply { inSampleSize = sample }
@@ -263,7 +285,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             bitmap.compress(Bitmap.CompressFormat.JPEG, 75, output)
             bitmap.recycle()
             val b64 = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
-            return "data:image/jpeg;base64,$b64"
-        }
+            "data:image/jpeg;base64,$b64"
+        }.getOrNull()
     }
 }

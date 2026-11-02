@@ -1,9 +1,6 @@
 package com.lvyoubao.app.ui.ask
 
 import android.Manifest
-import android.app.Activity
-import android.content.Intent
-import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -40,6 +37,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Menu
@@ -89,15 +87,18 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.ChatSession
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.observation.FatigueBand
 import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.ChatViewModel
+import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val Suggestions = listOf(
     "附近有啥好吃的？",
@@ -116,6 +117,7 @@ fun AskScreen(
     onUpdateClick: () -> Unit = {},
     onOpenObservation: () -> Unit = {},
     onOpenMap: () -> Unit = {},
+    onOpenNotes: () -> Unit = {},
 ) {
     val vm: ChatViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { ChatViewModel(app) } } },
@@ -137,17 +139,32 @@ fun AskScreen(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> locationGranted = granted || LocationContext.hasPermission(context) }
 
+    fun handlePicked(uri: android.net.Uri) {
+        scope.launch {
+            // 解码/压缩放在 IO 线程，失败一定给用户看原因（不再"选完没反应"）
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { ChatViewModel.readAttachment(context, uri) }
+            }
+            result.onSuccess { (attachment, warning) ->
+                vm.addAttachment(attachment)
+                warning?.let { vm.setTransientError(it) }
+            }.onFailure {
+                vm.setTransientError("附件读取失败，请重试或换个文件")
+            }
+        }
+    }
+
     // 相机拍照
     var pendingCameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture(),
     ) { ok ->
         val uri = pendingCameraUri
-        if (ok && uri != null) ChatViewModel.readAttachment(context, uri)?.let { vm.addAttachment(it) }
+        if (ok && uri != null) handlePicked(uri)
     }
     val galleryLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
-    ) { uri -> uri?.let { ChatViewModel.readAttachment(context, it)?.let { a -> vm.addAttachment(a) } } }
+    ) { uri -> uri?.let { handlePicked(it) } }
     val fileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
@@ -157,29 +174,21 @@ fun AskScreen(
                     it, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
             }
-            ChatViewModel.readAttachment(context, it)?.let { a -> vm.addAttachment(a) }
+            handlePicked(it)
         }
     }
 
-    // 语音提问（创新：解放双手，走系统语音识别，无需权限声明）
-    val voiceLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val text = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!text.isNullOrBlank()) vm.updateQuestion(text)
-        }
-    }
+    // 语音提问：应用内语音识别（兼容国产 ROM），失败一定给出直白原因
+    var listening by remember { mutableStateOf(false) }
     fun startVoice() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "说出来，我帮你问")
+        if (listening) return
+        listening = true
+        scope.launch {
+            SpeechInput.listen(context, "说出来，我帮你问")
+                .onSuccess { vm.updateQuestion(it) }
+                .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
+            listening = false
         }
-        runCatching { voiceLauncher.launch(intent) }
-            .onFailure { vm.setTransientError("此设备不支持语音识别") }
     }
 
     var searchQuery by remember { mutableStateOf("") }
@@ -271,6 +280,7 @@ fun AskScreen(
                     Spacer(Modifier.height(16.dp))
                     HorizontalDivider()
                     DrawerEntry("离线地图与路线") { onOpenMap() }
+                    DrawerEntry("随手记与游记") { onOpenNotes() }
                     DrawerEntry("我的记忆（收藏的证据）") { onOpenMemory() }
                     DrawerEntry("感知日志（疲劳观测）") { onOpenObservation() }
                     DrawerEntry("设置") { onOpenSettings() }
@@ -471,35 +481,6 @@ fun AskScreen(
                 }
             }
 
-            // 已选附件
-            if (state.attachments.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    state.attachments.forEach { a ->
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    (if (a.isImage) "🖼 " else "📄 ") + a.name.take(16),
-                                    style = MaterialTheme.typography.labelMedium,
-                                )
-                                IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(24.dp)) {
-                                    Icon(Icons.Default.Close, contentDescription = "移除", modifier = Modifier.size(14.dp))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             // 底部合并输入卡（参考官方样式）：输入 + 开关 + 附件 + 语音
             Surface(
                 modifier = Modifier
@@ -513,6 +494,34 @@ fun AskScreen(
                 ),
             ) {
                 Column(Modifier.padding(horizontal = 12.dp)) {
+                    // 已选附件直接显示在输入框上方（选中后立刻可见，避免"感觉没加上"）
+                    if (state.attachments.isNotEmpty()) {
+                        FlowRow(
+                            modifier = Modifier.padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            state.attachments.forEach { a ->
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            (if (a.isImage) "🖼 " else "📄 ") + a.name.take(16),
+                                            style = MaterialTheme.typography.labelMedium,
+                                        )
+                                        IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(24.dp)) {
+                                            Icon(Icons.Default.Close, contentDescription = "移除", modifier = Modifier.size(14.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     OutlinedTextField(
                         value = state.question,
                         onValueChange = vm::updateQuestion,
@@ -587,8 +596,23 @@ fun AskScreen(
                                 )
                             }
                         }
-                        IconButton(onClick = { startVoice() }) {
-                            Text("🎤", fontSize = 18.sp)
+                        IconButton(onClick = { startVoice() }, enabled = !listening) {
+                            Text(if (listening) "…" else "🎤", fontSize = 18.sp)
+                        }
+                        if (state.question.isNotBlank() || state.attachments.isNotEmpty()) {
+                            IconButton(
+                                onClick = {
+                                    keyboard?.hide()
+                                    vm.send(context)
+                                },
+                                enabled = !state.sending,
+                            ) {
+                                Icon(
+                                    Icons.Default.Send,
+                                    contentDescription = "发送",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            }
                         }
                     }
                 }
@@ -709,7 +733,14 @@ private fun UserBubble(message: SessionMessage) {
 @Composable
 private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
     val context = LocalContext.current
-    var speaking by remember { mutableStateOf(false) }
+    val ttsState by TtsPlayer.state.collectAsState()
+    val ttsText = remember(message.ts) {
+        buildString {
+            append(message.text)
+            message.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
+            message.action?.let { append("。建议：$it") }
+        }
+    }
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.padding(20.dp)) {
             Text(
@@ -724,11 +755,16 @@ private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
                     Row(Modifier.padding(vertical = 3.dp)) {
                         Text(
                             "${index + 1}. ",
-                            style = MaterialTheme.typography.bodyMedium,
+                            fontSize = 18.sp,
+                            lineHeight = 27.sp,
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.Bold,
                         )
-                        Text(step, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            step,
+                            fontSize = 18.sp,
+                            lineHeight = 27.sp,
+                        )
                     }
                 }
             }
@@ -762,36 +798,37 @@ private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
             )
             Spacer(Modifier.width(4.dp))
             Text(
-                "规则校验通过",
+                RuleValidator.PASS_LABEL,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
             Icon(
-                Icons.Default.Warning,
+                Icons.Default.Info,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.secondary,
                 modifier = Modifier.size(14.dp),
             )
             Spacer(Modifier.width(4.dp))
             Text(
-                "已降级：${message.violations.joinToString("、")}",
+                "小提醒：" + message.violations.joinToString("；"),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         Spacer(Modifier.weight(1f))
-        TextButton(onClick = {
-            speaking = TtsPlayer.toggle(
-                context,
-                buildString {
-                    append(message.text)
-                    message.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
-                    message.action?.let { append("。建议：$it") }
-                },
-            )
-        }) { Text(if (speaking) "停止" else "朗读") }
+        TextButton(onClick = { TtsPlayer.toggle(context, ttsText) }) {
+            Text(if (ttsState is TtsPlayer.State.Speaking) "停止" else "朗读")
+        }
         TextButton(onClick = onSaveMemory) { Text("收藏") }
+    }
+    (ttsState as? TtsPlayer.State.Unavailable)?.let { unavailable ->
+        Text(
+            unavailable.reason,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+        )
     }
 }
 
