@@ -199,7 +199,11 @@ fun AskScreen(
 
     fun startVoice() {
         if (listening || recording != null) return
-        if (SpeechInput.isAvailable(context)) {
+        if (settings.asrKey.isNotBlank()) {
+            // 配了大模型 Key 就走云端转文字：不依赖手机自带识别（很多 ROM 缺失或常年报忙）
+            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
+            else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else if (SpeechInput.isAvailable(context)) {
             listening = true
             scope.launch {
                 SpeechInput.listen(context, "说出来，我帮你问")
@@ -207,9 +211,6 @@ fun AskScreen(
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
                 listening = false
             }
-        } else if (settings.asrKey.isNotBlank()) {
-            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
-            else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         } else {
             vm.setTransientError(
                 "这台手机没有语音识别。可在设置里填「语音识别 Key」（siliconflow.cn 免费申请）用大模型转文字，或直接打字",

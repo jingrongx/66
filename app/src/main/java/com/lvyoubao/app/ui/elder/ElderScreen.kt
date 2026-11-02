@@ -90,7 +90,11 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
 
     fun startVoice() {
         if (listening || recording != null || state.sending) return
-        if (SpeechInput.isAvailable(context)) {
+        if (settings.asrKey.isNotBlank()) {
+            // 配了大模型 Key 就走云端转文字，绕开手机自带识别的兼容问题
+            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
+            else recordPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        } else if (SpeechInput.isAvailable(context)) {
             listening = true
             scope.launch {
                 SpeechInput.listen(context, "请说话")
@@ -101,9 +105,6 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
                 listening = false
             }
-        } else if (settings.asrKey.isNotBlank()) {
-            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
-            else recordPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
         } else {
             vm.setTransientError("这台手机没有语音识别。可让家人在设置里填「语音识别 Key」（免费），或点下面的「打字提问」")
         }

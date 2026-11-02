@@ -39,13 +39,34 @@ class AmapClient(private val key: String) {
         }
     }
 
+    /** 把高德错误码翻译成可操作的提示（最常见的坑：Key 类型不对） */
+    private fun mapAmapError(info: String?, infocode: String?): String {
+        val code = infocode.orEmpty()
+        val text = info.orEmpty()
+        return when {
+            code == "10009" || text.contains("USERKEY_PLAT_NOMATCH", true) ->
+                "这个高德 Key 是「Android平台」类型，查不了路线/地点。请在 lbs.amap.com 控制台的「旅游宝」应用里再添加一个 Key，服务平台选「Web服务」，把新 Key 填到设置里"
+            text.contains("INVALID_USER_KEY", true) || code == "10001" ->
+                "高德 Key 无效，请到设置里检查是否复制完整"
+            code == "10003" || text.contains("EXCEED", true) ->
+                "高德接口调用超限，稍后再试"
+            text.isNotBlank() -> "高德接口返回：$text"
+            else -> "高德接口返回：未知错误（$code）"
+        }
+    }
+
     /** 关键词 POI 检索（按当前位置距离排序），失败抛 ApiException */
     fun poiSearch(keyword: String, lon: Double, lat: Double): List<Poi> {
         val url = "https://restapi.amap.com/v3/place/text" +
             "?keywords=${urlEncode(keyword)}&location=$lon,$lat&offset=6&page=1&extensions=base&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
         val status = root["status"]?.jsonPrimitive?.content
-        if (status != "1") throw ApiException("高德 POI 查询失败：${root["info"]?.jsonPrimitive?.content ?: "未知错误"}")
+        if (status != "1") {
+            throw ApiException(mapAmapError(
+                root["info"]?.jsonPrimitive?.content,
+                root["infocode"]?.jsonPrimitive?.content,
+            ))
+        }
         return root["pois"]?.jsonArray?.mapNotNull { p ->
             val o = p.jsonObject
             val loc = o["location"]?.jsonPrimitive?.content?.split(",") ?: return@mapNotNull null
@@ -67,7 +88,10 @@ class AmapClient(private val key: String) {
             "?origin=$fromLon,$fromLat&destination=$toLon,$toLat&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
         if (root["status"]?.jsonPrimitive?.content != "1") {
-            throw ApiException("高德路径规划失败：${root["info"]?.jsonPrimitive?.content ?: "未知错误"}")
+            throw ApiException(mapAmapError(
+                root["info"]?.jsonPrimitive?.content,
+                root["infocode"]?.jsonPrimitive?.content,
+            ))
         }
         val path = root["route"]!!.jsonObject["paths"]!!.jsonArray.first().jsonObject
         val points = mutableListOf<Pair<Double, Double>>()
@@ -92,9 +116,14 @@ class AmapClient(private val key: String) {
         val url = "https://restapi.amap.com/v3/geocode/geo" +
             "?address=${urlEncode(address)}${city?.let { "&city=${urlEncode(it)}" } ?: ""}&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
-        if (root["status"]?.jsonPrimitive?.content != "1") return null
+        if (root["status"]?.jsonPrimitive?.content != "1") {
+            throw ApiException(mapAmapError(
+                root["info"]?.jsonPrimitive?.content,
+                root["infocode"]?.jsonPrimitive?.content,
+            ))
+        }
         val loc = root["geocodes"]?.jsonArray?.firstOrNull()?.jsonObject?.get("location")?.jsonPrimitive?.content
-            ?.split(",") ?: return null
+            ?.split(",") ?: throw ApiException("没找到「$address」的坐标，换个说法或输入「纬度,经度」试试")
         val lon = loc.getOrNull(0)?.toDoubleOrNull() ?: return null
         val lat = loc.getOrNull(1)?.toDoubleOrNull() ?: return null
         return lon to lat

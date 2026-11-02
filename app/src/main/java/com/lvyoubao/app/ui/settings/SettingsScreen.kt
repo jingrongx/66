@@ -230,13 +230,13 @@ fun SettingsScreen(
         SectionLabel("地图与语音（可选）")
         ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
             Column(Modifier.padding(16.dp)) {
-                FieldLabel("高德 Key（启用附近搜索与步行路线）")
+                FieldLabel("高德 Key（启用附近搜索与步行路线，类型须选「Web服务」）")
                 OutlinedTextField(
                     value = state.draft.amapKey,
                     onValueChange = { value -> vm.updateDraft { it.copy(amapKey = value.trim()) } },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    placeholder = { Text("在 lbs.amap.com 免费申请") },
+                    placeholder = { Text("lbs.amap.com 免费申请，服务平台选「Web服务」") },
                     visualTransformation = if (showAmap) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     trailingIcon = {
@@ -260,7 +260,7 @@ fun SettingsScreen(
                     shape = RoundedCornerShape(14.dp),
                 )
                 Text(
-                    "朗读已内置云端高质量语音（免费，无需 Key）；这里的 Key 只用于语音识别兜底。",
+                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),

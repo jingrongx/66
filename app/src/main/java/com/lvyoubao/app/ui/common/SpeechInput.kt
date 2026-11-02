@@ -175,6 +175,8 @@ object SpeechInput {
                     if (!response.isSuccessful) {
                         val hint = when (response.code) {
                             401 -> "语音识别 Key 无效，请到设置里检查"
+                            402 -> "硅基流动账号余额不足：语音识别用的是免费模型，一般不扣余额，请到 siliconflow.cn 检查账号状态（是否实名/可用）"
+                            403 -> "语音识别请求被拒：请到 siliconflow.cn 确认账号可用（是否需要实名认证）"
                             429 -> "语音识别太频繁，稍后再试"
                             else -> "语音识别服务异常（HTTP ${response.code}）"
                         }
