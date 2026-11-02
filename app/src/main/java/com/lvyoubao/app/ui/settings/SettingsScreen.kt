@@ -1,6 +1,7 @@
 package com.lvyoubao.app.ui.settings
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -40,6 +41,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +75,18 @@ fun SettingsScreen(
     val state by vm.ui.collectAsState()
     val context = LocalContext.current
     var showKey by remember { mutableStateOf(false) }
+    var showAmap by remember { mutableStateOf(false) }
+    var showAsr by remember { mutableStateOf(false) }
+    var savedTick by remember { mutableStateOf(0) }
+
+    BackHandler { onClose() }
+
+    LaunchedEffect(savedTick) {
+        if (savedTick > 0) {
+            kotlinx.coroutines.delay(2500)
+            savedTick = 0
+        }
+    }
     var themeDialog by remember { mutableStateOf(false) }
 
     val versionLabel = remember {
@@ -160,33 +174,6 @@ fun SettingsScreen(
                     shape = RoundedCornerShape(14.dp),
                 )
                 Spacer(Modifier.height(12.dp))
-                FieldLabel("高德 Key（可选，启用 POI 检索与步行路线）")
-                OutlinedTextField(
-                    value = state.draft.amapKey,
-                    onValueChange = { value -> vm.updateDraft { it.copy(amapKey = value.trim()) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("在 lbs.amap.com 免费申请") },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Spacer(Modifier.height(12.dp))
-                FieldLabel("语音识别 Key（可选，手机没有语音识别时用大模型转文字）")
-                OutlinedTextField(
-                    value = state.draft.asrKey,
-                    onValueChange = { value -> vm.updateDraft { it.copy(asrKey = value.trim()) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("在 siliconflow.cn 免费申请") },
-                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Text(
-                    "朗读已内置云端高质量语音（免费，无需 Key）；这里的 Key 只用于手机缺少语音识别时的兜底转文字。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
                 if (state.fetchedModels.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     FlowRow(
@@ -221,12 +208,78 @@ fun SettingsScreen(
                     ) { Text("测试连接") }
                     Spacer(Modifier.width(12.dp))
                     Button(
-                        onClick = { vm.save(onSaved = onClose) },
+                        onClick = { vm.save(onSaved = { savedTick++ }) },
                         modifier = Modifier
                             .weight(1f)
                             .height(50.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("保存", fontWeight = FontWeight.Bold) }
+                }
+                if (savedTick > 0) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "已保存 ✓",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+
+        // ---------- 地图与语音（可选） ----------
+        SectionLabel("地图与语音（可选）")
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Column(Modifier.padding(16.dp)) {
+                FieldLabel("高德 Key（启用附近搜索与步行路线）")
+                OutlinedTextField(
+                    value = state.draft.amapKey,
+                    onValueChange = { value -> vm.updateDraft { it.copy(amapKey = value.trim()) } },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("在 lbs.amap.com 免费申请") },
+                    visualTransformation = if (showAmap) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        TextButton(onClick = { showAmap = !showAmap }) { Text(if (showAmap) "隐藏" else "显示") }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                )
+                Spacer(Modifier.height(12.dp))
+                FieldLabel("语音识别 Key（手机没有语音识别时，用大模型转文字）")
+                OutlinedTextField(
+                    value = state.draft.asrKey,
+                    onValueChange = { value -> vm.updateDraft { it.copy(asrKey = value.trim()) } },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("在 siliconflow.cn 免费申请") },
+                    visualTransformation = if (showAsr) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        TextButton(onClick = { showAsr = !showAsr }) { Text(if (showAsr) "隐藏" else "显示") }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                )
+                Text(
+                    "朗读已内置云端高质量语音（免费，无需 Key）；这里的 Key 只用于语音识别兜底。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = { vm.save(onSaved = { savedTick++ }) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                ) { Text("保存", fontWeight = FontWeight.Bold) }
+                if (savedTick > 0) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "已保存 ✓",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
             }
         }

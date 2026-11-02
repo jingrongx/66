@@ -1,5 +1,6 @@
 package com.lvyoubao.app.ui.notes
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -65,6 +66,8 @@ fun NotesScreen(onClose: () -> Unit, app: TravelApp) {
     val state by vm.ui.collectAsState()
     val context = LocalContext.current
     val dayFormat = remember { SimpleDateFormat("M月d日 EEEE", Locale.CHINA) }
+
+    BackHandler { onClose() }
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
 
     Column(

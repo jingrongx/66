@@ -1,6 +1,7 @@
 package com.lvyoubao.app.ui.ask
 
 import android.Manifest
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -133,6 +134,7 @@ fun AskScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
+    BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
 
     var locationDismissed by remember { mutableStateOf(false) }
     var locationGranted by remember { mutableStateOf(LocationContext.hasPermission(context)) }

@@ -51,6 +51,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -75,6 +76,9 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
     var selectedMap by remember { mutableStateOf<File?>(null) }
     var destination by remember { mutableStateOf("") }
     var customUrl by remember { mutableStateOf("") }
+    var tab by remember { mutableStateOf("view") }
+
+    BackHandler { onClose() }
 
     // 选中最新的地图文件
     androidx.compose.runtime.LaunchedEffect(state.maps) {
@@ -82,6 +86,7 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
         if (selectedMap != null && state.maps.none { it.path == selectedMap?.path }) {
             selectedMap = state.maps.lastOrNull()
         }
+        if (state.maps.isEmpty()) tab = "download"
     }
 
     Column(
@@ -104,7 +109,14 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
         }
         Spacer(Modifier.height(8.dp))
 
-        // 已下载地图
+        // 页内切换：查看已下载 / 下载更多省份
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = tab == "view", onClick = { tab = "view" }, label = { Text("查看地图") })
+            FilterChip(selected = tab == "download", onClick = { tab = "download" }, label = { Text("下载更多省份") })
+        }
+        Spacer(Modifier.height(8.dp))
+
+        // 已下载地图（两个页签都显示，便于对照）
         if (state.maps.isNotEmpty()) {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -113,7 +125,7 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                 state.maps.forEach { map ->
                     FilterChip(
                         selected = selectedMap?.path == map.path,
-                        onClick = { selectedMap = map },
+                        onClick = { selectedMap = map; tab = "view" },
                         label = { Text(MapRegions.displayName(map.name)) },
                     )
                 }
@@ -126,7 +138,9 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { selectedMap?.let { vm.deleteMap(it) } }) { Text("删除当前地图") }
+                if (tab == "view") {
+                    TextButton(onClick = { selectedMap?.let { vm.deleteMap(it) } }) { Text("删除当前地图") }
+                }
             }
             Spacer(Modifier.height(4.dp))
         }
@@ -150,8 +164,60 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
             Spacer(Modifier.height(8.dp))
         }
 
-        val map = selectedMap
-        if (map != null && map.exists()) {
+        if (tab == "download" || selectedMap?.exists() != true) {
+            // 下载管理
+            Text(
+                "下载所在省份的离线地图（约 50–200MB，一次下载永久离线）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = customUrl,
+                    onValueChange = { customUrl = it },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    placeholder = { Text("或粘贴自定义 .map 链接") },
+                    shape = RoundedCornerShape(14.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                AssistChip(
+                    onClick = { if (customUrl.isNotBlank()) vm.download(customUrl.trim()) },
+                    label = { Text("下载") },
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            if (state.loadingRemote) {
+                Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.Center) {
+                    CircularProgressIndicator(Modifier.size(22.dp))
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    items(state.remoteList) { region ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                MapRegions.displayName(region),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            AssistChip(onClick = { vm.download(region) }, label = { Text("下载") })
+                        }
+                    }
+                }
+            }
+        } else {
+            val map = selectedMap!!
             // 先在 IO 线程校验地图文件：损坏文件（下载中断遗留）不进渲染层，给出明确指引而不是崩溃
             var fileBroken by remember(map.absolutePath) { mutableStateOf<Boolean?>(null) }
             LaunchedEffect(map.absolutePath) {
@@ -240,58 +306,6 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
             state.routeSummary?.let {
                 Spacer(Modifier.height(6.dp))
                 Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-            }
-        } else {
-            // 下载管理
-            Text(
-                "下载所在省份的离线地图（约 50–200MB，一次下载永久离线）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = customUrl,
-                    onValueChange = { customUrl = it },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    placeholder = { Text("或粘贴自定义 .map 链接") },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                AssistChip(
-                    onClick = { if (customUrl.isNotBlank()) vm.download(customUrl.trim()) },
-                    label = { Text("下载") },
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            if (state.loadingRemote) {
-                Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.Center) {
-                    CircularProgressIndicator(Modifier.size(22.dp))
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    items(state.remoteList) { region ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                MapRegions.displayName(region),
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            AssistChip(onClick = { vm.download(region) }, label = { Text("下载") })
-                        }
-                    }
-                }
             }
         }
 

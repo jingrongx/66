@@ -1,5 +1,6 @@
 package com.lvyoubao.app.ui.memory
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -64,6 +65,8 @@ fun MemoryScreen(onClose: () -> Unit, app: TravelApp) {
         factory = remember { viewModelFactory { initializer { MemoryViewModel(app) } } },
     )
     val entries by vm.entries.collectAsState()
+
+    BackHandler { onClose() }
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
 
     Column(

@@ -1,7 +1,6 @@
 package com.lvyoubao.app.ui.common
 
 import java.io.File
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -19,11 +18,12 @@ import okio.ByteString
 /**
  * Edge 朗读：微软 Edge 浏览器的云端 TTS 接口。免费、无需 Key、零 APK 体积，
  * 中文用晓晓神经语音，效果远好于多数手机自带引擎。失败时上层回退系统 TTS。
+ * DRM 令牌算法（v2）见 [EdgeTtsDrm]，已于 2026-11 用参考向量+实网合成验证。
  */
 object EdgeTts {
 
     private const val TRUSTED_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
-    private const val EDGE_VERSION = "1-131.0.2903.99"
+    private const val EDGE_VERSION = "2-143.0.3650.75"
     private const val VOICE = "zh-CN-XiaoxiaoNeural"
     private const val MAX_CHARS = 3000
 
@@ -44,10 +44,12 @@ object EdgeTts {
             val request = Request.Builder()
                 .url(endpoint())
                 .header("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
+                .header("Pragma", "no-cache")
+                .header("Cache-Control", "no-cache")
                 .header(
                     "User-Agent",
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                        "Chrome/131.0.0.0 Safari/537.36 Edg/131.0.2903.99",
+                        "Chrome/143.0.0.0 Safari/537.36 Edg/143.0.3650.75",
                 )
                 .build()
             val ws = client.newWebSocket(request, object : WebSocketListener() {
@@ -94,23 +96,13 @@ object EdgeTts {
     }
 
     private fun endpoint(): String {
-        val gec = secMsGecToken()
+        val gec = runCatching {
+            EdgeTtsDrm.generateSecMsGecV2(System.currentTimeMillis() / 1000)
+        }.getOrNull()
         return "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1" +
             "?TrustedClientToken=$TRUSTED_TOKEN" +
             (gec?.let { "&Sec-MS-GEC=$it&Sec-MS-GEC-Version=$EDGE_VERSION" } ?: "")
     }
-
-    /**
-     * Edge 接口的 DRM 令牌：Windows 纪元时间（10^7 ticks，向下取整到 5 分钟）
-     * 拼上 TrustedClientToken 后取 SHA-256 大写十六进制。手机时钟偏差大会拿到 403，走回退。
-     */
-    private fun secMsGecToken(): String? = runCatching {
-        var ticks = (System.currentTimeMillis() / 1000 + 11644473600L) * 10_000_000L
-        ticks -= ticks % 3_000_000_000L
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest("$ticks$TRUSTED_TOKEN".toByteArray(Charsets.US_ASCII))
-        digest.joinToString("") { "%02X".format(it) }
-    }.getOrNull()
 
     private fun timestamp(): String =
         SimpleDateFormat("EEE MMM dd yyyy HH:mm:ss 'GMT'0000", Locale.US).format(Date())

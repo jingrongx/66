@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -63,6 +64,8 @@ fun ObservationScreen(onClose: () -> Unit, app: TravelApp) {
         factory = remember { viewModelFactory { initializer { ObservationViewModel(app) } } },
     )
     val state by vm.samples.collectAsState()
+
+    BackHandler { onClose() }
     val events by vm.events.collectAsState()
     val running by vm.running.collectAsState()
     val startedAt by vm.startedAt.collectAsState()

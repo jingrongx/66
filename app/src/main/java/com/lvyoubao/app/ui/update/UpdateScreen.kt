@@ -1,5 +1,6 @@
 package com.lvyoubao.app.ui.update
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -43,6 +44,8 @@ import java.util.Locale
 @Composable
 fun UpdateScreen(onClose: () -> Unit, vm: UpdateViewModel) {
     val state by vm.ui.collectAsState()
+
+    BackHandler { onClose() }
     val context = LocalContext.current
 
     // 进入页面自动检查一次（结果带完整展示，区别于启动时的静默检查）

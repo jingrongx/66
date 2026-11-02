@@ -48,8 +48,21 @@ object SpeechInput {
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
 
+    /** 系统识别：部分 ROM 冷启动会报"忙"，自动重试一次 */
+    suspend fun listen(context: Context, prompt: String): Result<String> {
+        val first = listenOnce(context, prompt)
+        val err = first.exceptionOrNull()
+        if (err is RecognizeError && (err.code == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || err.code == SpeechRecognizer.ERROR_CLIENT)) {
+            kotlinx.coroutines.delay(900)
+            return listenOnce(context, prompt)
+        }
+        return first
+    }
+
+    private class RecognizeError(val code: Int, message: String) : IllegalStateException(message)
+
     /** 系统识别：起内置 UI 聆听并返回结果 */
-    suspend fun listen(context: Context, prompt: String): Result<String> =
+    private suspend fun listenOnce(context: Context, prompt: String): Result<String> =
         suspendCancellableCoroutine { cont ->
             if (!isAvailable(context)) {
                 cont.resume(Result.failure(IllegalStateException("这台手机没有系统语音识别，请改用其他方式")))
@@ -76,7 +89,7 @@ object SpeechInput {
                 override fun onEndOfSpeech() {}
                 override fun onError(error: Int) {
                     recognizer.destroy()
-                    if (cont.isActive) cont.resume(Result.failure(IllegalStateException(friendlyError(error))))
+                    if (cont.isActive) cont.resume(Result.failure(RecognizeError(error, friendlyError(error))))
                 }
 
                 override fun onResults(results: Bundle?) {
@@ -87,7 +100,7 @@ object SpeechInput {
                     if (cont.isActive) {
                         cont.resume(
                             if (text.isNullOrBlank())
-                                Result.failure(IllegalStateException("没听清你说什么，再试一次？"))
+                                Result.failure(RecognizeError(SpeechRecognizer.ERROR_NO_MATCH, "没听清你说什么，再试一次？"))
                             else Result.success(text),
                         )
                     }
