@@ -64,9 +64,11 @@ jobs:
       - name: Prepare APK and tag
         run: |
           VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
-          TAG="v${VERSION}-b${GITHUB_RUN_NUMBER}"
+          # 标签与应用内版本号严格一致（v0.7.0），不再拼构建号——
+          # 此前 vX.Y.Z-bN 的标签和应用内 vX.Y.Z(版本号) 两套数字对不上，更新检查会误判"已是最新"
+          TAG="v${VERSION}"
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/lvyoubao-${VERSION}-${GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/lvyoubao-${VERSION}.apk"
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
@@ -74,10 +76,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 同版本号重复发版时，先删旧 Release 和旧标签再建，保证 Release 始终对应最新 main
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
           # 更新说明按 commit 内容生成：上一个 Release 的 tag 到本次构建之间的提交
           PREV_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName' || true)
           COMMITS=""
-          if [ -n "$PREV_TAG" ]; then
+          if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
             COMMITS=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s" 2>/dev/null | grep -v "\[skip ci\]" || true)
           fi
           if [ -z "$COMMITS" ]; then
@@ -96,17 +100,6 @@ jobs:
           )
           gh release create "$TAG" dist/*.apk \
             --repo "$GITHUB_REPOSITORY" \
-            --title "旅游宝 v${VERSION}（build ${GITHUB_RUN_NUMBER}）" \
+            --title "旅游宝 v${VERSION}" \
             --notes "$NOTES" \
             --latest
-
-      - name: Remove older builds of the same version
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # 每个版本只保留最新一次构建的 Release，避免列表出现 v0.4.0-b12/v0.4.0-b11 之类的乱序
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
-            | grep -E "^v${VERSION}-b[0-9]+$" | grep -v "^${TAG}$" \
-            | while read -r OLD; do
-                gh release delete "$OLD" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-              done
