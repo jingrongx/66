@@ -145,6 +145,18 @@ class FatigueEngine(private val baselineSteps: Int = 10_000) {
         private const val MAX_TICK_MIN = 30f
         private const val ACCURACY_LIMIT_M = 50f
 
+        /** 两点间方位角（0°=正北，顺时针），导航朝向箭头用 */
+        fun bearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Float {
+            val phi1 = Math.toRadians(lat1)
+            val phi2 = Math.toRadians(lat2)
+            val dLon = Math.toRadians(lon2 - lon1)
+            val y = kotlin.math.sin(dLon) * kotlin.math.cos(phi2)
+            val x = kotlin.math.cos(phi1) * kotlin.math.sin(phi2) -
+                kotlin.math.sin(phi1) * kotlin.math.cos(phi2) * kotlin.math.cos(dLon)
+            val deg = Math.toDegrees(kotlin.math.atan2(y, x))
+            return ((deg % 360.0) + 360.0).toFloat() % 360f
+        }
+
         fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Float {
             val r = 6_371_000.0
             val dLat = Math.toRadians(lat2 - lat1)

@@ -75,6 +75,37 @@ internal fun dotMarker(context: Context, lat: Double, lon: Double, argb: Int, si
 }.getOrNull()
 
 /**
+ * 朝向箭头标记：导航时替代蓝点，箭头方向 = 运动方向（0°=北）。
+ * 白描边 + 品牌色箭头，旋转画在位图里，改朝向只需重建小位图。
+ */
+internal fun arrowMarker(context: Context, lat: Double, lon: Double, argb: Int, bearingDeg: Float, sizeDp: Int): Marker? = runCatching {
+    val density = context.resources.displayMetrics.density
+    val sizePx = (sizeDp * density).toInt().coerceAtLeast(24)
+    val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    canvas.save()
+    canvas.rotate(bearingDeg, sizePx / 2f, sizePx / 2f)
+    val stroke = android.graphics.Paint().apply {
+        isAntiAlias = true; color = android.graphics.Color.WHITE; style = android.graphics.Paint.Style.STROKE
+        strokeWidth = sizePx * 0.14f; strokeJoin = android.graphics.Paint.Join.ROUND
+    }
+    val fill = android.graphics.Paint().apply { isAntiAlias = true; color = argb; style = android.graphics.Paint.Style.FILL }
+    val w = sizePx.toFloat(); val h = sizePx.toFloat()
+    val path = android.graphics.Path().apply {
+        moveTo(w * 0.50f, h * 0.08f)   // 尖端朝上（0°=北）
+        lineTo(w * 0.86f, h * 0.86f)
+        lineTo(w * 0.50f, h * 0.66f)
+        lineTo(w * 0.14f, h * 0.86f)
+        close()
+    }
+    canvas.drawPath(path, fill)
+    canvas.drawPath(path, stroke)
+    canvas.restore()
+    val mfBitmap = AndroidGraphicFactory.convertToBitmap(BitmapDrawable(context.resources, bmp) as android.graphics.drawable.Drawable)
+    Marker(LatLong(lat, lon), mfBitmap, mfBitmap.width / 2, mfBitmap.height / 2)
+}.getOrNull()
+
+/**
  * 挑一张覆盖所有关键点的离线地图；都不覆盖就退回最新一张（和离线地图页的默认选择一致）。
  * points 传 (经度, 纬度) 对。
  */

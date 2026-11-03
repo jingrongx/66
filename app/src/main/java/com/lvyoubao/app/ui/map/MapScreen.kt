@@ -302,6 +302,11 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                         routeOverlay?.let { overlay ->
                                             runCatching { mapView.layerManager.layers.remove(overlay) }
                                         }
+                                        // 白边压底 + 主色在上，与会话地图卡同款描边
+                                        addPolyline(
+                                            mapView.layerManager.layers, state.routePoints,
+                                            android.graphics.Color.WHITE, 22f,
+                                        )
                                         routeOverlay = addPolyline(
                                             mapView.layerManager.layers, state.routePoints,
                                             android.graphics.Color.argb(240, 13, 115, 133), 12f,

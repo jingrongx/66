@@ -160,6 +160,7 @@ fun RouteMapCard(
     // 地图视图与叠加层（内嵌/全屏共用一套状态，切换时地图重建会自动重画）
     var mapViewRef by remember { mutableStateOf<org.mapsforge.map.android.view.MapView?>(null) }
     var routeLayer by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
+    var routeCasingLayer by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
     var originMarker by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
     var destMarker by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
     var meMarker by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
@@ -404,7 +405,8 @@ fun RouteMapCard(
             onRelease = { mv ->
                 runCatching { mv.destroyAll() }
                 if (mapViewRef === mv) mapViewRef = null
-                routeLayer = null; originMarker = null; destMarker = null; meMarker = null
+                routeLayer = null; routeCasingLayer = null
+                originMarker = null; destMarker = null; meMarker = null
                 lastDrawKey = ""
             },
             update = { mv ->
@@ -417,6 +419,9 @@ fun RouteMapCard(
                     lastDrawKey = key
                     val layers = mv.layerManager.layers
                     removeLayer(layers, routeLayer)
+                    removeLayer(layers, routeCasingLayer)
+                    // 白边压底 + 主色在上：专业地图的路线描边画法，弱化底图干扰
+                    routeCasingLayer = addPolyline(layers, plan?.points.orEmpty(), android.graphics.Color.WHITE, 22f)
                     routeLayer = addPolyline(layers, plan?.points.orEmpty(), ROUTE_ARGB, 12f)
                     removeLayer(layers, originMarker)
                     removeLayer(layers, destMarker)
@@ -459,9 +464,31 @@ fun RouteMapCard(
                     lastMeDrawn = f
                     val layers = mv.layerManager.layers
                     removeLayer(layers, meMarker)
-                    meMarker = dotMarker(context, f.lat, f.lon, ME_ARGB, 15)?.also { layers.add(it) }
+                    // 导航中：朝向箭头（Google 步行导航样式，箭头指向运动方向）；平时蓝点
+                    meMarker = if (navigating && plan != null && plan.points.size >= 2) {
+                        val idx = NavigationTracker.nearestIndex(f.lat, f.lon, plan.points)
+                        val segBearing = FatigueEngine.bearingDeg(
+                            plan.points[idx].second, plan.points[idx].first,
+                            plan.points[(idx + 1).coerceAtMost(plan.points.size - 1)].second,
+                            plan.points[(idx + 1).coerceAtMost(plan.points.size - 1)].first,
+                        )
+                        val heading = if (f.speedMps >= 1f) f.bearingDeg else segBearing
+                        arrowMarker(context, f.lat, f.lon, ME_ARGB, heading, 26)
+                    } else {
+                        dotMarker(context, f.lat, f.lon, ME_ARGB, 15)
+                    }?.also { layers.add(it) }
                     if (navigating && !userDragging) {
-                        mv.model.mapViewPosition.setCenter(org.mapsforge.core.model.LatLong(f.lat, f.lon))
+                        // 平滑前视镜头：中心取"当前位置沿路线前方 ~60 米"，人落在屏幕下三分之一，
+                        // 配合 animateTo 的补间动画，镜头像高德一样连续滑动而不是跳格子
+                        val look = if (plan != null && plan.points.isNotEmpty()) {
+                            lookaheadPoint(plan.points, NavigationTracker.nearestIndex(f.lat, f.lon, plan.points), 60.0)
+                        } else null
+                        mv.model.mapViewPosition.animateTo(
+                            org.mapsforge.core.model.LatLong(
+                                (look?.second ?: f.lat) * 0.7 + f.lat * 0.3,
+                                (look?.first ?: f.lon) * 0.7 + f.lon * 0.3,
+                            ),
+                        )
                         if (!followZoomed) {
                             mv.model.mapViewPosition.setZoomLevel(17.toByte())
                             followZoomed = true
@@ -525,8 +552,11 @@ fun RouteMapCard(
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                            val speedText = me?.takeIf { it.speedMps >= 0.5f }?.let {
+                                " · 时速 ${(it.speedMps * 3.6).toInt()} 公里"
+                            } ?: ""
                             Text(
-                                "剩余 ${MapCardData.distanceText(nav.remainM)}" + (if (nav.nextStepDistM > 0) " · ${nav.nextStepDistM} 米后转弯" else ""),
+                                "剩余 ${MapCardData.distanceText(nav.remainM)}" + (if (nav.nextStepDistM > 0) " · ${nav.nextStepDistM} 米后转弯" else "") + speedText,
                                 fontSize = if (big) 19.sp else 13.sp,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                             )
@@ -901,6 +931,25 @@ fun RouteMapCard(
             }
         }
     }
+}
+
+/** 从折线第 idx 个点起，沿路线往前走 distM 米后的坐标（导航前视取景用） */
+private fun lookaheadPoint(points: List<Pair<Double, Double>>, idx: Int, distM: Double): Pair<Double, Double>? {
+    if (idx < 0 || idx >= points.size) return points.lastOrNull()
+    var remain = distM
+    var cur = points[idx]
+    for (i in idx until points.size - 1) {
+        val a = points[i]
+        val b = points[i + 1]
+        val seg = FatigueEngine.haversine(a.second, a.first, b.second, b.first).toDouble()
+        if (remain <= seg) {
+            val f = if (seg > 0) remain / seg else 1.0
+            return (a.first + (b.first - a.first) * f) to (a.second + (b.second - a.second) * f)
+        }
+        remain -= seg
+        cur = b
+    }
+    return cur
 }
 
 /** 设备朝向（0°=北，顺时针），罗盘徽章用；地图库本身不支持底图旋转，这里只做指示 */

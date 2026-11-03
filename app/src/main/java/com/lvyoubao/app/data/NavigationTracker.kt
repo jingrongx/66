@@ -15,29 +15,49 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 object NavigationTracker {
 
-    data class Fix(val lat: Double, val lon: Double, val accuracyM: Float = 0f, val ts: Long = 0)
+    data class Fix(
+        val lat: Double,
+        val lon: Double,
+        val accuracyM: Float = 0f,
+        val ts: Long = 0,
+        val bearingDeg: Float = 0f,   // 运动方向（0°=北，顺时针）；静止时用路线段方向补
+        val speedMps: Float = 0f,     // 瞬时速度 m/s（导航横幅显示时速）
+    )
 
     private val _fix = MutableStateFlow<Fix?>(null)
     val fix: StateFlow<Fix?> = _fix.asStateFlow()
 
     private var listener: android.location.LocationListener? = null
+    private var lastFixForBearing: Fix? = null
 
     fun start(context: Context) {
         if (listener != null) return
         if (!LocationContext.hasPermission(context)) return
         val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        lastFixForBearing = null
         // 先用最近已知位置顶上，地图不用空等第一次 GPS
         LocationContext.current(context)?.let {
             _fix.value = Fix(it.lat, it.lon, ts = System.currentTimeMillis())
         }
         val l = android.location.LocationListener { loc ->
-            _fix.value = Fix(loc.latitude, loc.longitude, loc.accuracy, System.currentTimeMillis())
+            val prev = lastFixForBearing
+            // GPS 自带朝向/速度；不可信（静止或无值）时用前后两点连线方向兜底
+            val bearing = if (!loc.hasBearing() || loc.speed < 1f) {
+                if (prev != null) FatigueEngine.bearingDeg(prev.lat, prev.lon, loc.latitude, loc.longitude)
+                else loc.bearing
+            } else loc.bearing
+            val fix = Fix(
+                lat = loc.latitude, lon = loc.longitude, accuracyM = loc.accuracy,
+                ts = System.currentTimeMillis(), bearingDeg = bearing, speedMps = loc.speed,
+            )
+            lastFixForBearing = fix
+            _fix.value = fix
         }
         listener = l
         listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { provider ->
             runCatching {
                 if (lm.isProviderEnabled(provider)) {
-                    lm.requestLocationUpdates(provider, 2000L, 1f, l, Looper.getMainLooper())
+                    lm.requestLocationUpdates(provider, 1000L, 1f, l, Looper.getMainLooper())
                 }
             }
         }
