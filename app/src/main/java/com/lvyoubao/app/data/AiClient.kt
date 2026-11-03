@@ -10,6 +10,7 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
@@ -53,6 +54,8 @@ class AiClient(private val settings: AiSettings) {
         thinking: Boolean,
         searchEnabled: Boolean,
         toolExecutor: ToolExecutor? = null,
+        onAnswer: ((String) -> Unit)? = null,
+        onReasoning: ((String) -> Unit)? = null,
     ): Result<AssistantReply> = withContext(Dispatchers.IO) {
         guard {
             val effective = if (searchEnabled && isDeepSeek) {
@@ -61,7 +64,7 @@ class AiClient(private val settings: AiSettings) {
             } else {
                 messages
             }
-            generate(effective, thinking, toolExecutor)
+            generate(effective, thinking, toolExecutor, onAnswer, onReasoning)
         }
     }
 
@@ -132,17 +135,28 @@ class AiClient(private val settings: AiSettings) {
         messages: List<OutMessage>,
         thinking: Boolean,
         toolExecutor: ToolExecutor?,
+        onAnswer: ((String) -> Unit)?,
+        onReasoning: ((String) -> Unit)?,
     ): AssistantReply {
         val useTools = toolExecutor != null && isDeepSeek
-        if (!useTools) return generateWithAttempts(messages, thinking, withTools = false, executor = null)
+        if (!useTools) return generateWithAttempts(messages, thinking, withTools = false, executor = null, onAnswer, onReasoning)
 
+        // 回答字段增量提取器：模型输出的是 JSON 信封，把 "answer" 的值剥出来流给界面
+        val streamer = AnswerFieldStreamer(onAnswer)
         var convo: JsonArray = buildMessagesJson(messages)
         var round = 0
         while (true) {
             val turn = try {
-                requestOnce(convo, thinking = thinking, withJson = false, withTools = true)
+                requestOnceStream(
+                    convo,
+                    thinking = thinking,
+                    withJson = false,
+                    withTools = true,
+                    onContent = { streamer.feed(it) },
+                    onReasoning = onReasoning,
+                )
             } catch (e: ApiException) {
-                if (e.code == 400) return generateWithAttempts(messages, thinking, withTools = false, executor = null)
+                if (e.code == 400) return generateWithAttempts(messages, thinking, withTools = false, executor = null, onAnswer, onReasoning)
                 throw e
             }
             if (turn.toolCalls.isEmpty() || round >= 3) {
@@ -175,6 +189,8 @@ class AiClient(private val settings: AiSettings) {
         thinking: Boolean,
         withTools: Boolean,
         executor: ToolExecutor?,
+        onAnswer: ((String) -> Unit)?,
+        onReasoning: ((String) -> Unit)?,
     ): AssistantReply {
         val attempts = listOf(
             Attempt(withJson = true, withThinking = true, withTools = false),
@@ -183,12 +199,16 @@ class AiClient(private val settings: AiSettings) {
         )
         var lastError: ApiException? = null
         attempts.forEach { attempt ->
+            // json 信封的尝试不往界面流（避免闪现原始 JSON）；无 json 的尝试流 answer 值/纯文本
+            val streamer = if (attempt.withJson) null else AnswerFieldStreamer(onAnswer)
             try {
-                val turn = requestOnce(
+                val turn = requestOnceStream(
                     buildMessagesJson(messages),
                     thinking = attempt.withThinking && thinking,
                     withJson = attempt.withJson,
                     withTools = false,
+                    onContent = streamer?.let { s -> { d: String -> s.feed(d) } },
+                    onReasoning = onReasoning,
                 )
                 turn.content?.takeIf { it.isNotBlank() }?.let { return parseReply(it) }
                 // content 为空白时视为本次没生成出内容，继续下一次尝试（避免返回空卡片）
@@ -243,6 +263,165 @@ class AiClient(private val settings: AiSettings) {
                 toolCalls = message.tool_calls,
                 rawAssistant = json.encodeToJsonElement(message),
             )
+        }
+    }
+
+    /**
+     * 流式单轮：SSE 解析 delta.content / delta.reasoning_content / delta.tool_calls。
+     * content 增量经 onContent 回调（调用方负责剥 JSON 信封），工具调用按 index 累积。
+     */
+    private fun requestOnceStream(
+        messagesJson: JsonArray,
+        thinking: Boolean,
+        withJson: Boolean,
+        withTools: Boolean,
+        onContent: ((String) -> Unit)?,
+        onReasoning: ((String) -> Unit)?,
+    ): ChatTurn {
+        val body = buildJsonObject {
+            put("model", settings.model)
+            put("messages", messagesJson)
+            if (withJson) {
+                put("response_format", json.encodeToJsonElement(ResponseFormat("json_object")))
+            }
+            put("stream", true)
+            if (isDeepSeek) {
+                put("thinking", json.encodeToJsonElement(ThinkingMode(if (thinking) "enabled" else "disabled")))
+            }
+            if (withTools) {
+                put("tools", json.encodeToJsonElement(AppTools.definitions.map {
+                    ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))
+                }))
+            }
+        }.toString()
+        val request = Request.Builder()
+            .url("$baseUrl/chat/completions")
+            .header("Authorization", authHeader)
+            .addHeader("Accept", "text/event-stream")
+            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val bodyText = response.body?.string().orEmpty()
+                throw ApiException(mapError(response.code, bodyText), response.code)
+            }
+            val source = response.body?.source() ?: throw ApiException("服务端没有返回内容")
+            val contentBuf = StringBuilder()
+            val reasoningBuf = StringBuilder()
+            class ToolAcc { var id = ""; var name = ""; var args = StringBuilder() }
+            val toolAccs = linkedMapOf<Int, ToolAcc>()
+            while (true) {
+                val line = source.readUtf8Line() ?: break
+                if (line.isBlank() || !line.startsWith("data:")) continue
+                val payload = line.removePrefix("data:").trim()
+                if (payload == "[DONE]") break
+                val obj = runCatching { json.parseToJsonElement(payload).jsonObject }.getOrNull() ?: continue
+                val choice = (obj["choices"] as? JsonArray)?.firstOrNull()?.jsonObject ?: continue
+                val delta = choice["delta"] as? JsonObject ?: continue
+                (delta["reasoning_content"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { r ->
+                    if (r.isNotEmpty()) {
+                        reasoningBuf.append(r)
+                        onReasoning?.invoke(r)
+                    }
+                }
+                (delta["content"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { s ->
+                    if (s.isNotEmpty()) {
+                        contentBuf.append(s)
+                        onContent?.invoke(s)
+                    }
+                }
+                (delta["tool_calls"] as? JsonArray)?.forEach { el ->
+                    val o = el.jsonObject
+                    val idx = (o["index"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 0
+                    val acc = toolAccs.getOrPut(idx) { ToolAcc() }
+                    (o["id"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { if (it.isNotEmpty()) acc.id = it }
+                    val fn = o["function"] as? JsonObject
+                    (fn?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { if (it.isNotEmpty()) acc.name = it }
+                    (fn?.get("arguments") as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { if (it.isNotEmpty()) acc.args.append(it) }
+                }
+            }
+            val toolCalls = toolAccs.toSortedMap().values
+                .filter { it.name.isNotEmpty() }
+                .map { ToolCall(id = it.id, type = "function", function = FunctionCall(name = it.name, arguments = it.args.toString().ifEmpty { "{}" })) }
+            val rawAssistant = buildJsonObject {
+                put("role", "assistant")
+                if (contentBuf.isNotEmpty()) put("content", contentBuf.toString())
+                if (toolCalls.isNotEmpty()) {
+                    put("tool_calls", json.encodeToJsonElement(toolCalls))
+                }
+            }
+            return ChatTurn(
+                content = contentBuf.toString().ifEmpty { null },
+                toolCalls = toolCalls,
+                rawAssistant = rawAssistant,
+            )
+        }
+    }
+
+    /**
+     * 从 JSON 信封里增量剥 "answer" 字段的值流给界面。
+     * 若开头就不是 JSON（模型走了纯文本兜底），整段原文直接流出去。
+     */
+    private class AnswerFieldStreamer(val sink: ((String) -> Unit)?) {
+        private val content = StringBuilder()
+        private var emitted = 0
+        private var mode = 0   // 0=探测中 1=JSON answer 值流 2=纯文本流
+
+        fun feed(delta: String) {
+            if (sink == null) return
+            content.append(delta)
+            val s = content.toString()
+            if (mode == 0) {
+                val trimmed = s.trimStart()
+                if (trimmed.isNotEmpty() && !trimmed.startsWith("{")) mode = 2
+            }
+            if (mode == 2) {
+                if (s.length > emitted) {
+                    sink.invoke(s.substring(emitted))
+                    emitted = s.length
+                }
+                return
+            }
+            // JSON 模式：answer 值可以未闭合（流式增长），贪婪匹配到当前末尾
+            val m = ANSWER_FIELD.find(s) ?: return
+            val raw = unescapeJson(m.groupValues[1])
+            if (raw.length > emitted) {
+                sink.invoke(raw.substring(emitted))
+                emitted = raw.length
+            }
+        }
+
+        private fun unescapeJson(s: String): String {
+            val sb = StringBuilder(s.length)
+            var i = 0
+            while (i < s.length) {
+                val ch = s[i]
+                if (ch == 92.toChar() && i + 1 < s.length) {
+                    when (val n = s[i + 1]) {
+                        'n' -> { sb.append('\n'); i += 2 }
+                        't' -> { sb.append('\t'); i += 2 }
+                        'r' -> { i += 2 }
+                        '"' -> { sb.append('"'); i += 2 }
+                        'u' -> {
+                            if (i + 5 < s.length) {
+                                runCatching { sb.append(s.substring(i + 2, i + 6).toInt(16).toChar()) }
+                                i += 6
+                            } else { i = s.length }
+                        }
+                        '/' -> { sb.append('/'); i += 2 }
+                        else -> { sb.append(n); i += 2 }
+                    }
+                } else {
+                    sb.append(ch)
+                    i++
+                }
+            }
+            return sb.toString()
+        }
+
+        companion object {
+            // "answer":"...（可未闭合）——值部分贪婪匹配到当前位置
+            private val ANSWER_FIELD = Regex("\"answer\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)")
         }
     }
 
@@ -320,6 +499,30 @@ class AiClient(private val settings: AiSettings) {
                 )
             }
         }
+        // 模型把 map 意图 JSON 单独当回答输出（如 {"type":"place","keyword":"麻姑山"}）：
+        // 识别出来转成真正的地图意图，别把裸 JSON 显示给用户
+        val bareIntent = runCatching {
+            val o = json.parseToJsonElement(content.trim()).jsonObject
+            val type = o["type"]?.jsonPrimitive?.content.orEmpty()
+            val keyword = o["keyword"]?.jsonPrimitive?.content.orEmpty()
+            val destination = o["destination"]?.jsonPrimitive?.content.orEmpty()
+            val isRoute = type.equals("route", true) || type == "路线" || type == "导航"
+            if ((isRoute && destination.isNotBlank()) || (!isRoute && keyword.isNotBlank())) {
+                MapIntent(
+                    type = if (isRoute) "route" else "place",
+                    keyword = keyword.trim(),
+                    origin = o["origin"]?.jsonPrimitive?.content.orEmpty().trim(),
+                    destination = destination.trim(),
+                )
+            } else null
+        }.getOrNull()
+        if (bareIntent != null) {
+            val where = bareIntent.destination.ifBlank { bareIntent.keyword }
+            return AssistantReply(
+                answer = "帮你把「$where」放到地图上了，下方可以直接看位置和路线。",
+                map = bareIntent,
+            )
+        }
         // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答，交给规则校验层标记
         return AssistantReply(answer = content.trim())
     }
@@ -367,12 +570,14 @@ class AiClient(private val settings: AiSettings) {
             3. 需要实时信息（附近地点、天气、去某地的路线）时，先调用工具查真实数据，再回答；绝不编造数字。
             4. 不确定的数字绝不编造：优先使用搜索结果或工具返回的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。
             以 json 格式输出：{"answer": "一句话总结，不超过2句", "steps": ["要点1", "要点2", ...]，快问快答时为空数组, "action": "一句话的下一步动作建议，没有则为 null"}
+            注意：answer 字段必须放在 JSON 最前面（用户边生成边看，answer 先出才有流式体验）
             另外，当回答涉及具体地点时（某景点/场馆/店铺的位置、怎么去、从A到B、值得一去的去处），加一个 "map" 字段让界面在回答下方配一张地图：
             {"type": "place" 或 "route", "keyword": "地点关键词", "origin": "起点名", "destination": "目的地名"}
             - 讲某个地方在哪/介绍某地：type=place，keyword 填规范地点名（如"汤显祖纪念馆"）
             - 从A到B怎么走/多远：type=route，origin 填起点名（用户说"从这里/从我这"就填空字符串，界面会用当前位置），destination 填终点的规范地点名
             - 回答与具体地点无关（纯聊天、天气、时间、体力建议）时不要输出 map 字段
             - 地点名要规范完整（用官方名称，不要写"那个博物馆"），宁缺毋滥：拿不准就别输出 map
+            - map 字段必须和 answer/steps 一起输出，绝不允许只输出一段 map JSON、也绝不允许把 JSON 当回答正文；用户看不到 JSON，只看得到 answer 的中文
         """.trimIndent()
     }
 }

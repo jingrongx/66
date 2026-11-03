@@ -1,6 +1,7 @@
 package com.lvyoubao.app.data
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
@@ -27,6 +28,45 @@ object WeatherClient {
         85 to "阵雪", 86 to "阵雪",
         95 to "雷阵雨", 96 to "雷阵雨伴冰雹", 99 to "雷阵雨伴冰雹",
     )
+
+    /** 7 日逐日预报（含降水概率），供"啥时候天晴"这类问题直接作答 */
+    fun forecast(lon: Double, lat: Double, days: Int = 7): String {
+        val url = "https://api.open-meteo.com/v1/forecast" +
+            "?latitude=$lat&longitude=$lon" +
+            "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum" +
+            "&forecast_days=$days&timezone=auto"
+        val request = Request.Builder().url(url).get().build()
+        return client.newCall(request).execute().use { response ->
+            val text = response.body?.string() ?: throw ApiException("天气接口空响应")
+            val root = json.parseToJsonElement(text).jsonObject
+            val daily = root["daily"]?.jsonObject ?: throw ApiException("天气接口返回异常")
+            fun arr(key: String): List<String>? = daily[key]?.jsonArray?.mapNotNull {
+                runCatching { it.jsonPrimitive.content }.getOrNull()
+            }
+            val dates = arr("time") ?: return@use ""
+            val codes = arr("weather_code")
+            val tMax = arr("temperature_2m_max")
+            val tMin = arr("temperature_2m_min")
+            val probs = arr("precipitation_probability_max")
+            val rains = arr("precipitation_sum")
+            val dayNames = arrayOf("周日", "周一", "周二", "周三", "周四", "周五", "周六")
+            return@use dates.mapIndexed { i, d ->
+                val code = codes?.getOrNull(i)?.toDoubleOrNull()?.toInt() ?: -1
+                val desc = weatherCodes[code] ?: "未知"
+                val lo = tMin?.getOrNull(i)?.toDoubleOrNull()?.let { "%.0f".format(it) } ?: "?"
+                val hi = tMax?.getOrNull(i)?.toDoubleOrNull()?.let { "%.0f".format(it) } ?: "?"
+                val prob = probs?.getOrNull(i) ?: "?"
+                val rainMm = rains?.getOrNull(i)?.toDoubleOrNull() ?: 0.0
+                val weekday = try {
+                    dayNames[java.time.LocalDate.parse(d).dayOfWeek.value % 7]
+                } catch (_: Exception) { "" }
+                val tag = when (i) { 0 -> "今天"; 1 -> "明天"; 2 -> "后天"; else -> weekday }
+                val day = d.substringAfterLast("-")
+                val rainText = if (rainMm > 0.1) "，降水量 " + String.format(java.util.Locale.CHINA, "%.1f", rainMm) + "mm" else ""
+                tag + "(" + day + ")：" + desc + " " + lo + "~" + hi + "°C，降水概率 " + prob + "%" + rainText
+            }.joinToString("\n")
+        } ?: throw ApiException("天气接口返回异常")
+    }
 
     fun current(lon: Double, lat: Double): String {
         val url = "https://api.open-meteo.com/v1/forecast" +

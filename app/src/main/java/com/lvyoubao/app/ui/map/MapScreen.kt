@@ -62,10 +62,13 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.NavigationTracker
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private val ME_ARGB = android.graphics.Color.argb(255, 21, 101, 192)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -74,7 +77,13 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
         factory = remember { viewModelFactory { initializer { MapViewModel(app.applicationContext, app.settingsRepository, app.trackStore) } } },
     )
     val state by vm.ui.collectAsState()
+    val me by NavigationTracker.fix.collectAsState()
     val context = LocalContext.current
+
+    // 地图页可见期间订阅定位：给「我的位置」和实时位置点供数
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { NavigationTracker.stop(context) }
+    }
     val scope = rememberCoroutineScope()
     var selectedMap by remember { mutableStateOf<File?>(null) }
     var destination by remember { mutableStateOf("") }
@@ -256,6 +265,8 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     var trackOverlay by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
                     var drawnTrack by remember(map.absolutePath) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
                     var mapViewRef by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.android.view.MapView?>(null) }
+                    var meMarker by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
+                    var lastMeDrawn by remember(map.absolutePath) { mutableStateOf<NavigationTracker.Fix?>(null) }
                     key(map.absolutePath) {
                         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                             AndroidView<org.mapsforge.map.android.view.MapView>(
@@ -288,6 +299,31 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                     runCatching { mapView.destroyAll() }
                                 },
                                 update = { mapView: org.mapsforge.map.android.view.MapView ->
+                                    // 切换省份：Compose 会复用旧 MapView（factory 不会重跑），
+                                    // 这里必须原地换底图，否则显示的还是上一个省
+                                    if (mapView.tag != map.absolutePath) {
+                                        mapView.tag = map.absolutePath
+                                        val bb = runCatching {
+                                            val mf = org.mapsforge.map.reader.MapFile(map)
+                                            try {
+                                                mf.mapFileInfo.boundingBox
+                                            } finally {
+                                                runCatching { mf.close() }
+                                            }
+                                        }.getOrNull()
+                                        val meNow = me
+                                        val cLat = meNow?.lat ?: bb?.let { b -> (b.minLatitude + b.maxLatitude) / 2 } ?: 28.0
+                                        val cLon = meNow?.lon ?: bb?.let { b -> (b.minLongitude + b.maxLongitude) / 2 } ?: 116.0
+                                        swapBaseMap(mapView, map, cLat, cLon, if (meNow != null) 16.toByte() else 11.toByte())
+                                    }
+                                    // 实时位置点（有定位就画，切图后自动补上）
+                                    val f = me
+                                    if (f != null && f != lastMeDrawn) {
+                                        lastMeDrawn = f
+                                        removeLayer(mapView.layerManager.layers, meMarker)
+                                        meMarker = dotMarker(context, f.lat, f.lon, ME_ARGB, 15)
+                                            ?.also { mapView.layerManager.layers.add(it) }
+                                    }
                                     if (state.trackPoints != drawnTrack) {
                                         trackOverlay?.let { overlay ->
                                             runCatching { mapView.layerManager.layers.remove(overlay) }
@@ -368,14 +404,20 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                         modifier = Modifier
                                             .clickable {
                                                 scope.launch {
-                                                    val place = withContext(Dispatchers.IO) {
-                                                        LocationContext.current(context)
-                                                    } ?: return@launch
+                                                    NavigationTracker.start(context)
+                                                    val f = NavigationTracker.fix.value
+                                                        ?: withContext(Dispatchers.IO) {
+                                                            LocationContext.current(context)?.let {
+                                                                NavigationTracker.Fix(it.lat, it.lon)
+                                                            }
+                                                        }
                                                     mapViewRef?.let { mv ->
-                                                        mv.model.mapViewPosition.setCenter(
-                                                            org.mapsforge.core.model.LatLong(place.lat, place.lon),
-                                                        )
-                                                        mv.model.mapViewPosition.setZoomLevel(16.toByte())
+                                                        f?.let {
+                                                            mv.model.mapViewPosition.setCenter(
+                                                                org.mapsforge.core.model.LatLong(it.lat, it.lon),
+                                                            )
+                                                            mv.model.mapViewPosition.setZoomLevel(16.toByte())
+                                                        }
                                                     }
                                                 }
                                             }

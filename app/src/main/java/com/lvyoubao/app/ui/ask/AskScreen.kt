@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -90,6 +91,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.ChatSession
+import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
@@ -128,6 +130,7 @@ fun AskScreen(
         factory = remember { viewModelFactory { initializer { ChatViewModel(app) } } },
     )
     val state by vm.ui.collectAsState()
+    val streamState by vm.stream.collectAsState()
     val messages by vm.messages.collectAsState()
     val settings by vm.settings.collectAsState()
     val sessionList by vm.sessionList.collectAsState()
@@ -209,8 +212,9 @@ fun AskScreen(
         } else if (SpeechInput.isAvailable(context)) {
             listening = true
             scope.launch {
+                HotwordCorrector.buildIfNeeded(vm.sessionList.value, emptyList())
                 SpeechInput.listen(context, "说出来，我帮你问")
-                    .onSuccess { vm.updateQuestion(it) }
+                    .onSuccess { vm.updateQuestion(HotwordCorrector.correct(it)) }
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
                 listening = false
             }
@@ -244,8 +248,8 @@ fun AskScreen(
         }
     }
 
-    // 新消息到达时滚到底部
-    LaunchedEffect(messages.size, state.sending) {
+    // 新消息到达 / 流式内容增长时滚到底部
+    LaunchedEffect(messages.size, state.sending, streamState?.answer?.length) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem((messages.size + if (state.sending) 1 else 0).coerceAtLeast(0))
         }
@@ -256,7 +260,9 @@ fun AskScreen(
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
     LaunchedEffect(lastAssistant?.ts, settings.autoSpeak) {
         val msg = lastAssistant ?: return@LaunchedEffect
-        if (settings.autoSpeak && msg.ts != spokenTs) {
+        // 只读 20 秒内的新回答：切页面/切会话/重进 App 不再把旧消息读一遍
+        val fresh = System.currentTimeMillis() - msg.ts < 20_000
+        if (settings.autoSpeak && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         }
@@ -521,6 +527,7 @@ fun AskScreen(
                     }
                 }
                 if (state.sending) {
+                    streamState?.let { st -> item { StreamingCard(st) } }
                     item {
                         LinearProgressIndicator(
                             modifier = Modifier
@@ -807,6 +814,59 @@ private fun UserBubble(message: SessionMessage) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
+        }
+    }
+}
+
+@Composable
+private fun StreamingCard(st: ChatViewModel.StreamState) {
+    var expanded by remember { mutableStateOf(true) }
+    val hasReasoning = st.reasoning.isNotBlank()
+    val hasAnswer = st.answer.isNotBlank()
+    LaunchedEffect(hasAnswer) {
+        if (hasAnswer) expanded = false
+    }
+    ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+        Column(Modifier.padding(20.dp)) {
+            if (hasReasoning) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { expanded = !expanded }
+                        .padding(vertical = 2.dp),
+                ) {
+                    Text(
+                        if (!hasAnswer) "🤔 思考中…" else (if (expanded) "▼ 已深度思考（点收起）" else "▶ 已深度思考（点展开）"),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (expanded || !hasAnswer) {
+                    Text(
+                        st.reasoning,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 20.sp,
+                        modifier = Modifier
+                            .heightIn(max = 200.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(top = 6.dp),
+                    )
+                }
+                if (hasAnswer) Spacer(Modifier.height(10.dp))
+            }
+            if (hasAnswer) {
+                Text(
+                    st.answer,
+                    fontSize = 20.sp,
+                    lineHeight = 30.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            } else if (!hasReasoning) {
+                Text("正在思考…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

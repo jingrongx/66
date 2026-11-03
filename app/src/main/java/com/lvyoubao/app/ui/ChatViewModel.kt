@@ -23,10 +23,13 @@ import com.lvyoubao.app.data.RouteMode
 import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
+import com.lvyoubao.app.data.WeatherClient
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -68,6 +71,12 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         val sending: Boolean = false,
         val error: String? = null,
     )
+
+    /** 流式输出：reasoning=思考内容，answer=正文增量累积 */
+    data class StreamState(val reasoning: String = "", val answer: String = "")
+
+    private val _stream = MutableStateFlow<StreamState?>(null)
+    val stream: StateFlow<StreamState?> = _stream.asStateFlow()
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -162,10 +171,35 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 .takeLast(12)
                 .map { OutMessage(role = it.role, text = it.text) }
 
+            // 天气类问题强制走专业数据源（Open-Meteo 数值预报），AI 只负责总结，不再依赖联网搜索
+            var weatherBlock: String? = null
+            if (WEATHER_INTENT.containsMatchIn(question) && LocationContext.hasPermission(context)) {
+                runCatching {
+                    val here = withContext(Dispatchers.IO) {
+                        LocationContext.current(context)
+                    }
+                    if (here != null) {
+                        val fc = withContext(Dispatchers.IO) {
+                            WeatherClient.forecast(here.lon, here.lat)
+                        }
+                        if (fc.isNotBlank()) {
+                            weatherBlock = buildString {
+                                appendLine("【气象数据 · Open-Meteo 数值预报（更新于 " +
+                                    SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date()) + "）】")
+                                appendLine("位置：${here.description}")
+                                append(fc)
+                                appendLine()
+                                append("回答天气类问题必须以上述数据为准：直接说哪天转晴/下雨、温度区间、降水概率；数据里没有的就明说，不要再去搜索。")
+                            }
+                        }
+                    }
+                }
+            }
+
             val payload = listOf(
                 OutMessage("system", AiClient.SYSTEM_PROMPT),
                 OutMessage("system", contextBlock),
-            ) + history + listOf(
+            ) + (weatherBlock?.let { listOf(OutMessage("system", it)) } ?: emptyList()) + history + listOf(
                 OutMessage(
                     role = "user",
                     text = userText,
@@ -176,6 +210,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             // 工具层捕获的地图卡（问路线/地点时由 get_route / search_poi 带回）
             val mapCards = java.util.Collections.synchronizedList(mutableListOf<MapCardData>())
 
+            _stream.value = StreamState()
             AiClient(settingsValue).chat(
                 messages = payload,
                 thinking = settingsValue.thinking,
@@ -183,6 +218,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 toolExecutor = { name, args ->
                     AppTools.execute(context, settingsValue, name, args) { card -> mapCards.add(card) }
                 },
+                onAnswer = { d -> _stream.update { cur -> val s = cur ?: StreamState(); s.copy(answer = s.answer + d) } },
+                onReasoning = { d -> _stream.update { cur -> val s = cur ?: StreamState(); s.copy(reasoning = s.reasoning + d) } },
             ).fold(
                 onSuccess = { reply ->
                     // 地图卡三级来源：工具捕获 > AI 输出的地图意图 > 关键词兜底
@@ -201,9 +238,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                             ts = System.currentTimeMillis(),
                         ),
                     )
+                    _stream.value = null
                     _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
                 },
                 onFailure = { e ->
+                    _stream.value = null
                     _ui.update { it.copy(sending = false, error = e.message ?: "请求失败") }
                 },
             )
@@ -261,7 +300,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     } else {
                         here?.let { it.lon to it.lat }
                     } ?: return@withContext null
-                    val to = amap.geocode(intent.destination, city) ?: return@withContext null
+                    // POI 优先解析（坐标更贴近实际入口），拿不到再地理编码
+                    val to = runCatching {
+                        AmapClient.resolveDestination(amap, intent.destination, from.first, from.second)
+                    }.getOrNull() ?: amap.geocode(intent.destination, city) ?: return@withContext null
                     val plan = amap.routePlans(RouteMode.WALK, from.first, from.second, to.first, to.second)
                         .firstOrNull() ?: return@withContext null
                     MapCardData(
@@ -338,6 +380,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     companion object {
+        /** 天气类问题（强制注入专业气象数据） */
+        val WEATHER_INTENT = Regex("天气|下雨|下雪|降雪|降雨|天晴|放晴|转晴|晴不晴|气温|温度|几度|冷不冷|热不热|穿什么|带伞|雨伞|刮风|风力|风速|湿度|降水")
         /** 拼一条消息的可朗读文本（回答 + 要点 + 建议），会话页与长辈模式共用 */
         fun speakableText(message: SessionMessage): String = buildString {
             append(message.text)
@@ -400,17 +444,30 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
         private fun imageToDataUrl(resolver: android.content.ContentResolver, uri: Uri): String? = runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
+            // 注意：inJustDecodeBounds=true 时 decodeStream 恒返回 null，只读 bounds；
+            // 这里不能用返回值做判空，否则所有图片都会被误判为"读取失败"
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
             var sample = 1
             while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
             val options = BitmapFactory.Options().apply { inSampleSize = sample }
             val bitmap = resolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, options)
-            } ?: return null
+            } ?: if (android.os.Build.VERSION.SDK_INT >= 28) {
+                // 兜底：ImageDecoder 对 HEIC/HEIF 与部分厂商私有 JPEG 变体更宽容
+                runCatching {
+                    android.graphics.ImageDecoder.decodeBitmap(
+                        android.graphics.ImageDecoder.createSource(resolver, uri),
+                    ) { decoder, info, _ ->
+                        val largest = maxOf(info.size.width, info.size.height)
+                        if (largest > 1280) decoder.setTargetSampleSize((largest + 1279) / 1280)
+                    }
+                }.getOrNull()
+            } else null
+            val bmp = bitmap ?: return null
             val output = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 75, output)
-            bitmap.recycle()
+            bmp.compress(Bitmap.CompressFormat.JPEG, 75, output)
+            bmp.recycle()
             val b64 = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
             "data:image/jpeg;base64,$b64"
         }.getOrNull()

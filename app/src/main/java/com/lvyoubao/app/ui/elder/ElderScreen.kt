@@ -46,6 +46,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
@@ -98,9 +99,10 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
         } else if (SpeechInput.isAvailable(context)) {
             listening = true
             scope.launch {
+                HotwordCorrector.buildIfNeeded(vm.sessionList.value, emptyList())
                 SpeechInput.listen(context, "请说话")
                     .onSuccess { spoken ->
-                        vm.updateQuestion(spoken)
+                        vm.updateQuestion(HotwordCorrector.correct(spoken))
                         vm.send(context)
                     }
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
@@ -133,9 +135,11 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
 
     // 回答自动朗读（只读一次；顶部「自动播报」开关关闭时不读）
+    // 新鲜度阈值：只朗读 20 秒内的新回答，切页面/重进会话不再把旧消息重新读一遍
     LaunchedEffect(lastAssistant?.ts, settings.autoSpeak) {
         val msg = lastAssistant ?: return@LaunchedEffect
-        if (settings.autoSpeak && msg.ts != spokenTs) {
+        val fresh = System.currentTimeMillis() - msg.ts < 20_000
+        if (settings.autoSpeak && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         }
@@ -149,6 +153,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
             .padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // 头部第一行：标题 + 退出按钮（退出永远可见，不许被开关挤掉）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -159,22 +164,32 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                 "旅游宝 · 长辈模式",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
-            // 自动播报开关（进长辈模式默认已打开，可随时关）
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("自动播报", fontSize = 20.sp)
-                androidx.compose.material3.Switch(
-                    checked = settings.autoSpeak,
-                    onCheckedChange = { vm.setAutoSpeak(it) },
-                    modifier = Modifier.scale(0.85f),
-                )
-            }
-            TextButton(onClick = {
-                TtsPlayer.stop()
-                vm.setElderMode(false)
+            Button(
+                onClick = {
+                    TtsPlayer.stop()
+                    vm.setElderMode(false)
                 onExit()
-            }) { Text("退出长辈模式") }
+                },
+                modifier = Modifier.height(48.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                ),
+            ) { Text("退出长辈模式", fontSize = 18.sp) }
+        }
+        // 头部第二行：自动播报开关
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("回答自动朗读", fontSize = 20.sp)
+            Spacer(Modifier.weight(1f))
+            androidx.compose.material3.Switch(
+                checked = settings.autoSpeak,
+                onCheckedChange = { vm.setAutoSpeak(it) },
+            )
         }
         Spacer(Modifier.height(14.dp))
 

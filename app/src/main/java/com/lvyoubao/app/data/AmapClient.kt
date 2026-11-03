@@ -307,7 +307,25 @@ class AmapClient(private val key: String) {
     }.getOrNull()
 
     companion object {
-        /** 去掉高德指引里的 HTML 标记与空格 */
+        /**
+         * 目的地解析：POI 检索优先（坐标贴近实际入口/门址），名称对得上才采信；
+         * 兜底地理编码。解决"高德导航传过去的终点有点不准、要手动纠正"的问题。
+         */
+    fun resolveDestination(amap: AmapClient, name: String, fromLon: Double, fromLat: Double): Pair<Double, Double>? {
+            val clean = name.trim()
+            if (clean.isEmpty()) throw ApiException("目的地为空")
+            val strip = Regex("[\\s（）]")
+            val qn = strip.replace(clean, "")
+            val poi = runCatching { amap.poiSearch(clean, fromLon, fromLat) }.getOrNull()
+                ?.firstOrNull { p ->
+                    val pn = strip.replace(p.name, "")
+                    pn.isNotEmpty() && (pn.contains(qn) || qn.contains(pn))
+                }
+                ?.let { it.lon to it.lat }
+            return poi ?: amap.geocode(clean)
+        }
+
+        /** 解析 GPX 轨迹（BRouter 返回），同时算累计爬升 */
         fun stripHtml(s: String): String =
             s.replace(Regex("<[^>]+>"), "").replace("&nbsp;", " ").trim()
 

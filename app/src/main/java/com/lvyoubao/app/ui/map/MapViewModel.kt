@@ -215,7 +215,8 @@ class MapViewModel(
                     val to = if (settings.amapKey.isBlank()) {
                         throw ApiException("目的地解析需要高德 Key；也可直接输入「纬度,经度」")
                     } else {
-                        amap.geocode(destination) ?: throw ApiException("无法解析目的地「$destination」")
+                        AmapClient.resolveDestination(amap, destination, place.lon, place.lat)
+                            ?: throw ApiException("无法解析目的地「$destination」")
                     }
                     val r = runCatching { amap.walkingRoute(place.lon, place.lat, to.first, to.second) }
                         .getOrElse { e ->

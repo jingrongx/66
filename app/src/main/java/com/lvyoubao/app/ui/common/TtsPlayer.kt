@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +24,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 回答朗读（老人/骑行/走路场景解放双眼）。进程级单例。
  * 策略：优先 Edge 云端合成（效果好、零体积、无需 Key），失败回退系统 TTS；
  * 两路都失败才报"不可用"。所有失败落到 [state] 由界面明示。
+ *
+ * 长文本按句切分流水线：边合成边播（第 i 句播放时第 i+1 句已在后台合成），
+ * 首句秒出，不再等整篇合成完才出声。
  */
 object TtsPlayer {
 
@@ -59,12 +63,36 @@ object TtsPlayer {
         stop()
         _state.value = State.Loading
         job = scope.launch {
-            val file = runCatching { EdgeTts.synthesize(body, File(context.cacheDir, "tts")) }
-                .getOrNull()
-            if (file != null && file.length() > 0) {
-                playFile(context, file, body)
-            } else {
-                speakWithSystem(context, body)
+            val chunks = splitForSpeech(body)
+            if (chunks.isEmpty()) {
+                _state.value = State.Idle
+                return@launch
+            }
+            val dir = File(context.cacheDir, "tts")
+            // 流水线：先合成第 1 段；播第 i 段时第 i+1 段已在后台合成
+            var pending: kotlinx.coroutines.Deferred<File?>? = async { EdgeTts.synthesize(chunks[0], dir) }
+            for (i in chunks.indices) {
+                val cur = pending ?: break
+                pending = if (i + 1 < chunks.size) {
+                    async { EdgeTts.synthesize(chunks[i + 1], dir) }
+                } else {
+                    null
+                }
+                val file = runCatching { cur.await() }.getOrNull()
+                if (file == null || file.length() == 0L) {
+                    // 云端合成失败：剩余文本整体交给系统 TTS 兜底
+                    speakWithSystem(context, chunks.drop(i).joinToString(""))
+                    return@launch
+                }
+                val ok = playFileAwait(file)
+                runCatching { file.delete() }
+                if (!ok) {
+                    speakWithSystem(context, chunks.drop(i + 1).joinToString(""))
+                    return@launch
+                }
+            }
+            if (_state.value is State.Speaking || _state.value is State.Loading) {
+                _state.value = State.Idle
             }
         }
     }
@@ -79,39 +107,60 @@ object TtsPlayer {
         if (_state.value !is State.Idle) _state.value = State.Idle
     }
 
-    private suspend fun playFile(context: Context, file: File, fallbackText: String) {
-        val ok = withContext(Dispatchers.Main) {
-            runCatching {
-                val p = MediaPlayer()
-                player = p
-                p.setDataSource(file.absolutePath)
-                p.setOnCompletionListener {
-                    runCatching { it.release() }
-                    if (player === it) player = null
-                    if (_state.value is State.Speaking) _state.value = State.Idle
-                }
-                p.setOnErrorListener { mp, _, _ ->
-                    runCatching { mp.release() }
-                    if (player === mp) player = null
-                    if (_state.value is State.Speaking) _state.value = State.Idle
-                    true
-                }
-                p.prepare()
-                _state.value = State.Speaking
-                p.start()
-                true
-            }.getOrElse { false }
+    /** 按句切分：句末标点必断；逗号/顿号超 40 字也断；单段上限约 90 字 */
+    private fun splitForSpeech(text: String): List<String> {
+        val out = mutableListOf<String>()
+        val sb = StringBuilder()
+        fun flush() {
+            val s = sb.toString().trim()
+            if (s.isNotEmpty()) out.add(s)
+            sb.clear()
         }
-        if (!ok) {
-            playFileCleanup(file)
-            speakWithSystem(context, fallbackText)
+        for (ch in text) {
+            sb.append(ch)
+            val len = sb.length
+            val isEnd = ch == '。' || ch == '！' || ch == '？' || ch == '!' || ch == '?' || ch == '；' || ch == ';'
+            val isPause = (ch == '，' || ch == ',' || ch == '、' || ch == '：') && len >= 40
+            if (isEnd || isPause || len >= 90) flush()
         }
+        flush()
+        // 过滤纯符号段
+        return out.filter { it.any { c -> c.isLetterOrDigit() || c.code > 0x2E80 } }
     }
 
-    private fun playFileCleanup(file: File) {
-        runCatching { player?.release() }
-        player = null
-        file.delete()
+    /** 播放一个音频文件并挂起直到播完/出错/被取消；返回是否完整播完 */
+    private suspend fun playFileAwait(file: File): Boolean {
+        return withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { cont ->
+                val started = runCatching {
+                    val p = MediaPlayer()
+                    player = p
+                    p.setDataSource(file.absolutePath)
+                    p.setOnCompletionListener {
+                        runCatching { it.release() }
+                        if (player === it) player = null
+                        if (cont.isActive) cont.resume(true)
+                    }
+                    p.setOnErrorListener { mp, _, _ ->
+                        runCatching { mp.release() }
+                        if (player === mp) player = null
+                        if (cont.isActive) cont.resume(false)
+                        true
+                    }
+                    p.prepare()
+                    _state.value = State.Speaking
+                    p.start()
+                    true
+                }.getOrElse { false }
+                if (!started && cont.isActive) {
+                    cont.resume(false)
+                }
+                cont.invokeOnCancellation {
+                    runCatching { player?.release() }
+                    if (player != null) player = null
+                }
+            }
+        }
     }
 
     /** 系统 TTS 兜底：初始化（带超时）→ speak → 等待完成 */

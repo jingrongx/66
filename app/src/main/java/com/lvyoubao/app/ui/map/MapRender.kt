@@ -35,6 +35,9 @@ internal fun strokePaint(argb: Int, widthF: Float): org.mapsforge.core.graphics.
         setColor(argb)
         setStrokeWidth(widthF)
         setStyle(Style.STROKE)
+        // 圆头圆角：转弯处自然衔接，线端不缺一块
+        runCatching { setStrokeCap(org.mapsforge.core.graphics.Cap.ROUND) }
+        runCatching { setStrokeJoin(org.mapsforge.core.graphics.Join.ROUND) }
     }
 
 /** 往图层里加一条折线（描边样式），返回引用便于后续替换 */
@@ -104,6 +107,38 @@ internal fun arrowMarker(context: Context, lat: Double, lon: Double, argb: Int, 
     val mfBitmap = AndroidGraphicFactory.convertToBitmap(BitmapDrawable(context.resources, bmp) as android.graphics.drawable.Drawable)
     Marker(LatLong(lat, lon), mfBitmap, mfBitmap.width / 2, mfBitmap.height / 2)
 }.getOrNull()
+
+/**
+ * 原地换底图：移除旧渲染层（先 onDestroy 关闭旧 MapFile 防句柄泄漏），换上新地图。
+ * 用于同一 MapView 切换省份——Compose AndroidView 会复用旧视图，factory 不再执行，
+ * 必须在 update 阶段自己换底图，否则切省后显示的还是上一次的地图。
+ */
+internal fun swapBaseMap(
+    mv: org.mapsforge.map.android.view.MapView,
+    mapFile: File,
+    centerLat: Double,
+    centerLon: Double,
+    zoom: Byte,
+) {
+    ensureGraphicFactory(mv.context)
+    val layers = mv.layerManager.layers
+    layers.filterIsInstance<org.mapsforge.map.layer.renderer.TileRendererLayer>().firstOrNull()?.let { old ->
+        runCatching { old.onDestroy() }
+        runCatching { layers.remove(old) }
+    }
+    val tileCache = org.mapsforge.map.android.util.AndroidUtil.createTileCache(
+        mv.context, "lvyoubao-map", mv.model.displayModel.tileSize, 1.0f, 1.5,
+    )
+    val mapDataStore = org.mapsforge.map.reader.MapFile(mapFile)
+    val layer = org.mapsforge.map.layer.renderer.TileRendererLayer(
+        tileCache, mapDataStore, mv.model.mapViewPosition, false, true, false,
+        AndroidGraphicFactory.INSTANCE,
+    )
+    runCatching { layer.setXmlRenderTheme(org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT) }
+    layers.add(0, layer)
+    mv.model.mapViewPosition.setCenter(LatLong(centerLat, centerLon))
+    mv.model.mapViewPosition.setZoomLevel(zoom)
+}
 
 /**
  * 挑一张覆盖所有关键点的离线地图；都不覆盖就退回最新一张（和离线地图页的默认选择一致）。

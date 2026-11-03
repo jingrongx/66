@@ -108,7 +108,7 @@ object AppTools {
         val place = LocationContext.current(context) ?: throw ApiException("没有位置信息")
         if (settings.amapKey.isNotBlank()) {
             val amap = AmapClient(settings.amapKey)
-            val to = amap.geocode(destination)
+            val to = AmapClient.resolveDestination(amap, destination, place.lon, place.lat)
                 ?: throw ApiException("无法解析目的地「$destination」的坐标")
             // 新接口带分步指引；异常时退回旧步行接口（无指引但能画线）
             val card = runCatching {

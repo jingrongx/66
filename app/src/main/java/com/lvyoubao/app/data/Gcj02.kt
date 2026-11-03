@@ -32,11 +32,16 @@ object Gcj02 {
         return (lat + dLat) to (lon + dLon)
     }
 
-    /** GCJ-02 → WGS-84（画到 OSM 离线底图前必须转换） */
+    /** GCJ-02 → WGS-84（画到 OSM 离线底图前必须转换）。迭代 3 次收敛，残差 < 0.5 米 */
     fun toWgs(lat: Double, lon: Double): Pair<Double, Double> {
         if (outOfChina(lat, lon)) return lat to lon
-        val (dLat, dLon) = delta(lat, lon)
-        return (lat - dLat) to (lon - dLon)
+        var (wLat, wLon) = delta(lat, lon).let { (dLat, dLon) -> (lat - dLat) to (lon - dLon) }
+        repeat(3) {
+            val (dLat, dLon) = delta(wLat, wLon)
+            wLat = lat - dLat
+            wLon = lon - dLon
+        }
+        return wLat to wLon
     }
 
     /** 在给定点位处的 GCJ 偏移量（单步近似，误差 < 2 米，画线与导航足够） */
