@@ -327,41 +327,64 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                     }
                                 },
                             )
-                            // 回到我的位置
-                            Surface(
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surface,
-                                shadowElevation = 2.dp,
+                            // 右下角控制列：放大 / 缩小 / 我的位置（内置缩放按钮已关，避免遮挡）
+                            Column(
+                                horizontalAlignment = Alignment.End,
+                                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
                                     .padding(10.dp),
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .clickable {
-                                            scope.launch {
-                                                val place = withContext(Dispatchers.IO) {
-                                                    LocationContext.current(context)
-                                                } ?: return@launch
-                                                mapViewRef?.let { mv ->
-                                                    mv.model.mapViewPosition.setCenter(
-                                                        org.mapsforge.core.model.LatLong(place.lat, place.lon),
-                                                    )
-                                                    mv.model.mapViewPosition.setZoomLevel(16.toByte())
+                                Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
+                                    Text(
+                                        "＋",
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.clickable {
+                                            mapViewRef?.model?.mapViewPosition?.zoomIn()
+                                        }.padding(horizontal = 14.dp, vertical = 4.dp),
+                                    )
+                                }
+                                Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
+                                    Text(
+                                        "－",
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.clickable {
+                                            mapViewRef?.model?.mapViewPosition?.zoomOut()
+                                        }.padding(horizontal = 14.dp, vertical = 4.dp),
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shadowElevation = 2.dp,
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clickable {
+                                                scope.launch {
+                                                    val place = withContext(Dispatchers.IO) {
+                                                        LocationContext.current(context)
+                                                    } ?: return@launch
+                                                    mapViewRef?.let { mv ->
+                                                        mv.model.mapViewPosition.setCenter(
+                                                            org.mapsforge.core.model.LatLong(place.lat, place.lon),
+                                                        )
+                                                        mv.model.mapViewPosition.setZoomLevel(16.toByte())
+                                                    }
                                                 }
                                             }
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                                ) {
-                                    Icon(
-                                        Icons.Default.LocationOn,
-                                        contentDescription = "回到我的位置",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                    Spacer(Modifier.width(2.dp))
-                                    Text("我的位置", style = MaterialTheme.typography.labelSmall)
+                                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Default.LocationOn,
+                                            contentDescription = "回到我的位置",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(Modifier.width(2.dp))
+                                        Text("我的位置", style = MaterialTheme.typography.labelSmall)
+                                    }
                                 }
                             }
                         }

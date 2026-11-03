@@ -144,6 +144,8 @@ internal fun buildOfflineMapView(
     )
     runCatching { rendererLayer.setXmlRenderTheme(org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT) }
     mapView.layerManager.layers.add(rendererLayer)
+    // 内置缩放按钮位置固定在右下，会挡住自绘的「我的位置/全屏」等操作，统一关掉、由界面层自己画
+    runCatching { mapView.setBuiltInZoomControls(false) }
     mapView.model.mapViewPosition.setCenter(LatLong(centerLat, centerLon))
     mapView.model.mapViewPosition.setZoomLevel(zoom)
     return mapView
