@@ -56,9 +56,10 @@ class AmapClient(private val key: String) {
     }
 
     /** 关键词 POI 检索（按当前位置距离排序），失败抛 ApiException */
-    fun poiSearch(keyword: String, lon: Double, lat: Double): List<Poi> {
+    fun poiSearch(keyword: String, wgsLon: Double, wgsLat: Double): List<Poi> {
+        val g = Gcj02.fromWgs(wgsLat, wgsLon)
         val url = "https://restapi.amap.com/v3/place/text" +
-            "?keywords=${urlEncode(keyword)}&location=$lon,$lat&offset=6&page=1&extensions=base&key=$key"
+            "?keywords=${urlEncode(keyword)}&location=${g.second},${g.first}&offset=6&page=1&extensions=base&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
         val status = root["status"]?.jsonPrimitive?.content
         if (status != "1") {
@@ -72,12 +73,14 @@ class AmapClient(private val key: String) {
             val loc = o["location"]?.jsonPrimitive?.content?.split(",") ?: return@mapNotNull null
             val plon = loc.getOrNull(0)?.toDoubleOrNull() ?: return@mapNotNull null
             val plat = loc.getOrNull(1)?.toDoubleOrNull() ?: return@mapNotNull null
+            // POI 坐标 GCJ-02 → WGS-84，与调用方传入的位置同一坐标系后算距离
+            val w = Gcj02.toWgs(plat, plon)
             Poi(
                 name = o["name"]?.jsonPrimitive?.content ?: "",
                 address = (o["address"]?.jsonPrimitive?.content ?: "").take(40),
-                lon = plon,
-                lat = plat,
-                distanceM = FatigueEngine.haversine(lat, lon, plat, plon).toInt(),
+                lon = w.second,
+                lat = w.first,
+                distanceM = FatigueEngine.haversine(wgsLat, wgsLon, w.first, w.second).toInt(),
             )
         }.orEmpty()
     }
@@ -125,7 +128,9 @@ class AmapClient(private val key: String) {
             ?.split(",") ?: throw ApiException("没找到「$address」的坐标，换个说法或输入「纬度,经度」试试")
         val lon = loc.getOrNull(0)?.toDoubleOrNull() ?: return null
         val lat = loc.getOrNull(1)?.toDoubleOrNull() ?: return null
-        return lon to lat
+        // 高德返回 GCJ-02，统一转成 WGS-84 再出这个类（画 OSM 底图 / 与 GPS 同系）
+        val w = Gcj02.toWgs(lat, lon)
+        return w.second to w.first
     }
 
     private fun urlEncode(s: String): String = java.net.URLEncoder.encode(s, "UTF-8")
@@ -136,13 +141,26 @@ class AmapClient(private val key: String) {
      * 按出行方式查路线，返回全部方案（步行/骑行/驾车可能多条，公交取前 3 条）。
      * 任一方式失败抛 ApiException，由调用方提示。
      */
-    fun routePlans(mode: RouteMode, fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): List<RoutePlan> =
-        when (mode) {
-            RouteMode.WALK -> v3Paths(RouteMode.WALK, "walking", fromLon, fromLat, toLon, toLat)
-            RouteMode.DRIVE -> v3Paths(RouteMode.DRIVE, "driving", fromLon, fromLat, toLon, toLat)
-            RouteMode.RIDE -> v4Bicycle(fromLon, fromLat, toLon, toLat)
-            RouteMode.BUS -> v3Transit(fromLon, fromLat, toLon, toLat)
+    fun routePlans(mode: RouteMode, fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): List<RoutePlan> {
+        // 坐标系边界：调用方传 WGS-84（GPS/离线底图），高德接口要 GCJ-02；
+        // 返回的折线再转回 WGS-84，这样路线才能贴着 OSM 底图的道路走
+        val gFrom = Gcj02.fromWgs(fromLat, fromLon)
+        val gTo = Gcj02.fromWgs(toLat, toLon)
+        val list = when (mode) {
+            RouteMode.WALK -> v3Paths(RouteMode.WALK, "walking", gFrom.second, gFrom.first, gTo.second, gTo.first)
+            RouteMode.DRIVE -> v3Paths(RouteMode.DRIVE, "driving", gFrom.second, gFrom.first, gTo.second, gTo.first)
+            RouteMode.RIDE -> v4Bicycle(gFrom.second, gFrom.first, gTo.second, gTo.first)
+            RouteMode.BUS -> v3Transit(gFrom.second, gFrom.first, gTo.second, gTo.first)
         }
+        return list.map { plan ->
+            plan.copy(
+                points = plan.points.map { (lon, lat) ->
+                    val w = Gcj02.toWgs(lat, lon)
+                    w.second to w.first
+                },
+            )
+        }
+    }
 
     /** v3 步行/驾车：同一套结构，steps 带分步指引与折线 */
     private fun v3Paths(
@@ -276,8 +294,9 @@ class AmapClient(private val key: String) {
     }
 
     /** 逆地理编码：坐标 → 城市（公交路线必填 city 参数） */
-    fun regeocodeCity(lon: Double, lat: Double): String? = runCatching {
-        val url = "https://restapi.amap.com/v3/geocode/regeo?location=$lon,$lat&key=$key"
+    fun regeocodeCity(wgsLon: Double, wgsLat: Double): String? = runCatching {
+        val g = Gcj02.fromWgs(wgsLat, wgsLon)
+        val url = "https://restapi.amap.com/v3/geocode/regeo?location=${g.second},${g.first}&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
         if (root["status"]?.jsonPrimitive?.content != "1") return@runCatching null
         val ac = root["regeocodes"]?.jsonArray?.firstOrNull()

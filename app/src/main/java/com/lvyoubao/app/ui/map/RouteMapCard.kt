@@ -57,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,6 +71,7 @@ import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.ApiException
 import com.lvyoubao.app.data.AmapClient
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.Gcj02
 import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.MapPoi
 import com.lvyoubao.app.data.NavigationTracker
@@ -137,6 +139,8 @@ fun RouteMapCard(
     var lastAnnouncedStep by remember { mutableStateOf(-1) }
     var lastReplanAt by remember { mutableStateOf(0L) }
     var replanning by remember { mutableStateOf(false) }
+    var panelHeightPx by remember { mutableStateOf(0) }
+    var userDragging by remember { mutableStateOf(false) }
 
     val cardPlan = remember(card) {
         if (card.kind != "route" || card.points.size < 2) null
@@ -254,6 +258,7 @@ fun RouteMapCard(
     fun startNavigation() {
         navigating = true
         followZoomed = false
+        userDragging = false
         lastAnnouncedStep = -1
         NavigationTracker.start(context)
         expanded = true   // 导航直接进全屏，像高德一样整屏跟图
@@ -385,7 +390,10 @@ fun RouteMapCard(
                         // 拖动时告诉父容器别抢手势（会话列表会吃掉纵向滑动，导致内嵌地图拖不动）
                         mv.setOnTouchListener { v, ev ->
                             when (ev.actionMasked) {
-                                MotionEvent.ACTION_DOWN -> v.parent?.requestDisallowInterceptTouchEvent(true)
+                                MotionEvent.ACTION_DOWN -> {
+                                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                                    if (navigating) userDragging = true   // 手动看图时暂停自动跟图
+                                }
                                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
                                     v.parent?.requestDisallowInterceptTouchEvent(false)
                             }
@@ -452,7 +460,7 @@ fun RouteMapCard(
                     val layers = mv.layerManager.layers
                     removeLayer(layers, meMarker)
                     meMarker = dotMarker(context, f.lat, f.lon, ME_ARGB, 15)?.also { layers.add(it) }
-                    if (navigating) {
+                    if (navigating && !userDragging) {
                         mv.model.mapViewPosition.setCenter(org.mapsforge.core.model.LatLong(f.lat, f.lon))
                         if (!followZoomed) {
                             mv.model.mapViewPosition.setZoomLevel(17.toByte())
@@ -485,6 +493,7 @@ fun RouteMapCard(
                 LocationContext.current(context)?.let { NavigationTracker.Fix(it.lat, it.lon) }
             }
             if (f != null) {
+                userDragging = false   // 点"我的位置"恢复自动跟图
                 NavigationTracker.start(context)
                 mapViewRef?.let { mv ->
                     mv.model.mapViewPosition.setCenter(org.mapsforge.core.model.LatLong(f.lat, f.lon))
@@ -833,12 +842,15 @@ fun RouteMapCard(
                     }
 
                     // 右侧竖排控制列：放大 / 缩小 / 罗盘 / 我的位置
+                    // 底部悬浮面板会盖住屏幕下半段，控制列在整屏垂直居中的基础上
+                    // 上移面板高的一半，正好落在可见地图区域的中间（列表展开也不挡）
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
-                            .padding(end = 12.dp),
+                            .padding(end = 12.dp)
+                            .graphicsLayer { translationY = -panelHeightPx / 2f },
                     ) {
                         RoundMapButton("＋") {
                             val mv = mapViewRef
@@ -864,14 +876,15 @@ fun RouteMapCard(
                         }
                     }
 
-                    // 底部悬浮面板
+                    // 底部悬浮面板（高度变化实时回传给控制列做避让）
                     Surface(
                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
                         shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
                         shadowElevation = 8.dp,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .fillMaxWidth(),
+                            .fillMaxWidth()
+                            .onSizeChanged { panelHeightPx = it.height },
                     ) {
                         Column(
                             modifier = Modifier
@@ -947,8 +960,10 @@ private fun openInAmapApp(context: android.content.Context, card: MapCardData, m
     }
     val enc = { s: String -> runCatching { java.net.URLEncoder.encode(s, "UTF-8") }.getOrDefault(s) }
     val dname = enc(card.title.ifBlank { "目的地" })
-    val dlat = dest.second
-    val dlon = dest.first
+    // App 内坐标统一是 WGS-84（离线底图/GPS），高德 App 要 GCJ-02（dev=0）
+    val g = Gcj02.fromWgs(dest.second, dest.first)
+    val dlat = g.first
+    val dlon = g.second
     val deepLinks = listOf(
         "amapuri://route/plan?sourceApplication=lvyoubao&dlat=$dlat&dlon=$dlon&dname=$dname&dev=0&m=0&t=$t",
         "androidamap://route?sourceApplication=lvyoubao&lat=$dlat&lon=$dlon&dname=$dname&dev=0&m=0&t=$t&sname=${enc("我的位置")}",
