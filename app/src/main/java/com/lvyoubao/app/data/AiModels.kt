@@ -2,12 +2,25 @@ package com.lvyoubao.app.data
 
 import kotlinx.serialization.Serializable
 
-/** 单卡结构：一句短回答 + 要点列表（攻略类）+ 一个可执行动作 */
+/** 单卡结构：一句短回答 + 要点列表（攻略类）+ 一个可执行动作 + 可选的地图意图（AI 自己判断要不要配图） */
 @Serializable
 data class AssistantReply(
     val answer: String,
     val steps: List<String> = emptyList(),
     val action: String? = null,
+    val map: MapIntent? = null,
+)
+
+/**
+ * AI 输出的地图意图：模型判断回答涉及具体地点时给出，客户端据此去高德解析坐标并生成地图卡。
+ * type=place 讲某地在哪/介绍某地（keyword 生效）；type=route 从A到B（origin 可空=当前位置，destination 生效）。
+ */
+@Serializable
+data class MapIntent(
+    val type: String = "place",
+    val keyword: String = "",
+    val origin: String = "",
+    val destination: String = "",
 )
 
 /** 发给模型的一条消息；images 为 base64 data URL（仅 user 消息） */

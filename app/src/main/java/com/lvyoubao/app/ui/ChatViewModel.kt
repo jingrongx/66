@@ -15,9 +15,11 @@ import com.lvyoubao.app.data.AmapClient
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.MapCardData
+import com.lvyoubao.app.data.MapIntent
 import com.lvyoubao.app.data.MapPoi
 import com.lvyoubao.app.data.MemoryStore
 import com.lvyoubao.app.data.OutMessage
+import com.lvyoubao.app.data.RouteMode
 import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
@@ -183,8 +185,9 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 },
             ).fold(
                 onSuccess = { reply ->
-                    // 模型没调地图工具但问题明显在问地点时，兜底补一张地点卡
+                    // 地图卡三级来源：工具捕获 > AI 输出的地图意图 > 关键词兜底
                     val mapCard = mapCards.lastOrNull()
+                        ?: reply.map?.let { buildMapCardFromIntent(context, settingsValue, it) }
                         ?: buildFallbackPlaceCard(context, settingsValue, question)
                     sessions.appendMessage(
                         sessionId,
@@ -232,6 +235,63 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 source = "AI 回答（用户收藏）",
             )
             _ui.update { it.copy(error = null) }
+        }
+    }
+
+    /**
+     * AI 输出的地图意图 → 地图卡：
+     * route=解析起点（AI 给了起点名就按名解析，否则用当前位置）和终点坐标，规划步行路线；
+     * place=按关键词搜附近 POI。地名解析都带上当前城市，避免"市图书馆"解析到外地。
+     * 失败静默返回 null，不影响回答本身。
+     */
+    private suspend fun buildMapCardFromIntent(
+        context: Context,
+        settings: AiSettings,
+        intent: MapIntent,
+    ): MapCardData? {
+        if (settings.amapKey.isBlank()) return null
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                val amap = AmapClient(settings.amapKey)
+                val here = LocationContext.current(context)
+                val city = here?.let { amap.regeocodeCity(it.lon, it.lat) }
+                if (intent.type == "route" && intent.destination.isNotBlank()) {
+                    val from = if (intent.origin.isNotBlank()) {
+                        amap.geocode(intent.origin, city)
+                    } else {
+                        here?.let { it.lon to it.lat }
+                    } ?: return@withContext null
+                    val to = amap.geocode(intent.destination, city) ?: return@withContext null
+                    val plan = amap.routePlans(RouteMode.WALK, from.first, from.second, to.first, to.second)
+                        .firstOrNull() ?: return@withContext null
+                    MapCardData(
+                        kind = "route",
+                        title = intent.destination,
+                        fromLat = from.second,
+                        fromLon = from.first,
+                        toLat = to.second,
+                        toLon = to.first,
+                        distanceM = plan.distanceM,
+                        durationMin = plan.durationMin,
+                        points = plan.points.map { listOf(it.first, it.second) },
+                        steps = plan.steps,
+                    )
+                } else {
+                    val keyword = intent.keyword.ifBlank { intent.destination }
+                    val p = here ?: return@withContext null
+                    val pois = amap.poiSearch(keyword, p.lon, p.lat)
+                    if (pois.isEmpty()) return@withContext null
+                    MapCardData(
+                        kind = "place",
+                        title = keyword,
+                        fromLat = p.lat,
+                        fromLon = p.lon,
+                        toLat = pois.first().lat,
+                        toLon = pois.first().lon,
+                        pois = pois.map { MapPoi(it.name, it.address, it.lat, it.lon, it.distanceM) },
+                    )
+                }
+            }.getOrNull()
         }
     }
 

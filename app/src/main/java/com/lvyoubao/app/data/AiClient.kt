@@ -297,10 +297,26 @@ class AiClient(private val settings: AiSettings) {
                 json.decodeFromString<AssistantReply>(content.substring(start, end + 1))
             }.getOrNull()
             if (parsed != null && (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() })) {
+                val mapIntent = parsed.map
+                    ?.takeIf { m ->
+                        val isRoute = m.type.equals("route", true) || m.type == "路线" || m.type == "导航"
+                        (isRoute && m.destination.isNotBlank()) ||
+                            (!isRoute && m.keyword.isNotBlank())
+                    }
+                    ?.let { m ->
+                        val isRoute = m.type.equals("route", true) || m.type == "路线" || m.type == "导航"
+                        m.copy(
+                            type = if (isRoute) "route" else "place",
+                            keyword = m.keyword.trim(),
+                            origin = m.origin.trim(),
+                            destination = m.destination.trim(),
+                        )
+                    }
                 return parsed.copy(
                     answer = parsed.answer.trim(),
                     steps = parsed.steps.map { it.trim() }.filter { it.isNotEmpty() },
                     action = parsed.action?.trim()?.takeIf { it.isNotEmpty() && !it.equals("null", true) },
+                    map = mapIntent,
                 )
             }
         }
@@ -351,6 +367,12 @@ class AiClient(private val settings: AiSettings) {
             3. 需要实时信息（附近地点、天气、去某地的路线）时，先调用工具查真实数据，再回答；绝不编造数字。
             4. 不确定的数字绝不编造：优先使用搜索结果或工具返回的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。
             以 json 格式输出：{"answer": "一句话总结，不超过2句", "steps": ["要点1", "要点2", ...]，快问快答时为空数组, "action": "一句话的下一步动作建议，没有则为 null"}
+            另外，当回答涉及具体地点时（某景点/场馆/店铺的位置、怎么去、从A到B、值得一去的去处），加一个 "map" 字段让界面在回答下方配一张地图：
+            {"type": "place" 或 "route", "keyword": "地点关键词", "origin": "起点名", "destination": "目的地名"}
+            - 讲某个地方在哪/介绍某地：type=place，keyword 填规范地点名（如"汤显祖纪念馆"）
+            - 从A到B怎么走/多远：type=route，origin 填起点名（用户说"从这里/从我这"就填空字符串，界面会用当前位置），destination 填终点的规范地点名
+            - 回答与具体地点无关（纯聊天、天气、时间、体力建议）时不要输出 map 字段
+            - 地点名要规范完整（用官方名称，不要写"那个博物馆"），宁缺毋滥：拿不准就别输出 map
         """.trimIndent()
     }
 }
