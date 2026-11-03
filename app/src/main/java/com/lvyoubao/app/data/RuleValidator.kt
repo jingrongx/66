@@ -14,15 +14,15 @@ object RuleValidator {
                 .split('。', '！', '？', '；', '!', '?', ';', '\n')
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
-            if (sentences.size > 2) violations += "回答有点长，可以让它再简短些"
+            if (sentences.size > 2) violations += "回答略长，可让它再短些"
         }
         val allText = (reply.answer + reply.steps.joinToString(""))
         if (allText.none { it.isDigit() }) {
-            violations += "回答里没有具体数字，可以追问一句"
+            violations += "没带数字，可追问一句"
         }
         return violations
     }
 
     /** 全部通过时给用户看的一句话（只陈述事实，不打包票） */
-    const val PASS_LABEL: String = "已自动检查：简短、含数字"
+    const val PASS_LABEL: String = "已自动检查"
 }

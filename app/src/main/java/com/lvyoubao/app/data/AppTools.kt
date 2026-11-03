@@ -38,7 +38,17 @@ object AppTools {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun execute(context: Context, settings: AiSettings, name: String, argumentsJson: String): String {
+    /**
+     * 工具执行：返回给模型的文本之外，还会把「查路线 / 搜地点」拿到的结构化数据
+     * 通过 [onMapCard] 回传，会话层据此在回答下方渲染地图卡。
+     */
+    fun execute(
+        context: Context,
+        settings: AiSettings,
+        name: String,
+        argumentsJson: String,
+        onMapCard: (MapCardData) -> Unit = {},
+    ): String {
         val args: JsonObject? = runCatching {
             json.parseToJsonElement(argumentsJson.ifBlank { "{}" }).jsonObject
         }.getOrNull()
@@ -52,8 +62,22 @@ object AppTools {
                     val p = place ?: throw ApiException("没有位置信息")
                     val pois = AmapClient(settings.amapKey).poiSearch(keyword, p.lon, p.lat)
                     if (pois.isEmpty()) "附近没有找到「$keyword」"
-                    else pois.joinToString("\n") {
-                        "- ${it.name}｜${it.address}｜约 ${it.distanceM} 米"
+                    else {
+                        // 地点卡：候选点带回会话，图上标点、可点「去这里」
+                        onMapCard(
+                            MapCardData(
+                                kind = "place",
+                                title = keyword,
+                                fromLat = p.lat,
+                                fromLon = p.lon,
+                                toLat = pois.first().lat,
+                                toLon = pois.first().lon,
+                                pois = pois.map { MapPoi(it.name, it.address, it.lat, it.lon, it.distanceM) },
+                            ),
+                        )
+                        pois.joinToString("\n") {
+                            "- ${it.name}｜${it.address}｜约 ${it.distanceM} 米"
+                        }
                     }
                 }
 
@@ -64,7 +88,7 @@ object AppTools {
 
                 ROUTE -> {
                     val destination = arg("destination") ?: throw ApiException("缺少 destination")
-                    route(context, settings, destination)
+                    route(context, settings, destination, onMapCard)
                 }
 
                 else -> "未知工具：$name"
@@ -75,14 +99,50 @@ object AppTools {
     }
 
     /** 路线：优先高德（有 Key 时），否则 BRouter（已安装时），都不可用给明确提示 */
-    fun route(context: Context, settings: AiSettings, destination: String): String {
+    fun route(
+        context: Context,
+        settings: AiSettings,
+        destination: String,
+        onMapCard: (MapCardData) -> Unit = {},
+    ): String {
         val place = LocationContext.current(context) ?: throw ApiException("没有位置信息")
         if (settings.amapKey.isNotBlank()) {
             val amap = AmapClient(settings.amapKey)
             val to = amap.geocode(destination)
                 ?: throw ApiException("无法解析目的地「$destination」的坐标")
-            val r = amap.walkingRoute(place.lon, place.lat, to.first, to.second)
-            return formatRoute(r, destination, "高德步行路线")
+            // 新接口带分步指引；异常时退回旧步行接口（无指引但能画线）
+            val card = runCatching {
+                val plan = amap.routePlans(RouteMode.WALK, place.lon, place.lat, to.first, to.second).firstOrNull()
+                if (plan != null) {
+                    MapCardData(
+                        kind = "route",
+                        title = destination,
+                        fromLat = place.lat,
+                        fromLon = place.lon,
+                        toLat = to.second,
+                        toLon = to.first,
+                        distanceM = plan.distanceM,
+                        durationMin = plan.durationMin,
+                        points = plan.points.map { listOf(it.first, it.second) },
+                        steps = plan.steps,
+                    )
+                } else {
+                    val r = amap.walkingRoute(place.lon, place.lat, to.first, to.second)
+                    MapCardData(
+                        kind = "route",
+                        title = destination,
+                        fromLat = place.lat,
+                        fromLon = place.lon,
+                        toLat = to.second,
+                        toLon = to.first,
+                        distanceM = r.distanceM,
+                        durationMin = r.durationMin,
+                        points = r.points.map { listOf(it.first, it.second) },
+                    )
+                }
+            }.getOrElse { throw it }
+            onMapCard(card)
+            return "步行至「$destination」：${MapCardData.distanceText(card.distanceM)}，${MapCardData.durationText(card.durationMin)}（高德步行路线）"
         }
         if (BRouterClient.isInstalled(context)) {
             // BRouter 需要坐标起点：先粗定位（用当前坐标），目的地用文本让 BRouter 不行——
@@ -93,7 +153,7 @@ object AppTools {
     }
 
     fun formatRoute(r: AmapClient.RouteResult, destination: String, source: String): String =
-        "步行至「$destination」：${"%.1f".format(r.distanceM / 1000f)} 公里，约 ${r.durationMin} 分钟" +
+        "步行至「$destination」：${MapCardData.distanceText(r.distanceM)}，${MapCardData.durationText(r.durationMin)}" +
             (if (r.climbM > 20) "，累计爬升约 ${r.climbM} 米" else "") +
             "（$source）"
 }

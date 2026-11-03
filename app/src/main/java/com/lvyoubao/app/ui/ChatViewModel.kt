@@ -11,8 +11,11 @@ import androidx.lifecycle.viewModelScope
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.AiClient
 import com.lvyoubao.app.data.AiSettings
+import com.lvyoubao.app.data.AmapClient
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.MapCardData
+import com.lvyoubao.app.data.MapPoi
 import com.lvyoubao.app.data.MemoryStore
 import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.RuleValidator
@@ -82,7 +85,13 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     fun setSearchEnabled(value: Boolean) = updateSettings { it.copy(searchEnabled = value) }
 
-    fun setElderMode(value: Boolean) = updateSettings { it.copy(elderMode = value) }
+    /** 顶部「自动播报」开关：打开后每条新回答自动朗读 */
+    fun setAutoSpeak(value: Boolean) = updateSettings { it.copy(autoSpeak = value) }
+
+    /** 进长辈模式默认打开自动播报（语音优先），用户仍可随时在顶部关掉 */
+    fun setElderMode(value: Boolean) = updateSettings {
+        it.copy(elderMode = value, autoSpeak = if (value) true else it.autoSpeak)
+    }
 
     private fun updateSettings(transform: (AiSettings) -> AiSettings) {
         viewModelScope.launch { repo.save(transform(settings.value)) }
@@ -162,13 +171,21 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 ),
             )
 
+            // 工具层捕获的地图卡（问路线/地点时由 get_route / search_poi 带回）
+            val mapCards = java.util.Collections.synchronizedList(mutableListOf<MapCardData>())
+
             AiClient(settingsValue).chat(
                 messages = payload,
                 thinking = settingsValue.thinking,
                 searchEnabled = settingsValue.searchEnabled,
-                toolExecutor = { name, args -> AppTools.execute(context, settingsValue, name, args) },
+                toolExecutor = { name, args ->
+                    AppTools.execute(context, settingsValue, name, args) { card -> mapCards.add(card) }
+                },
             ).fold(
                 onSuccess = { reply ->
+                    // 模型没调地图工具但问题明显在问地点时，兜底补一张地点卡
+                    val mapCard = mapCards.lastOrNull()
+                        ?: buildFallbackPlaceCard(context, settingsValue, question)
                     sessions.appendMessage(
                         sessionId,
                         SessionMessage(
@@ -177,6 +194,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                             steps = reply.steps,
                             action = reply.action,
                             violations = RuleValidator.validate(reply),
+                            mapCard = mapCard,
                             ts = System.currentTimeMillis(),
                         ),
                     )
@@ -217,7 +235,56 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /**
+     * 兜底地点卡：问题明显在问「怎么去 / 在哪」但模型没调地图工具时，
+     * 直接拿提取出的关键词搜一次 POI，把地点卡补上（失败静默，不打扰回答）。
+     */
+    private suspend fun buildFallbackPlaceCard(
+        context: Context,
+        settings: AiSettings,
+        question: String,
+    ): MapCardData? {
+        val keyword = extractPlaceKeyword(question) ?: return null
+        if (settings.amapKey.isBlank()) return null
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                val place = LocationContext.current(context) ?: return@withContext null
+                val pois = AmapClient(settings.amapKey).poiSearch(keyword, place.lon, place.lat)
+                if (pois.isEmpty()) return@withContext null
+                MapCardData(
+                    kind = "place",
+                    title = keyword,
+                    fromLat = place.lat,
+                    fromLon = place.lon,
+                    toLat = pois.first().lat,
+                    toLon = pois.first().lon,
+                    pois = pois.map { MapPoi(it.name, it.address, it.lat, it.lon, it.distanceM) },
+                )
+            }.getOrNull()
+        }
+    }
+
+    private fun extractPlaceKeyword(question: String): String? {
+        val text = question.trim()
+        val hasIntent = Regex("怎么走|怎么去|怎么到|怎么前往|如何去|如何到达|在哪|在哪儿|在哪里|多远|远不远|导航|带我去|路线").containsMatchIn(text)
+        if (!hasIntent) return null
+        var kw = text
+            .replace(Regex("请问|麻烦|帮我|我想|我要|现在|附近|一下|查询|查下|看看|搜索|导航到|导航去|带我去"), "")
+            .replace(Regex("怎么走|怎么去|怎么到|怎么前往|如何去|如何到达|在哪|在哪儿|在哪里|多远|远不远|路线"), "")
+            .replace(Regex("[?？!！。,，、\\s]+"), "")
+            .trim()
+        kw = kw.removePrefix("去").removePrefix("到").removePrefix("前往").removePrefix("回")
+        return kw.takeIf { it.length in 2..20 }
+    }
+
     companion object {
+        /** 拼一条消息的可朗读文本（回答 + 要点 + 建议），会话页与长辈模式共用 */
+        fun speakableText(message: SessionMessage): String = buildString {
+            append(message.text)
+            message.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
+            message.action?.let { append("。建议：$it") }
+        }
+
         /**
          * 从 Uri 构建附件：图片压缩为 base64 data URL；文本文件读前 60KB。
          * 失败不再静默返回 null，而是带原因回传，界面明示用户。

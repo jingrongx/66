@@ -61,6 +61,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
@@ -76,6 +77,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -96,6 +98,7 @@ import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.map.RouteMapCard
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -248,6 +251,17 @@ fun AskScreen(
         }
     }
 
+    // 自动播报：开关打开时，新回答一落地就读
+    var spokenTs by remember { mutableStateOf(0L) }
+    val lastAssistant = messages.lastOrNull { it.role == "assistant" }
+    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak) {
+        val msg = lastAssistant ?: return@LaunchedEffect
+        if (settings.autoSpeak && msg.ts != spokenTs) {
+            spokenTs = msg.ts
+            TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
+        }
+    }
+
     val isDeepSeek = settings.presetId == "deepseek"
 
     ModalNavigationDrawer(
@@ -349,6 +363,16 @@ fun AskScreen(
                     Icon(Icons.Default.Menu, contentDescription = "会话列表")
                 }
                 Spacer(Modifier.weight(1f))
+                // 自动播报开关：打开后每条新回答自动朗读
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("播报", style = MaterialTheme.typography.labelMedium)
+                    Switch(
+                        checked = settings.autoSpeak,
+                        onCheckedChange = { vm.setAutoSpeak(it) },
+                        modifier = Modifier.scale(0.72f),
+                    )
+                }
+                Spacer(Modifier.width(2.dp))
                 val sensingRunning by SensingBus.running.collectAsState()
                 val sensingBand by SensingBus.band.collectAsState()
                 Box(
@@ -489,7 +513,11 @@ fun AskScreen(
                 items(messages) { message ->
                     when (message.role) {
                         "user" -> UserBubble(message)
-                        else -> AssistantCard(message, onSaveMemory = { vm.saveToMemory(message) })
+                        else -> AssistantCard(
+                            message = message,
+                            onSaveMemory = { vm.saveToMemory(message) },
+                            app = app,
+                        )
                     }
                 }
                 if (state.sending) {
@@ -784,16 +812,14 @@ private fun UserBubble(message: SessionMessage) {
 }
 
 @Composable
-private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
+private fun AssistantCard(
+    message: SessionMessage,
+    onSaveMemory: () -> Unit,
+    app: TravelApp,
+) {
     val context = LocalContext.current
     val ttsState by TtsPlayer.state.collectAsState()
-    val ttsText = remember(message.ts) {
-        buildString {
-            append(message.text)
-            message.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
-            message.action?.let { append("。建议：$it") }
-        }
-    }
+    val ttsText = remember(message.ts) { ChatViewModel.speakableText(message) }
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.padding(20.dp)) {
             Text(
@@ -822,7 +848,7 @@ private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
                 }
             }
             message.action?.let { action ->
-                HorizontalDivider(Modifier.padding(vertical = 14.dp))
+                Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         Icons.Default.LocationOn,
@@ -834,20 +860,37 @@ private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
                     Text(action, style = MaterialTheme.typography.bodyLarge)
                 }
             }
+            // 问路线/地点时：回答下方直接给可交互的地图卡
+            message.mapCard?.let { card ->
+                RouteMapCard(card = card, app = app)
+            }
+            // 卡片底部操作区：朗读 / 收藏（靠左）
+            Spacer(Modifier.height(10.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 2.dp),
+            ) {
+                TextButton(onClick = { TtsPlayer.toggle(context, ttsText) }) {
+                    Text(if (ttsState is TtsPlayer.State.Speaking) "停止朗读" else "朗读")
+                }
+                TextButton(onClick = onSaveMemory) { Text("收藏") }
+            }
         }
     }
+    // 卡片下方只留一行极简检查结果
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 4.dp),
+            .padding(top = 4.dp, start = 4.dp),
     ) {
         if (message.violations.isEmpty()) {
             Icon(
                 Icons.Default.CheckCircle,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(13.dp),
             )
             Spacer(Modifier.width(4.dp))
             Text(
@@ -860,20 +903,15 @@ private fun AssistantCard(message: SessionMessage, onSaveMemory: () -> Unit) {
                 Icons.Default.Info,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(13.dp),
             )
             Spacer(Modifier.width(4.dp))
             Text(
-                "小提醒：" + message.violations.joinToString("；"),
+                "提醒：" + message.violations.joinToString("；"),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.weight(1f))
-        TextButton(onClick = { TtsPlayer.toggle(context, ttsText) }) {
-            Text(if (ttsState is TtsPlayer.State.Speaking) "停止" else "朗读")
-        }
-        TextButton(onClick = onSaveMemory) { Text("收藏") }
     }
     (ttsState as? TtsPlayer.State.Unavailable)?.let { unavailable ->
         Text(

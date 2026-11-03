@@ -37,6 +37,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -131,19 +132,12 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
 
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
 
-    // 回答自动朗读（只读一次）
-    LaunchedEffect(lastAssistant?.ts) {
+    // 回答自动朗读（只读一次；顶部「自动播报」开关关闭时不读）
+    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak) {
         val msg = lastAssistant ?: return@LaunchedEffect
-        if (msg.ts != spokenTs) {
+        if (settings.autoSpeak && msg.ts != spokenTs) {
             spokenTs = msg.ts
-            TtsPlayer.speak(
-                context,
-                buildString {
-                    append(msg.text)
-                    msg.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
-                    msg.action?.let { append("。建议：$it") }
-                },
-            )
+            TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         }
     }
 
@@ -167,6 +161,15 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                 fontWeight = FontWeight.Bold,
             )
             Spacer(Modifier.weight(1f))
+            // 自动播报开关（进长辈模式默认已打开，可随时关）
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("自动播报", fontSize = 20.sp)
+                androidx.compose.material3.Switch(
+                    checked = settings.autoSpeak,
+                    onCheckedChange = { vm.setAutoSpeak(it) },
+                    modifier = Modifier.scale(0.85f),
+                )
+            }
             TextButton(onClick = {
                 TtsPlayer.stop()
                 vm.setElderMode(false)
@@ -237,19 +240,14 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     }
                 }
             }
+            // 问路线/地点时：同样内嵌地图卡（大字号版）
+            msg.mapCard?.let { card ->
+                com.lvyoubao.app.ui.map.RouteMapCard(card = card, app = app, elder = true)
+            }
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
-                    onClick = {
-                        TtsPlayer.speak(
-                            context,
-                            buildString {
-                                append(msg.text)
-                                msg.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
-                                msg.action?.let { append("。建议：$it") }
-                            },
-                        )
-                    },
+                    onClick = { TtsPlayer.speak(context, ChatViewModel.speakableText(msg)) },
                     modifier = Modifier.height(48.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) { Text("再读一遍", fontSize = 18.sp) }

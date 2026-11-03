@@ -24,6 +24,7 @@ class SettingsRepository(private val context: Context) {
         val amapKey = stringPreferencesKey("amap_key")
         val asrKey = stringPreferencesKey("asr_key")
         val elderMode = booleanPreferencesKey("elder_mode")
+        val autoSpeak = booleanPreferencesKey("auto_speak")
     }
 
     val settings: Flow<AiSettings> = context.dataStore.data.map { p ->
@@ -39,6 +40,7 @@ class SettingsRepository(private val context: Context) {
             amapKey = p[Keys.amapKey] ?: "",
             asrKey = p[Keys.asrKey] ?: "",
             elderMode = p[Keys.elderMode] ?: false,
+            autoSpeak = p[Keys.autoSpeak] ?: false,
         )
     }
 
@@ -54,6 +56,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.amapKey] = settings.amapKey
             p[Keys.asrKey] = settings.asrKey
             p[Keys.elderMode] = settings.elderMode
+            p[Keys.autoSpeak] = settings.autoSpeak
         }
     }
 

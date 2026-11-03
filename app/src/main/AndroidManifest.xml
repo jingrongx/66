@@ -15,6 +15,8 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <!-- 包可见性：判断高德地图是否安装（会话地图卡「高德地图」按钮跳转需要） -->
+        <package android:name="com.autonavi.minimap" />
     </queries>
 
     <application

@@ -18,11 +18,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -33,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -41,6 +44,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
@@ -56,14 +60,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.lvyoubao.app.R
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.LocationContext
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-private var graphicsFactoryReady = false
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -73,6 +75,7 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
     )
     val state by vm.ui.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var selectedMap by remember { mutableStateOf<File?>(null) }
     var destination by remember { mutableStateOf("") }
     var customUrl by remember { mutableStateOf("") }
@@ -252,34 +255,116 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     var drawnPoints by remember(map.absolutePath) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
                     var trackOverlay by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
                     var drawnTrack by remember(map.absolutePath) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
+                    var mapViewRef by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.android.view.MapView?>(null) }
                     key(map.absolutePath) {
-                        AndroidView<org.mapsforge.map.android.view.MapView>(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp)),
-                            factory = { ctx -> buildMapView(ctx, map) },
-                            onReset = { _ -> },
-                            onRelease = { mapView: org.mapsforge.map.android.view.MapView ->
-                                runCatching { mapView.destroyAll() }
-                            },
-                            update = { mapView: org.mapsforge.map.android.view.MapView ->
-                                if (state.trackPoints != drawnTrack) {
-                                    trackOverlay?.let { overlay ->
-                                        runCatching { mapView.layerManager.layers.remove(overlay) }
+                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            AndroidView<org.mapsforge.map.android.view.MapView>(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(16.dp)),
+                                factory = { ctx ->
+                                    val center = LocationContext.current(ctx)
+                                    // 没有定位时默认落在地图文件的中心，别瞎飘
+                                    val bb = runCatching {
+                                        val mf = org.mapsforge.map.reader.MapFile(map)
+                                        try {
+                                            mf.mapFileInfo.boundingBox
+                                        } finally {
+                                            runCatching { mf.close() }
+                                        }
+                                    }.getOrNull()
+                                    val centerLat = center?.lat
+                                        ?: bb?.let { b -> (b.minLatitude + b.maxLatitude) / 2 }
+                                        ?: 28.0
+                                    val centerLon = center?.lon
+                                        ?: bb?.let { b -> (b.minLongitude + b.maxLongitude) / 2 }
+                                        ?: 116.0
+                                    buildOfflineMapView(ctx, map, centerLat, centerLon, 16.toByte())
+                                        .also { mapViewRef = it }
+                                },
+                                onReset = { _ -> },
+                                onRelease = { mapView: org.mapsforge.map.android.view.MapView ->
+                                    if (mapViewRef === mapView) mapViewRef = null
+                                    runCatching { mapView.destroyAll() }
+                                },
+                                update = { mapView: org.mapsforge.map.android.view.MapView ->
+                                    if (state.trackPoints != drawnTrack) {
+                                        trackOverlay?.let { overlay ->
+                                            runCatching { mapView.layerManager.layers.remove(overlay) }
+                                        }
+                                        trackOverlay = addPolyline(
+                                            mapView.layerManager.layers, state.trackPoints,
+                                            android.graphics.Color.argb(200, 255, 138, 101), 8f,
+                                        )
+                                        drawnTrack = state.trackPoints
                                     }
-                                    trackOverlay = drawTrack(mapView, state.trackPoints)
-                                    drawnTrack = state.trackPoints
-                                }
-                                if (state.routePoints != drawnPoints) {
-                                    routeOverlay?.let { overlay ->
-                                        runCatching { mapView.layerManager.layers.remove(overlay) }
+                                    if (state.routePoints != drawnPoints) {
+                                        routeOverlay?.let { overlay ->
+                                            runCatching { mapView.layerManager.layers.remove(overlay) }
+                                        }
+                                        routeOverlay = addPolyline(
+                                            mapView.layerManager.layers, state.routePoints,
+                                            android.graphics.Color.argb(240, 13, 115, 133), 12f,
+                                        )
+                                        drawnPoints = state.routePoints
+                                        // 画完路线自动框住全程（等布局完成再取宽高）
+                                        mapView.post {
+                                            val pts = state.routePoints.map {
+                                                org.mapsforge.core.model.LatLong(it.second, it.first)
+                                            }
+                                            if (pts.isNotEmpty()) {
+                                                mapView.model.mapViewPosition.setCenter(
+                                                    org.mapsforge.core.model.LatLong(
+                                                        pts.map { it.latitude }.average(),
+                                                        pts.map { it.longitude }.average(),
+                                                    ),
+                                                )
+                                                mapView.model.mapViewPosition.setZoomLevel(
+                                                    fitZoomLevel(mapView.width, mapView.height, pts),
+                                                )
+                                            }
+                                        }
                                     }
-                                    routeOverlay = drawRoute(mapView, state.routePoints)
-                                    drawnPoints = state.routePoints
+                                },
+                            )
+                            // 回到我的位置
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                shadowElevation = 2.dp,
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(10.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clickable {
+                                            scope.launch {
+                                                val place = withContext(Dispatchers.IO) {
+                                                    LocationContext.current(context)
+                                                } ?: return@launch
+                                                mapViewRef?.let { mv ->
+                                                    mv.model.mapViewPosition.setCenter(
+                                                        org.mapsforge.core.model.LatLong(place.lat, place.lon),
+                                                    )
+                                                    mv.model.mapViewPosition.setZoomLevel(16.toByte())
+                                                }
+                                            }
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.LocationOn,
+                                        contentDescription = "回到我的位置",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(Modifier.width(2.dp))
+                                    Text("我的位置", style = MaterialTheme.typography.labelSmall)
                                 }
-                            },
-                        )
+                            }
+                        }
                     }
                 }
             }
@@ -327,91 +412,5 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
     }
 }
 
-/** 构建 mapsforge 地图视图：离线底图 + 当前位置标记。个别装饰失败不影响底图。 */
-private fun buildMapView(context: android.content.Context, mapFile: File): org.mapsforge.map.android.view.MapView {
-    if (!graphicsFactoryReady) {
-        org.mapsforge.map.android.graphics.AndroidGraphicFactory.createInstance(context.applicationContext)
-        graphicsFactoryReady = true
-    }
-    val mapView = org.mapsforge.map.android.view.MapView(context)
-    mapView.isClickable = true
-    val tileCache = org.mapsforge.map.android.util.AndroidUtil.createTileCache(
-        context,
-        "lvyoubao-map",
-        mapView.model.displayModel.tileSize,
-        1.0f,
-        1.5,
-    )
-    val mapDataStore = org.mapsforge.map.reader.MapFile(mapFile)
-    val rendererLayer = org.mapsforge.map.layer.renderer.TileRendererLayer(
-        tileCache,
-        mapDataStore,
-        mapView.model.mapViewPosition,
-        false,
-        true,
-        false,
-        org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE,
-    )
-    runCatching {
-        rendererLayer.setXmlRenderTheme(org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT)
-    }
-    mapView.layerManager.layers.add(rendererLayer)
+/** 感知足迹折线（日出橙细线）与路线折线统一走 [addPolyline]（描边样式），不再在本文件里各自画 */
 
-    // 当前位置标记
-    runCatching {
-        LocationContext.current(context)?.let { place ->
-            val drawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_launcher_foreground)
-            if (drawable != null) {
-                val bitmap = org.mapsforge.map.android.graphics.AndroidGraphicFactory.convertToBitmap(drawable)
-                val marker = org.mapsforge.map.layer.overlay.Marker(
-                    org.mapsforge.core.model.LatLong(place.lat, place.lon),
-                    bitmap,
-                    bitmap.width / 2,
-                    bitmap.height / 2,
-                )
-                mapView.layerManager.layers.add(marker)
-                mapView.model.mapViewPosition.setCenter(org.mapsforge.core.model.LatLong(place.lat, place.lon))
-            }
-        }
-    }
-    runCatching { mapView.model.mapViewPosition.setZoomLevel(13.toByte()) }
-    return mapView
-}
-
-/** 感知足迹折线（日出橙细线），由 [MapScreen] 的 update 阶段调用，返回折线引用便于替换 */
-private fun drawTrack(
-    mapView: org.mapsforge.map.android.view.MapView,
-    points: List<Pair<Double, Double>>,
-): org.mapsforge.map.layer.overlay.Polyline? {
-    if (points.size < 2) return null
-    return runCatching {
-        val paint = org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE.createPaint()
-        paint.setColor(android.graphics.Color.argb(200, 255, 138, 101))
-        paint.setStrokeWidth(8f)
-        val polyline = org.mapsforge.map.layer.overlay.Polyline(
-            paint,
-            org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE,
-        )
-        points.forEach { (lon, lat) -> polyline.addPoint(org.mapsforge.core.model.LatLong(lat, lon)) }
-        mapView.layerManager.layers.add(polyline)
-        polyline
-    }.getOrNull()
-}
-
-/** 在地图上追加路线折线（由 [MapScreen] 的 update 阶段调用），返回折线引用便于替换 */
-private fun drawRoute(
-    mapView: org.mapsforge.map.android.view.MapView,
-    points: List<Pair<Double, Double>>,
-): org.mapsforge.map.layer.overlay.Polyline? {
-    if (points.size < 2) return null
-    val paint = org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE.createPaint()
-    paint.setColor(android.graphics.Color.argb(230, 13, 115, 133))
-    paint.setStrokeWidth(14f)
-    val polyline = org.mapsforge.map.layer.overlay.Polyline(
-        paint,
-        org.mapsforge.map.android.graphics.AndroidGraphicFactory.INSTANCE,
-    )
-    points.forEach { (lon, lat) -> polyline.addPoint(org.mapsforge.core.model.LatLong(lat, lon)) }
-    mapView.layerManager.layers.add(polyline)
-    return polyline
-}

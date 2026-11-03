@@ -12,7 +12,7 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
 
-/** 会话里的一条消息（不持久化图片字节，只标记“带图”） */
+/** 会话里的一条消息（不持久化图片字节，只标记“带图” */
 @kotlinx.serialization.Serializable
 data class SessionMessage(
     val role: String,
@@ -21,6 +21,7 @@ data class SessionMessage(
     val action: String? = null,
     val violations: List<String> = emptyList(),
     val hadImage: Boolean = false,
+    val mapCard: MapCardData? = null,   // 地图卡：问路线/地点时由工具层捕获，会话里直接渲染
     val ts: Long,
 )
 

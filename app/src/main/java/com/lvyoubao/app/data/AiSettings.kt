@@ -11,4 +11,5 @@ data class AiSettings(
     val amapKey: String = "",
     val asrKey: String = "",
     val elderMode: Boolean = false,
+    val autoSpeak: Boolean = false,   // 顶部开关：新回答自动朗读
 )

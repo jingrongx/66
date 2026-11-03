@@ -112,8 +112,7 @@ class AmapClient(private val key: String) {
     }
 
     /** 地理编码：地址 → 坐标 */
-    fun geocode(address: String, city: String? = null): Pair<Double, Double>? {
-        val url = "https://restapi.amap.com/v3/geocode/geo" +
+    fun geocode(address: String, city: String? = null): Pair<Double, Double>? {        val url = "https://restapi.amap.com/v3/geocode/geo" +
             "?address=${urlEncode(address)}${city?.let { "&city=${urlEncode(it)}" } ?: ""}&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
         if (root["status"]?.jsonPrimitive?.content != "1") {
@@ -131,7 +130,168 @@ class AmapClient(private val key: String) {
 
     private fun urlEncode(s: String): String = java.net.URLEncoder.encode(s, "UTF-8")
 
+    // ---------- 多出行方式路线规划（会话地图卡用） ----------
+
+    /**
+     * 按出行方式查路线，返回全部方案（步行/骑行/驾车可能多条，公交取前 3 条）。
+     * 任一方式失败抛 ApiException，由调用方提示。
+     */
+    fun routePlans(mode: RouteMode, fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): List<RoutePlan> =
+        when (mode) {
+            RouteMode.WALK -> v3Paths(RouteMode.WALK, "walking", fromLon, fromLat, toLon, toLat)
+            RouteMode.DRIVE -> v3Paths(RouteMode.DRIVE, "driving", fromLon, fromLat, toLon, toLat)
+            RouteMode.RIDE -> v4Bicycle(fromLon, fromLat, toLon, toLat)
+            RouteMode.BUS -> v3Transit(fromLon, fromLat, toLon, toLat)
+        }
+
+    /** v3 步行/驾车：同一套结构，steps 带分步指引与折线 */
+    private fun v3Paths(
+        mode: RouteMode,
+        api: String,
+        fromLon: Double,
+        fromLat: Double,
+        toLon: Double,
+        toLat: Double,
+    ): List<RoutePlan> {
+        val url = "https://restapi.amap.com/v3/direction/$api" +
+            "?origin=$fromLon,$fromLat&destination=$toLon,$toLat&key=$key&extensions=base"
+        val root = json.parseToJsonElement(get(url)).jsonObject
+        if (root["status"]?.jsonPrimitive?.content != "1") {
+            throw ApiException(mapAmapError(
+                root["info"]?.jsonPrimitive?.content,
+                root["infocode"]?.jsonPrimitive?.content,
+            ))
+        }
+        val paths = root["route"]?.jsonObject?.get("paths")?.jsonArray ?: return emptyList()
+        return paths.mapNotNull { p ->
+            val o = p.jsonObject
+            val dist = o["distance"]?.jsonPrimitive?.content?.toIntOrNull() ?: return@mapNotNull null
+            val dur = ((o["duration"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0) / 60).toInt()
+            val pts = mutableListOf<Pair<Double, Double>>()
+            val steps = mutableListOf<String>()
+            val starts = mutableListOf<Int>()
+            o["steps"]?.jsonArray?.forEach { s ->
+                val so = s.jsonObject
+                val polyline = so["polyline"]?.jsonPrimitive?.content ?: return@forEach
+                starts.add(pts.size)
+                steps.add(stripHtml(so["instruction"]?.jsonPrimitive?.content ?: ""))
+                polyline.split(";").forEach { seg ->
+                    val c = seg.split(",")
+                    val lon = c.getOrNull(0)?.toDoubleOrNull()
+                    val lat = c.getOrNull(1)?.toDoubleOrNull()
+                    if (lon != null && lat != null) pts.add(lon to lat)
+                }
+            }
+            RoutePlan(mode = mode, distanceM = dist, durationMin = dur, points = pts, steps = steps, stepStarts = starts)
+        }
+    }
+
+    /** v4 骑行（注意 v4 的结构与 v3 不同，duration 单位秒） */
+    private fun v4Bicycle(fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): List<RoutePlan> {
+        val url = "https://restapi.amap.com/v4/direction/bicycling" +
+            "?origin=$fromLon,$fromLat&destination=$toLon,$toLat&key=$key"
+        val root = json.parseToJsonElement(get(url)).jsonObject
+        val errcode = root["errcode"]?.jsonPrimitive?.content?.toIntOrNull() ?: -1
+        if (errcode != 0) {
+            throw ApiException("骑行路线查询失败：" + (root["errmsg"]?.jsonPrimitive?.content ?: "未知错误"))
+        }
+        val paths = root["data"]?.jsonObject?.get("paths")?.jsonArray ?: return emptyList()
+        return paths.mapNotNull { p ->
+            val o = p.jsonObject
+            val dist = o["distance"]?.jsonPrimitive?.content?.toDoubleOrNull()?.toInt() ?: return@mapNotNull null
+            val dur = ((o["duration"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0) / 60).toInt()
+            val pts = mutableListOf<Pair<Double, Double>>()
+            val steps = mutableListOf<String>()
+            val starts = mutableListOf<Int>()
+            o["steps"]?.jsonArray?.forEach { s ->
+                val so = s.jsonObject
+                val polyline = so["polyline"]?.jsonPrimitive?.content ?: return@forEach
+                starts.add(pts.size)
+                steps.add(stripHtml(so["instruction"]?.jsonPrimitive?.content ?: ""))
+                polyline.split(";").forEach { seg ->
+                    val c = seg.split(",")
+                    val lon = c.getOrNull(0)?.toDoubleOrNull()
+                    val lat = c.getOrNull(1)?.toDoubleOrNull()
+                    if (lon != null && lat != null) pts.add(lon to lat)
+                }
+            }
+            RoutePlan(mode = RouteMode.RIDE, distanceM = dist, durationMin = dur, points = pts, steps = steps, stepStarts = starts)
+        }
+    }
+
+    /** v3 公交（transit/integrated）：取前 3 个换乘方案，折线 = 步行段 + 公交段拼接 */
+    private fun v3Transit(fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): List<RoutePlan> {
+        val city = regeocodeCity(fromLon, fromLat) ?: throw ApiException("公交路线需要先定位所在城市")
+        val url = "https://restapi.amap.com/v3/direction/transit/integrated" +
+            "?origin=$fromLon,$fromLat&destination=$toLon,$toLat&city=${urlEncode(city)}&strategy=0&key=$key"
+        val root = json.parseToJsonElement(get(url)).jsonObject
+        if (root["status"]?.jsonPrimitive?.content != "1") {
+            throw ApiException(mapAmapError(
+                root["info"]?.jsonPrimitive?.content,
+                root["infocode"]?.jsonPrimitive?.content,
+            ))
+        }
+        val transits = root["route"]?.jsonObject?.get("transits")?.jsonArray ?: return emptyList()
+        return transits.take(3).mapIndexedNotNull { idx, t ->
+            val o = t.jsonObject
+            val dist = o["distance"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+            val dur = ((o["duration"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0) / 60).toInt()
+            val pts = mutableListOf<Pair<Double, Double>>()
+            val steps = mutableListOf<String>()
+            val starts = mutableListOf<Int>()
+            o["segments"]?.jsonArray?.forEach { segEl ->
+                val seg = segEl.jsonObject
+                val walking = seg["walking"]?.jsonObject
+                val bus = seg["bus"]?.jsonObject
+                walking?.get("steps")?.jsonArray?.forEach { s ->
+                    val polyline = s.jsonObject["polyline"]?.jsonPrimitive?.content ?: return@forEach
+                    starts.add(pts.size)
+                    steps.add(stripHtml(s.jsonObject["instruction"]?.jsonPrimitive?.content ?: "步行"))
+                    polyline.split(";").forEach { p ->
+                        val c = p.split(",")
+                        val lon = c.getOrNull(0)?.toDoubleOrNull()
+                        val lat = c.getOrNull(1)?.toDoubleOrNull()
+                        if (lon != null && lat != null) pts.add(lon to lat)
+                    }
+                }
+                bus?.get("buslines")?.jsonArray?.firstOrNull()?.let { lineEl ->
+                    val line = lineEl.jsonObject
+                    starts.add(pts.size)
+                    steps.add("乘坐 ${stripHtml(line["name"]?.jsonPrimitive?.content ?: "公交")}")
+                    line["polyline"]?.jsonPrimitive?.content?.split(";")?.forEach { p ->
+                        val c = p.split(",")
+                        val lon = c.getOrNull(0)?.toDoubleOrNull()
+                        val lat = c.getOrNull(1)?.toDoubleOrNull()
+                        if (lon != null && lat != null) pts.add(lon to lat)
+                    }
+                }
+            }
+            if (pts.isEmpty()) return@mapIndexedNotNull null
+            RoutePlan(
+                mode = RouteMode.BUS, distanceM = dist, durationMin = dur,
+                points = pts, steps = steps, stepStarts = starts,
+                tag = if (transits.size > 1) "方案${"一二三".getOrElse(idx) { '一' }}" else "",
+            )
+        }
+    }
+
+    /** 逆地理编码：坐标 → 城市（公交路线必填 city 参数） */
+    fun regeocodeCity(lon: Double, lat: Double): String? = runCatching {
+        val url = "https://restapi.amap.com/v3/geocode/regeo?location=$lon,$lat&key=$key"
+        val root = json.parseToJsonElement(get(url)).jsonObject
+        if (root["status"]?.jsonPrimitive?.content != "1") return@runCatching null
+        val ac = root["regeocodes"]?.jsonArray?.firstOrNull()
+            ?.jsonObject?.get("addressComponent")?.jsonObject
+        val city = runCatching { ac?.get("city")?.jsonPrimitive?.content }.getOrNull()
+        val province = runCatching { ac?.get("province")?.jsonPrimitive?.content }.getOrNull()
+        (city ?: province)?.takeIf { it.isNotBlank() && it != "[]" }
+    }.getOrNull()
+
     companion object {
+        /** 去掉高德指引里的 HTML 标记与空格 */
+        fun stripHtml(s: String): String =
+            s.replace(Regex("<[^>]+>"), "").replace("&nbsp;", " ").trim()
+
         /** 解析 GPX 轨迹（BRouter 返回），同时算累计爬升 */
         fun parseGpx(gpx: String): RouteResult {
             val points = Regex("<trkpt[^>]*lat=\"(-?[\\d.]+)\"[^>]*lon=\"(-?[\\d.]+)\"[^>]*>(.*?)</trkpt>", RegexOption.DOT_MATCHES_ALL)
