@@ -25,9 +25,12 @@
         <package android:name="com.autonavi.minimap" />
     </queries>
 
+    <!-- usesCleartextTraffic：扫码同步配置走局域网明文 HTTP（http://192.168.x.x），
+         新版安卓默认禁止，需显式放开；外部接口（DeepSeek/高德等）仍全部为 HTTPS -->
     <application
         android:name=".TravelApp"
         android:allowBackup="true"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"

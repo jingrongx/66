@@ -192,7 +192,11 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
                     it.copy(syncPushFailed = true, syncPushResult = "推送被拒绝（口令校验未通过或内容无效），请重新扫一次车机上的二维码")
                 }
                 else -> _ui.update {
-                    it.copy(syncPushFailed = true, syncPushResult = "推送失败：连不上车机。请确认两台设备连的是同一个 Wi-Fi（或车机已连上手机热点），再重试。")
+                    val why = result.removePrefix("fail: ")
+                    it.copy(
+                        syncPushFailed = true,
+                        syncPushResult = "推送失败：连不上车机。请确认两台设备连的是同一个 Wi-Fi（或车机已连上手机热点），再重试。（技术原因：$why）",
+                    )
                 }
             }
         }
