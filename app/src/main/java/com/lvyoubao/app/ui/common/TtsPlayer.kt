@@ -46,6 +46,11 @@ object TtsPlayer {
     private var systemTts: TextToSpeech? = null
     private var systemReady = false
 
+    /** 第一句之后每段的目标长度（字）：连接少、抗抖动，Edge 单请求上限 3000 */
+    private const val SEGMENT_CHARS = 600
+    /** 单段合成重试次数 */
+    private const val SYNTH_ATTEMPTS = 3
+
     /** 播放/合成中 → 停止并返回 false；空闲 → 开始并返回 true */
     fun toggle(context: Context, text: String): Boolean {
         return if (_state.value is State.Speaking || _state.value is State.Loading) {
@@ -63,24 +68,24 @@ object TtsPlayer {
         stop()
         _state.value = State.Loading
         job = scope.launch {
-            val chunks = splitForSpeech(body)
+            val chunks = buildChunks(body)
             if (chunks.isEmpty()) {
                 _state.value = State.Idle
                 return@launch
             }
             val dir = File(context.cacheDir, "tts")
             // 流水线：先合成第 1 段；播第 i 段时第 i+1 段已在后台合成
-            var pending: kotlinx.coroutines.Deferred<File?>? = async { EdgeTts.synthesize(chunks[0], dir) }
+            var pending: kotlinx.coroutines.Deferred<File?>? = async { synthesizeWithRetry(chunks[0], dir) }
             for (i in chunks.indices) {
                 val cur = pending ?: break
                 pending = if (i + 1 < chunks.size) {
-                    async { EdgeTts.synthesize(chunks[i + 1], dir) }
+                    async { synthesizeWithRetry(chunks[i + 1], dir) }
                 } else {
                     null
                 }
                 val file = runCatching { cur.await() }.getOrNull()
                 if (file == null || file.length() == 0L) {
-                    // 云端合成失败：剩余文本整体交给系统 TTS 兜底
+                    // 重试后仍失败：剩余文本整体交给系统 TTS 兜底
                     speakWithSystem(context, chunks.drop(i).joinToString(""))
                     return@launch
                 }
@@ -105,6 +110,39 @@ object TtsPlayer {
         player = null
         runCatching { systemTts?.stop() }
         if (_state.value !is State.Idle) _state.value = State.Idle
+    }
+
+    /**
+     * 合成分段策略（v0.7.8 重构，修复"播几句就断"）：
+     * v0.7.5 按短句切分后每句各开一条到微软服务器的连接，一篇回答几十条连接，
+     * 网络稍有抖动/被限流就中途失败。现在只拆第一句（保证首句秒出），
+     * 其余按约 600 字合并成大段——连接数降到个位数，且每段自带重试。
+     */
+    private fun buildChunks(text: String): List<String> {
+        val sentences = splitForSpeech(text)
+        if (sentences.isEmpty()) return emptyList()
+        if (sentences.size == 1) return sentences
+        val out = mutableListOf<String>(sentences[0])
+        val sb = StringBuilder()
+        for (s in sentences.drop(1)) {
+            if (sb.isNotEmpty() && sb.length + s.length > SEGMENT_CHARS) {
+                out.add(sb.toString())
+                sb.clear()
+            }
+            sb.append(s)
+        }
+        if (sb.isNotEmpty()) out.add(sb.toString())
+        return out
+    }
+
+    /** 单段合成：失败自动重试（网络抖动/限流下，多试几次基本都能过） */
+    private suspend fun synthesizeWithRetry(text: String, dir: File): File? {
+        repeat(SYNTH_ATTEMPTS) { attempt ->
+            if (attempt > 0) kotlinx.coroutines.delay(500L * attempt)
+            val file = runCatching { EdgeTts.synthesize(text, dir) }.getOrNull()
+            if (file != null && file.length() > 0) return file
+        }
+        return null
     }
 
     /** 按句切分：句末标点必断；逗号/顿号超 40 字也断；单段上限约 90 字 */
@@ -167,7 +205,7 @@ object TtsPlayer {
     private suspend fun speakWithSystem(context: Context, text: String) {
         val engine = ensureSystemTts(context)
         if (engine == null) {
-            _state.value = State.Unavailable("语音合成不可用：网络合成失败，这台手机也没有可用的语音引擎")
+            _state.value = State.Unavailable("语音合成不可用：网络合成多次重试仍失败，这台手机也没有可用的语音引擎")
             return
         }
         var speakFailed = false
