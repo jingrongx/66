@@ -300,26 +300,30 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     } else {
                         here?.let { it.lon to it.lat }
                     } ?: return@withContext null
-                    // POI 优先解析（坐标更贴近实际入口），拿不到再地理编码
+                    // POI 优先解析（坐标更贴近实际入口，名称取高德实际命中的），拿不到再地理编码
                     val to = runCatching {
                         AmapClient.resolveDestination(amap, intent.destination, from.first, from.second)
-                    }.getOrNull() ?: amap.geocode(intent.destination, city) ?: return@withContext null
-                    val plan = amap.routePlans(RouteMode.WALK, from.first, from.second, to.first, to.second)
+                    }.getOrNull()
+                        ?: amap.geocode(intent.destination, city)?.let {
+                            AmapClient.ResolvedDest(it.first, it.second, AmapClient.cleanPlaceName(intent.destination))
+                        }
+                        ?: return@withContext null
+                    val plan = amap.routePlans(RouteMode.WALK, from.first, from.second, to.lon, to.lat)
                         .firstOrNull() ?: return@withContext null
                     MapCardData(
                         kind = "route",
-                        title = intent.destination,
+                        title = to.name,
                         fromLat = from.second,
                         fromLon = from.first,
-                        toLat = to.second,
-                        toLon = to.first,
+                        toLat = to.lat,
+                        toLon = to.lon,
                         distanceM = plan.distanceM,
                         durationMin = plan.durationMin,
                         points = plan.points.map { listOf(it.first, it.second) },
                         steps = plan.steps,
                     )
                 } else {
-                    val keyword = intent.keyword.ifBlank { intent.destination }
+                    val keyword = AmapClient.cleanPlaceName(intent.keyword.ifBlank { intent.destination })
                     val p = here ?: return@withContext null
                     val pois = amap.poiSearch(keyword, p.lon, p.lat)
                     if (pois.isEmpty()) return@withContext null
@@ -398,14 +402,20 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             val name = queryName(resolver, uri) ?: "附件"
             val mime = resolver.getType(uri).orEmpty().lowercase()
             val lowerName = name.lowercase()
-            val looksImage = mime.startsWith("image/") ||
+            // 微信/网盘分享来的 HEIC 常常既没有扩展名、MIME 还是 octet-stream，只按名字判断会掉进文本分支
+            val sniffed = sniffImageFormat(resolver, uri)
+            val looksImage = sniffed != null ||
+                mime.startsWith("image/") ||
                 listOf(".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp").any { lowerName.endsWith(it) }
             return if (looksImage) {
                 val dataUrl = imageToDataUrl(resolver, uri)
                 if (dataUrl == null) {
+                    val heifLike = sniffed == "heif" || mime.contains("heic") || mime.contains("heif") ||
+                        lowerName.endsWith(".heic") || lowerName.endsWith(".heif")
                     Pair(
                         PendingAttachment(uri = uri, name = name, isImage = true),
-                        "这张图片读取失败（可能是不支持的格式），发送后 AI 可能看不到内容，建议换一张试试",
+                        if (heifLike) "这是 HEIC/HEIF 格式图片，当前手机系统解不出来（安卓 9 以下没有解码器），建议先用相册把它转成 JPG 再发"
+                        else "这张图片读取失败（可能是不支持的格式），发送后 AI 可能看不到内容，建议换一张试试",
                     )
                 } else {
                     Pair(PendingAttachment(uri = uri, name = name, isImage = true, dataUrl = dataUrl), null)
@@ -442,20 +452,56 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
             }
 
+        /** 读文件头判断真实图片格式：HEIC/HEIF 容器是 ftyp box，brand 区分照片与视频 */
+        private fun sniffImageFormat(resolver: android.content.ContentResolver, uri: Uri): String? = runCatching {
+            resolver.openInputStream(uri)?.use { input ->
+                val head = ByteArray(16)
+                var filled = 0
+                while (filled < head.size) {
+                    val read = input.read(head, filled, head.size - filled)
+                    if (read <= 0) break
+                    filled += read
+                }
+                if (filled < 12) return@use null
+                fun at(off: Int, text: String): Boolean {
+                    if (filled < off + text.length) return false
+                    for (i in text.indices) if (head[off + i] != text[i].code.toByte()) return false
+                    return true
+                }
+                when {
+                    head[0] == 0xFF.toByte() && head[1] == 0xD8.toByte() && head[2] == 0xFF.toByte() -> "jpeg"
+                    at(0, "\u0089PNG") -> "png"
+                    at(0, "GIF8") -> "gif"
+                    at(0, "BM") -> "bmp"
+                    at(0, "RIFF") && at(8, "WEBP") -> "webp"
+                    at(4, "ftyp") -> {
+                        val brand = String(head, 8, 4, Charsets.US_ASCII).lowercase()
+                        // mif1/msf1 是 HEIF 容器通用 brand，heic/heix/hevc/heim/heis/avif 是具体编码
+                        if (brand in setOf("heic", "heix", "hevc", "hevx", "heif", "heim", "heis", "mif1", "msf1", "avif", "avis")) "heif" else null
+                    }
+                    else -> null
+                }
+            }
+        }.getOrNull()
+
         private fun imageToDataUrl(resolver: android.content.ContentResolver, uri: Uri): String? = runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             // 注意：inJustDecodeBounds=true 时 decodeStream 恒返回 null，只读 bounds；
             // 这里不能用返回值做判空，否则所有图片都会被误判为"读取失败"
             resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-            var sample = 1
-            while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
-            val options = BitmapFactory.Options().apply { inSampleSize = sample }
-            val bitmap = resolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, options)
-            } ?: if (android.os.Build.VERSION.SDK_INT >= 28) {
-                // 兜底：ImageDecoder 对 HEIC/HEIF 与部分厂商私有 JPEG 变体更宽容
-                runCatching {
+            var bitmap: Bitmap? = null
+            if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                var sample = 1
+                while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
+                val options = BitmapFactory.Options().apply { inSampleSize = sample }
+                bitmap = resolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, options)
+                }
+            }
+            if (bitmap == null && android.os.Build.VERSION.SDK_INT >= 28) {
+                // 兜底：ImageDecoder 对 HEIC/HEIF 与部分厂商私有 JPEG 变体更宽容。
+                // BitmapFactory 连尺寸都读不出的格式恰恰最需要这条兜底，所以 bounds 失败不能提前返回
+                bitmap = runCatching {
                     android.graphics.ImageDecoder.decodeBitmap(
                         android.graphics.ImageDecoder.createSource(resolver, uri),
                     ) { decoder, info, _ ->
@@ -463,7 +509,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                         if (largest > 1280) decoder.setTargetSampleSize((largest + 1279) / 1280)
                     }
                 }.getOrNull()
-            } else null
+            }
             val bmp = bitmap ?: return null
             val output = ByteArrayOutputStream()
             bmp.compress(Bitmap.CompressFormat.JPEG, 75, output)

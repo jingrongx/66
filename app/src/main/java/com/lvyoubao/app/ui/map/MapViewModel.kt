@@ -218,14 +218,14 @@ class MapViewModel(
                         AmapClient.resolveDestination(amap, destination, place.lon, place.lat)
                             ?: throw ApiException("无法解析目的地「$destination」")
                     }
-                    val r = runCatching { amap.walkingRoute(place.lon, place.lat, to.first, to.second) }
+                    val r = runCatching { amap.walkingRoute(place.lon, place.lat, to.lon, to.lat) }
                         .getOrElse { e ->
                             if (BRouterClient.isInstalled(context)) {
                                 source = "BRouter 离线路线"
-                                BRouterClient.walkingRoute(context, place.lon, place.lat, to.first, to.second)
+                                BRouterClient.walkingRoute(context, place.lon, place.lat, to.lon, to.lat)
                             } else throw e
                         }
-                    AppTools.formatRoute(r, destination, source) to r.points
+                    AppTools.formatRoute(r, to.name, source) to r.points
                 }
             }
             result.fold(

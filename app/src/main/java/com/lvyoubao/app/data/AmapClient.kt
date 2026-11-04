@@ -32,6 +32,9 @@ class AmapClient(private val key: String) {
         val climbM: Int = 0,
     )
 
+    /** 目的地解析结果：坐标 + 高德实际命中的名称（POI 名比模型输出的原句可靠，地图卡标题/跳高德都用它） */
+    data class ResolvedDest(val lon: Double, val lat: Double, val name: String)
+
     private fun get(url: String): String {
         val request = Request.Builder().url(url).get().build()
         client.newCall(request).execute().use { response ->
@@ -310,9 +313,11 @@ class AmapClient(private val key: String) {
         /**
          * 目的地解析：POI 检索优先（坐标贴近实际入口/门址），名称对得上才采信；
          * 兜底地理编码。解决"高德导航传过去的终点有点不准、要手动纠正"的问题。
+         * 返回值带上高德实际命中的名称：模型有时把整句问题（"大会岭有什么特色"）当地点传来，
+         * 地图卡标题和跳高德的目的地名必须用干净的地名，不能照抄原句。
          */
-    fun resolveDestination(amap: AmapClient, name: String, fromLon: Double, fromLat: Double): Pair<Double, Double>? {
-            val clean = name.trim()
+    fun resolveDestination(amap: AmapClient, name: String, fromLon: Double, fromLat: Double): ResolvedDest? {
+            val clean = cleanPlaceName(name)
             if (clean.isEmpty()) throw ApiException("目的地为空")
             val strip = Regex("[\\s（）]")
             val qn = strip.replace(clean, "")
@@ -321,8 +326,28 @@ class AmapClient(private val key: String) {
                     val pn = strip.replace(p.name, "")
                     pn.isNotEmpty() && (pn.contains(qn) || qn.contains(pn))
                 }
-                ?.let { it.lon to it.lat }
-            return poi ?: amap.geocode(clean)
+                ?.let { ResolvedDest(it.lon, it.lat, it.name) }
+            return poi ?: amap.geocode(clean)?.let { ResolvedDest(it.first, it.second, clean) }
+        }
+
+        /**
+         * 从口语文本里抠出地名：模型偶尔把整句问题当目的地/关键词传来
+         * （如"大会岭有什么特色"），POI 检索和跳高德前先把问题词剥掉。
+         * 剥完不足 2 个字就放弃（说明原文可能本来就是地名），返回原文。
+         */
+        fun cleanPlaceName(raw: String): String {
+            var s = raw.trim()
+            if (s.isEmpty()) return s
+            val noise = Regex(
+                "请问|麻烦|帮我|我想知道|我想|我要|现在|一下|查询|查下|看看|搜索|告诉我|介绍一下|介绍下|" +
+                    "有什么特色|特色是什么|有什么好玩|有什么好看的|怎么样|好玩吗|值得去吗|值得一去吗|美不美|" +
+                    "怎么走|怎么去|怎么到|怎么前往|如何去|如何到达|在哪儿|在哪里|在哪|多远|远不远|" +
+                    "导航到|导航去|带我去|路线规划|路线|附近的|附近|门票多少钱|门票",
+            )
+            repeat(3) { s = noise.replace(s, "") }
+            s = s.replace(Regex("[?？!！。,，、:：;；\"'（）()\\s]+"), "")
+            s = s.removePrefix("去").removePrefix("到").removePrefix("前往").removePrefix("回")
+            return if (s.length >= 2) s else raw.trim()
         }
 
         /** 解析 GPX 轨迹（BRouter 返回），同时算累计爬升 */

@@ -202,7 +202,7 @@ fun RouteMapCard(
                         val r = list[0]
                         TtsPlayer.speak(
                             context,
-                            "${m.label}前往${card.title}，全程${MapCardData.distanceText(r.distanceM)}，${MapCardData.durationText(r.durationMin)}",
+                            "${m.label}前往${AmapClient.cleanPlaceName(card.title)}，全程${MapCardData.distanceText(r.distanceM)}，${MapCardData.durationText(r.durationMin)}",
                         )
                     }
                 }
@@ -569,7 +569,7 @@ fun RouteMapCard(
             // 标题 + 摘要
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    if (card.kind == "place") "「${card.title}」附近" else card.title,
+                    if (card.kind == "place") "「${AmapClient.cleanPlaceName(card.title)}」附近" else AmapClient.cleanPlaceName(card.title),
                     style = if (big) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
@@ -707,7 +707,7 @@ fun RouteMapCard(
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("开始导航", fontSize = if (big) 20.sp else 15.sp) }
                     OutlinedButton(
-                        onClick = { openInAmapApp(context, card, mode, dest) },
+                        onClick = { openInAmapApp(context, card, mode, dest, selectedPoi?.name) },
                         modifier = if (big) Modifier.height(56.dp) else Modifier,
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("高德地图", fontSize = if (big) 20.sp else 15.sp) }
@@ -999,8 +999,16 @@ private object CompassSensor {
  * 1) amapuri://route/plan（新版深链，参数直达规划页，目的地已填好）
  * 2) androidamap://route（官方 URI API，老版高德）
  * 3) uri.amap.com 网页导航链接（没装高德时开网页；callnative=1 装了高德会自动拉起）
+ * 目的地名过一遍 cleanPlaceName：历史会话的卡片标题可能是整句话（"大会岭有什么特色"），
+ * 原样传给高德会填满目的地输入框；地点卡选中的候选点优先用它的正式名称。
  */
-private fun openInAmapApp(context: android.content.Context, card: MapCardData, mode: RouteMode, dest: Pair<Double, Double>) {
+private fun openInAmapApp(
+    context: android.content.Context,
+    card: MapCardData,
+    mode: RouteMode,
+    dest: Pair<Double, Double>,
+    destName: String? = null,
+) {
     val t = when (mode) {
         RouteMode.DRIVE -> "0"
         RouteMode.WALK -> "1"
@@ -1008,7 +1016,7 @@ private fun openInAmapApp(context: android.content.Context, card: MapCardData, m
         RouteMode.RIDE -> "3"
     }
     val enc = { s: String -> runCatching { java.net.URLEncoder.encode(s, "UTF-8") }.getOrDefault(s) }
-    val dname = enc(card.title.ifBlank { "目的地" })
+    val dname = enc(AmapClient.cleanPlaceName(destName ?: card.title.ifBlank { "目的地" }))
     // App 内坐标统一是 WGS-84（离线底图/GPS），高德 App 要 GCJ-02（dev=0）
     val g = Gcj02.fromWgs(dest.second, dest.first)
     val dlat = g.first

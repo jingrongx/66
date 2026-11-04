@@ -575,6 +575,7 @@ class AiClient(private val settings: AiSettings) {
             {"type": "place" 或 "route", "keyword": "地点关键词", "origin": "起点名", "destination": "目的地名"}
             - 讲某个地方在哪/介绍某地：type=place，keyword 填规范地点名（如"汤显祖纪念馆"）
             - 从A到B怎么走/多远：type=route，origin 填起点名（用户说"从这里/从我这"就填空字符串，界面会用当前位置），destination 填终点的规范地点名
+            - keyword/destination 只填地名本身，绝不照抄用户的原句：用户问"大会岭有什么特色"，destination 只能是"大会岭"，"大会岭有什么特色"是问题不是地名
             - 回答与具体地点无关（纯聊天、天气、时间、体力建议）时不要输出 map 字段
             - 地点名要规范完整（用官方名称，不要写"那个博物馆"），宁缺毋滥：拿不准就别输出 map
             - map 字段必须和 answer/steps 一起输出，绝不允许只输出一段 map JSON、也绝不允许把 JSON 当回答正文；用户看不到 JSON，只看得到 answer 的中文

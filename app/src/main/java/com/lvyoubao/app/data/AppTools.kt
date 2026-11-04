@@ -30,7 +30,7 @@ object AppTools {
         ToolDef(
             name = ROUTE,
             description = "查询从当前位置步行到某地的路线：距离、耗时、累计爬升",
-            parameters = """{"type":"object","properties":{"destination":{"type":"string","description":"目的地名称或地址"}},"required":["destination"]}""",
+            parameters = """{"type":"object","properties":{"destination":{"type":"string","description":"目的地名称，只填地名本身（如'大会岭'），不要把用户整句话当目的地"}},"required":["destination"]}""",
         ),
     )
 
@@ -57,7 +57,7 @@ object AppTools {
         return try {
             when (name) {
                 POI -> {
-                    val keyword = arg("keyword") ?: throw ApiException("缺少 keyword")
+                    val keyword = AmapClient.cleanPlaceName(arg("keyword") ?: throw ApiException("缺少 keyword"))
                     if (settings.amapKey.isBlank()) return "未配置高德 Key，无法查 POI。建议回答时提示用户在设置里填写高德 Key。"
                     val p = place ?: throw ApiException("没有位置信息")
                     val pois = AmapClient(settings.amapKey).poiSearch(keyword, p.lon, p.lat)
@@ -112,29 +112,29 @@ object AppTools {
                 ?: throw ApiException("无法解析目的地「$destination」的坐标")
             // 新接口带分步指引；异常时退回旧步行接口（无指引但能画线）
             val card = runCatching {
-                val plan = amap.routePlans(RouteMode.WALK, place.lon, place.lat, to.first, to.second).firstOrNull()
+                val plan = amap.routePlans(RouteMode.WALK, place.lon, place.lat, to.lon, to.lat).firstOrNull()
                 if (plan != null) {
                     MapCardData(
                         kind = "route",
-                        title = destination,
+                        title = to.name,
                         fromLat = place.lat,
                         fromLon = place.lon,
-                        toLat = to.second,
-                        toLon = to.first,
+                        toLat = to.lat,
+                        toLon = to.lon,
                         distanceM = plan.distanceM,
                         durationMin = plan.durationMin,
                         points = plan.points.map { listOf(it.first, it.second) },
                         steps = plan.steps,
                     )
                 } else {
-                    val r = amap.walkingRoute(place.lon, place.lat, to.first, to.second)
+                    val r = amap.walkingRoute(place.lon, place.lat, to.lon, to.lat)
                     MapCardData(
                         kind = "route",
-                        title = destination,
+                        title = to.name,
                         fromLat = place.lat,
                         fromLon = place.lon,
-                        toLat = to.second,
-                        toLon = to.first,
+                        toLat = to.lat,
+                        toLon = to.lon,
                         distanceM = r.distanceM,
                         durationMin = r.durationMin,
                         points = r.points.map { listOf(it.first, it.second) },
@@ -142,7 +142,7 @@ object AppTools {
                 }
             }.getOrElse { throw it }
             onMapCard(card)
-            return "步行至「$destination」：${MapCardData.distanceText(card.distanceM)}，${MapCardData.durationText(card.durationMin)}（高德步行路线）"
+            return "步行至「${to.name}」：${MapCardData.distanceText(card.distanceM)}，${MapCardData.durationText(card.durationMin)}（高德步行路线）"
         }
         if (BRouterClient.isInstalled(context)) {
             // BRouter 需要坐标起点：先粗定位（用当前坐标），目的地用文本让 BRouter 不行——
