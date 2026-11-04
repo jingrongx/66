@@ -61,6 +61,8 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.ProviderPresets
 import com.lvyoubao.app.ui.SettingsViewModel
+import com.lvyoubao.app.ui.sync.QrCodeImage
+import com.lvyoubao.app.ui.sync.QrScanScreen
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -78,6 +80,8 @@ fun SettingsScreen(
     var showAmap by remember { mutableStateOf(false) }
     var showAsr by remember { mutableStateOf(false) }
     var savedTick by remember { mutableStateOf(0) }
+    var showSyncQr by remember { mutableStateOf(false) }
+    var showScanner by remember { mutableStateOf(false) }
 
     BackHandler { onClose() }
 
@@ -226,6 +230,51 @@ fun SettingsScreen(
             }
         }
 
+        // ---------- 扫码同步 ----------
+        SectionLabel("扫码同步配置")
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Column(Modifier.padding(16.dp)) {
+                Text(
+                    "先在手机上填好 API Key 等内容并保存；在车机上点「生成同步二维码」，再用手机点「扫码推送」扫它，配置就会自动写进车机。两台设备需连同一个 Wi-Fi，或车机连上手机热点。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = {
+                            vm.clearSyncResult()
+                            vm.startSyncServer()
+                            if (vm.ui.value.syncQrContent != null) showSyncQr = true
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) { Text("生成同步二维码") }
+                    Spacer(Modifier.width(12.dp))
+                    Button(
+                        onClick = {
+                            vm.clearSyncResult()
+                            showScanner = true
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) { Text("扫码推送", fontWeight = FontWeight.Bold) }
+                }
+                state.syncPushResult?.let { msg ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        msg,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (state.syncPushFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+
         // ---------- 地图与语音（可选） ----------
         SectionLabel("地图与语音（可选）")
         ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
@@ -358,6 +407,48 @@ fun SettingsScreen(
             modifier = Modifier.align(Alignment.CenterHorizontally),
         )
         Spacer(Modifier.height(32.dp))
+    }
+
+    if (showSyncQr) {
+        AlertDialog(
+            onDismissRequest = { showSyncQr = false; vm.stopSyncServer() },
+            title = { Text("等待手机扫码") },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    state.syncQrContent?.let { content -> QrCodeImage(content) }
+                    Spacer(Modifier.height(12.dp))
+                    if (state.syncReceived) {
+                        Text(
+                            "已收到手机推送的配置并自动保存 ✓",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    } else {
+                        Text(
+                            "用手机上安装的本应用，点「扫码推送」扫此码。手机里已填好的配置会直接传到本机并自动保存。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showSyncQr = false; vm.stopSyncServer() }) { Text("完成") }
+            },
+        )
+    }
+
+    if (showScanner) {
+        QrScanScreen(
+            onResult = { content ->
+                showScanner = false
+                vm.onQrScanned(content)
+            },
+            onClose = { showScanner = false },
+        )
     }
 
     if (themeDialog) {

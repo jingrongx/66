@@ -241,6 +241,8 @@ class FatigueSensingService : Service(), SensorEventListener {
         ContextCompat.checkSelfPermission(this, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
     private fun createChannel() {
+        // Android 8.0 以下没有通知渠道，无需创建
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
             CHANNEL_ID,

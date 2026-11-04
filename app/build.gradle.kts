@@ -11,10 +11,10 @@ android {
 
     defaultConfig {
         applicationId = "com.lvyoubao.app"
-        minSdk = 26
+        minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.7.5"
+        versionCode = 17
+        versionName = "0.7.6"
     }
 
     signingConfigs {
@@ -45,6 +45,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // API 26 以下没有 java.time，靠脱糖补齐（AskScreen/WeatherClient 用到）
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -71,6 +73,10 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // 扫码同步：二维码生成与识别（纯 Java 实现无厂商依赖，兼容 API 21+）
+    implementation("com.google.zxing:core:3.5.3")
+
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // 离线矢量地图（开源 OSM 生态，推演方案选型）——mapsforge 0.21.0 的 Maven 变体解析

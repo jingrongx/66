@@ -10,6 +10,12 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- 扫码同步配置：只有扫码用，无相机的设备（车机）不影响安装与使用 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
     <!-- Android 11+ 包可见性：语音识别服务（SpeechRecognizer 绑定需要） -->
     <queries>
         <intent>

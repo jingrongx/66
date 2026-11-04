@@ -10,6 +10,11 @@
 
 ### 已实现
 
+- ✅ **支持 Android 5.1 车机 + 扫码同步配置（v0.7.6）**：
+  - **支持 Android 5.1（API 22）车机**（比亚迪宋实测系统）：minSdk 26→21，开启 core library desugaring 补齐 java.time，通知渠道加 8.0 以下版本保护
+  - **扫码同步配置**：车机键盘难输 API Key 这类长文本——车机端「生成同步二维码」（本地一次性接收服务：随机端口 + 一次性口令），手机端「扫码推送」经局域网把配置直传车机并自动保存，车机实时感知；另支持配置直带二维码（有摄像头设备互扫）。前提：两台设备同一 Wi-Fi 或车机连手机热点
+  - 二维码生成/识别用 ZXing 纯本地库，扫码用系统老相机接口，无谷歌服务依赖，兼容 API 21+
+
 - ✅ **第六轮实测修复（v0.7.5）**：
   - 回答卡漏出裸 JSON（如 `{"type":"place","keyword":…}`）→ 识别为地图意图转成真地图卡；提示词禁止把 JSON 当正文
   - 天气类问题强制接入 **Open-Meteo 专业数值预报**（今日起 7 天逐日：现象/温度区间/降水概率），AI 只负责总结，不再"搜不到就不敢答"
@@ -101,6 +106,8 @@ app/src/main/java/com/lvyoubao/app/
 │   ├── TrackStore.kt          # 感知轨迹点存储（JSONL，供地图叠加）
 │   ├── LocationContext.kt     # 位置上下文（脱敏坐标 + Geocoder 反解城市）
 │   ├── UpdateChecker.kt       # 应用内更新（API + atom 双层检查，代理优先）
+│   ├── ConfigSync.kt          # 扫码同步配置：载荷编解码（局域网推送 + 配置直带两种二维码）
+│   ├── ConfigSyncServer.kt    # 扫码同步接收端：一次性本地 HTTP 服务（ServerSocket + 口令校验）
 │   └── observation/           # 疲劳积分观测（引擎 + JSONL 存储 + CSV 导出）
 ├── sensing/
 │   └── FatigueSensingService.kt   # 被动感知前台服务（硬件计步 + LocationManager + 轨迹落点）
@@ -112,7 +119,8 @@ app/src/main/java/com/lvyoubao/app/
 │   ├── notes/                 # 随手记 + 自动游记
 │   ├── observation/           # 感知日志：积分、指标、真实感受标记、回测分析
 │   ├── memory/                # 我的记忆（收藏的证据）
-│   ├── settings/              # 设置：AI 服务 / 外观 / 长辈模式 / 关于
+│   ├── settings/              # 设置：AI 服务 / 扫码同步 / 外观 / 长辈模式 / 关于
+│   ├── sync/                  # 扫码同步：二维码渲染 + 扫码界面（Camera1 + ZXing，兼容 API 21+）
 │   ├── update/                # 应用更新页
 │   └── theme/                 # Material 3 品牌配色（深海青 + 日出橙）
 └── MainActivity.kt
