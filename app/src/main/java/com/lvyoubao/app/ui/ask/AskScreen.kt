@@ -102,6 +102,7 @@ import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
 import java.time.Instant
 import java.time.LocalDate
@@ -603,9 +604,15 @@ fun AskScreen(
                             }
                         }
                     }
+                    // 光标交给 TextFieldValue 托管：语音从外面追加文字时把光标放到末尾，
+                    // 不然识别结果停在原光标处，看着像「跑到最前面」
+                    val draftValue = rememberDraftValue(state.question)
                     OutlinedTextField(
-                        value = state.question,
-                        onValueChange = vm::updateQuestion,
+                        value = draftValue.value,
+                        onValueChange = {
+                            draftValue.value = it
+                            vm.updateQuestion(it.text)
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = {
                             Text(

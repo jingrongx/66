@@ -71,6 +71,7 @@ import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -444,10 +445,16 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     }
                     Spacer(Modifier.height(6.dp))
                 }
-                // 草稿输入框：语音按段累积进这里，也可以直接打字
+                // 草稿输入框：语音按段累积进这里，也可以直接打字。
+                // 光标交给 TextFieldValue 托管：语音从外面追加文字时把光标放到末尾，
+                // 不然识别结果停在原光标处，看着像「跑到最前面」
+                val draftValue = rememberDraftValue(state.question)
                 OutlinedTextField(
-                    value = state.question,
-                    onValueChange = vm::updateQuestion,
+                    value = draftValue.value,
+                    onValueChange = {
+                        draftValue.value = it
+                        vm.updateQuestion(it.text)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = {
                         Text(
@@ -465,12 +472,40 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     },
                 )
                 Spacer(Modifier.height(10.dp))
-                // 主操作行：按住说话（大） | 拍照 | 相册 | 发送（大）
+                // 主操作行：拍照 | 相册 | 按住说话（大） | 发送（大）——说话按钮挨着发送，说完顺手就发
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // 拍照
+                    Box(
+                        modifier = Modifier
+                            .size(68.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(MaterialTheme.colorScheme.secondaryContainer)
+                            .clickable {
+                                keyboard?.hide()
+                                val uri = newCameraImageUri(context)
+                                pendingCameraUri = uri
+                                cameraLauncher.launch(uri)
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("📷", fontSize = 26.sp) }
+                    // 相册
+                    Box(
+                        modifier = Modifier
+                            .size(68.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(MaterialTheme.colorScheme.secondaryContainer)
+                            .clickable {
+                                keyboard?.hide()
+                                galleryLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("🖼", fontSize = 26.sp) }
                     // 按住说话大按钮（标签保持一行，不换行不截断）
                     val holdBig = settings.asrKey.isNotBlank()
                     Box(
@@ -502,34 +537,6 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                             },
                         )
                     }
-                    // 拍照
-                    Box(
-                        modifier = Modifier
-                            .size(68.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(MaterialTheme.colorScheme.secondaryContainer)
-                            .clickable {
-                                keyboard?.hide()
-                                val uri = newCameraImageUri(context)
-                                pendingCameraUri = uri
-                                cameraLauncher.launch(uri)
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("📷", fontSize = 26.sp) }
-                    // 相册
-                    Box(
-                        modifier = Modifier
-                            .size(68.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(MaterialTheme.colorScheme.secondaryContainer)
-                            .clickable {
-                                keyboard?.hide()
-                                galleryLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                                )
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("🖼", fontSize = 26.sp) }
                     // 发送
                     Button(
                         onClick = {
@@ -778,7 +785,8 @@ private fun ElderHistoryOverlay(
 /**
  * 语音通话：像打电话一样的全屏界面。
  * 按住说话、松手就问，回答自动朗读；朗读时随时按住即可插话（会先停掉朗读再录）。
- * 中间默认展示会话文字稿（含正在生成的回答），看得见 AI 在说什么，也可长按选中复制。
+ * 中间展示会话文字稿（含正在生成的回答），看得见 AI 在说什么，也可长按选中复制；
+ * 按住说话/挂断固定在底部常驻操作区（跟主界面同一个套路），消息再多也盖不住。
  * 全链路免费：录音→云端方言口音转文字→大模型回答→Edge/云端朗读。
  */
 @Composable
@@ -813,17 +821,19 @@ private fun VoiceCallOverlay(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = 20.dp),
+                .windowInsetsPadding(WindowInsets.safeDrawing),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(18.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text("语音通话中", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(12.dp))
                 Text(formatCallDuration(seconds), fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
             val status = when {
                 recording != null -> "正在听你说…（${recordTick}s，说完松手）"
                 listening -> "正在记下来…"
@@ -831,23 +841,37 @@ private fun VoiceCallOverlay(
                 ttsSpeaking -> "正在回答，想插话就按住说话"
                 else -> "按住下面的按钮说话"
             }
-            Text(status, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(
+                status,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
             ttsUnavailable?.let {
                 Spacer(Modifier.height(6.dp))
-                Text(it, fontSize = 15.sp, lineHeight = 21.sp, color = MaterialTheme.colorScheme.error)
+                Text(
+                    it,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
             }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
 
-            // 会话文字稿：默认可见，看得见 AI 说了什么，长按可选中复制
-            androidx.compose.foundation.text.selection.SelectionContainer {
-                LazyColumn(
-                    state = transcriptState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    items(messages) { message ->
+            // 会话文字稿：固定占满中间一整块，看得见 AI 说了什么；每条消息自己包选择容器（长按可复制）。
+            // 注意 weight 必须挂在 Column 的直接子项上：之前整个 LazyColumn 包在 SelectionContainer 里，
+            // weight 失效——空的时候两个按钮全顶到上半屏，消息一多按钮反被顶出屏幕
+            LazyColumn(
+                state = transcriptState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(messages) { message ->
+                    androidx.compose.foundation.text.selection.SelectionContainer {
                         if (message.role == "user") {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -880,8 +904,10 @@ private fun VoiceCallOverlay(
                             }
                         }
                     }
-                    if (sending) {
-                        item {
+                }
+                if (sending) {
+                    item {
+                        androidx.compose.foundation.text.selection.SelectionContainer {
                             Surface(
                                 shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
@@ -905,36 +931,60 @@ private fun VoiceCallOverlay(
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
-            // 按住说话大按钮（松手即发问，自动等回答、自动朗读）
-            Box(
+            // 底部操作区：跟主界面同一个套路——常驻底栏、永远在最上层，
+            // 两个大按钮放屏幕最底下，文字稿再多也只在自己的滚动区里滚，压不住它们
+            Surface(
                 modifier = Modifier
-                    .size(140.dp)
-                    .clip(RoundedCornerShape(70.dp))
-                    .background(
-                        if (recording != null) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.primary
-                    )
-                    .then(holdModifier),
-                contentAlignment = Alignment.Center,
+                    .fillMaxWidth()
+                    .shadow(elevation = 14.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                tonalElevation = 3.dp,
             ) {
-                Text(
-                    if (recording != null) "松手\n我就回答" else "按住\n说话",
-                    fontSize = 25.sp,
-                    lineHeight = 33.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    color = if (recording != null) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimary,
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // 按住说话大按钮（松手即发问，自动等回答、自动朗读）
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(84.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(
+                                if (recording != null) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary
+                            )
+                            .then(holdModifier),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            when {
+                                recording != null -> "松手（${recordTick}s）"
+                                listening -> "正在记录…"
+                                else -> "🎤 按住说话"
+                            },
+                            fontSize = 20.sp,
+                            maxLines = 1,
+                            fontWeight = FontWeight.Bold,
+                            color = if (recording != null) {
+                                MaterialTheme.colorScheme.onError
+                            } else {
+                                MaterialTheme.colorScheme.onPrimary
+                            },
+                        )
+                    }
+                    Button(
+                        onClick = onHangUp,
+                        modifier = Modifier.height(84.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        contentPadding = PaddingValues(horizontal = 22.dp),
+                    ) { Text("📵 挂断", fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                }
             }
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = onHangUp,
-                modifier = Modifier.fillMaxWidth(0.62f).height(58.dp),
-                shape = RoundedCornerShape(29.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-            ) { Text("📵 挂断", fontSize = 21.sp, fontWeight = FontWeight.Bold) }
-            Spacer(Modifier.height(20.dp))
         }
     }
 }
