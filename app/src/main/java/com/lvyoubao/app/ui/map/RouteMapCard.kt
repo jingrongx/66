@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,6 +60,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -501,12 +504,12 @@ fun RouteMapCard(
 
     // ---- 圆形小按钮 ----
     @Composable
-    fun RoundMapButton(label: String, sizeDp: Int = 44, onClick: () -> Unit) {
+    fun RoundMapButton(label: String, sizeDp: Int = 44, desc: String = label, onClick: () -> Unit) {
         Surface(
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surface,
             shadowElevation = 2.dp,
-            modifier = Modifier.size(sizeDp.dp),
+            modifier = Modifier.semantics { contentDescription = desc }.size(sizeDp.dp),
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.clickable { onClick() }) {
                 Text(label, fontSize = if (label.length == 1) 20.sp else 14.sp, fontWeight = FontWeight.Bold)
@@ -607,7 +610,7 @@ fun RouteMapCard(
                             if (poi.address.isNotBlank()) {
                                 Text(
                                     poi.address,
-                                    fontSize = if (big) 16.sp else 12.sp,
+                                    fontSize = if (big) 16.sp else 13.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -621,7 +624,7 @@ fun RouteMapCard(
                             color = MaterialTheme.colorScheme.primary,
                         )
                         TextButton(onClick = { selectPoi(poi) }) {
-                            Text("去这里", fontSize = if (big) 18.sp else 13.sp)
+                            Text("去这里", fontSize = if (big) 18.sp else 14.sp)
                         }
                     }
                 }
@@ -637,7 +640,9 @@ fun RouteMapCard(
                     FilterChip(
                         selected = mode == m,
                         onClick = { switchMode(m) },
-                        label = { Text("${MODE_EMOJI[m]}${m.label}", fontSize = if (big) 18.sp else 13.sp) },
+                        // 长辈模式大字不再挤默认 32dp 高的 chip
+                        modifier = if (big) Modifier.height(44.dp) else Modifier,
+                        label = { Text("${MODE_EMOJI[m]}${m.label}", fontSize = if (big) 18.sp else 14.sp) },
                     )
                 }
                 if (loading) {
@@ -657,10 +662,11 @@ fun RouteMapCard(
                     planList.forEachIndexed { i, p ->
                         AssistChip(
                             onClick = { planIndex = i },
+                            modifier = if (big) Modifier.height(44.dp) else Modifier,
                             label = {
                                 Text(
                                     p.tag.ifBlank { "方案${i + 1}" },
-                                    fontSize = if (big) 17.sp else 12.sp,
+                                    fontSize = if (big) 18.sp else 13.sp,
                                     fontWeight = if (i == planIndex) FontWeight.Bold else FontWeight.Normal,
                                 )
                             },
@@ -703,12 +709,13 @@ fun RouteMapCard(
                     Button(
                         onClick = { startNavigation() },
                         enabled = currentPlan != null || card.kind == "place",
-                        modifier = if (big) Modifier.height(56.dp) else Modifier,
+                        // 同排按钮统一 48dp（长辈 56dp）、同一字号，主按钮加粗
+                        modifier = Modifier.height(if (big) 56.dp else 48.dp),
                         shape = RoundedCornerShape(14.dp),
-                    ) { Text("开始导航", fontSize = if (big) 20.sp else 15.sp) }
+                    ) { Text("开始导航", fontSize = if (big) 20.sp else 15.sp, fontWeight = FontWeight.Bold) }
                     OutlinedButton(
                         onClick = { openInAmapApp(context, card, mode, dest, selectedPoi?.name) },
-                        modifier = if (big) Modifier.height(56.dp) else Modifier,
+                        modifier = Modifier.height(if (big) 56.dp else 48.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("高德地图", fontSize = if (big) 20.sp else 15.sp) }
                 }
@@ -721,22 +728,26 @@ fun RouteMapCard(
                     ) {
                         Text(
                             if (voiceOn) "🔊 播报中" else "🔇 已静音",
-                            fontSize = if (big) 19.sp else 14.sp,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = if (big) 14.dp else 9.dp),
+                            fontSize = if (big) 20.sp else 15.sp,
+                            // 高度与同排 48dp 按钮对齐（长辈 56dp），不再靠 padding 拼出 38dp 矮按钮
+                            modifier = Modifier
+                                .heightIn(min = if (big) 56.dp else 48.dp)
+                                .padding(horizontal = 14.dp)
+                                .wrapContentHeight(Alignment.CenterVertically),
                         )
                     }
                     OutlinedButton(
                         onClick = { replan(announce = voiceOn) },
-                        modifier = if (big) Modifier.height(56.dp) else Modifier,
+                        modifier = Modifier.height(if (big) 56.dp else 48.dp),
                         shape = RoundedCornerShape(14.dp),
-                    ) { Text("重新规划", fontSize = if (big) 19.sp else 14.sp) }
+                    ) { Text("重新规划", fontSize = if (big) 20.sp else 15.sp) }
                     Spacer(Modifier.weight(1f))
                     Button(
                         onClick = { stopNavigation() },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                        modifier = if (big) Modifier.height(56.dp) else Modifier,
+                        modifier = Modifier.height(if (big) 56.dp else 48.dp),
                         shape = RoundedCornerShape(14.dp),
-                    ) { Text("退出导航", fontSize = if (big) 19.sp else 14.sp) }
+                    ) { Text("退出导航", fontSize = if (big) 20.sp else 15.sp) }
                 }
             }
         }
@@ -772,11 +783,11 @@ fun RouteMapCard(
                             Text(
                                 "⛶ 全屏",
                                 color = MaterialTheme.colorScheme.onPrimary,
-                                fontSize = 13.sp,
+                                fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier
                                     .clickable { expanded = true }
-                                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                                    .padding(horizontal = 14.dp, vertical = 9.dp),
                             )
                         }
                         Surface(
@@ -797,7 +808,7 @@ fun RouteMapCard(
                                     modifier = Modifier.size(16.dp),
                                 )
                                 Spacer(Modifier.width(2.dp))
-                                Text("我的位置", style = MaterialTheme.typography.labelSmall)
+                                Text("我的位置", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
                             }
                         }
                     }
@@ -857,14 +868,15 @@ fun RouteMapCard(
                                     }
                                     Text(
                                         headline,
-                                        fontSize = if (big) 22.sp else 15.sp,
+                                        // 与内嵌导航横幅同规格（17/13，长辈 24/19），同一信息两处一个口径
+                                        fontSize = if (big) 24.sp else 17.sp,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     Text(
                                         "剩余 ${MapCardData.distanceText(nav.remainM)}" + (if (nav.nextStepDistM > 0) " · ${nav.nextStepDistM} 米后转弯" else ""),
-                                        fontSize = if (big) 17.sp else 12.sp,
+                                        fontSize = if (big) 19.sp else 13.sp,
                                     )
                                 }
                             }

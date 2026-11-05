@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -55,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -376,22 +378,29 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                     .align(Alignment.BottomEnd)
                                     .padding(10.dp),
                             ) {
-                                Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
+                                // 缩放圆钮与 RouteMapCard 的 RoundMapButton 同规格：44dp 圆 + 20sp，触达面积达标
+                                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
                                     Text(
                                         "＋",
+                                        fontSize = 20.sp,
                                         fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.clickable {
-                                            mapViewRef?.model?.mapViewPosition?.zoomIn()
-                                        }.padding(horizontal = 14.dp, vertical = 4.dp),
+                                        modifier = Modifier
+                                            .clickable {
+                                                mapViewRef?.model?.mapViewPosition?.zoomIn()
+                                            }
+                                            .padding(10.dp),
                                     )
                                 }
-                                Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
+                                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
                                     Text(
                                         "－",
+                                        fontSize = 20.sp,
                                         fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.clickable {
-                                            mapViewRef?.model?.mapViewPosition?.zoomOut()
-                                        }.padding(horizontal = 14.dp, vertical = 4.dp),
+                                        modifier = Modifier
+                                            .clickable {
+                                                mapViewRef?.model?.mapViewPosition?.zoomOut()
+                                            }
+                                            .padding(10.dp),
                                     )
                                 }
                                 Surface(
@@ -421,16 +430,16 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                                     }
                                                 }
                                             }
-                                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
                                     ) {
                                         Icon(
                                             Icons.Default.LocationOn,
                                             contentDescription = "回到我的位置",
                                             tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(16.dp),
+                                            modifier = Modifier.size(18.dp),
                                         )
                                         Spacer(Modifier.width(2.dp))
-                                        Text("我的位置", style = MaterialTheme.typography.labelSmall)
+                                        Text("我的位置", fontSize = 13.sp)
                                     }
                                 }
                             }
@@ -473,8 +482,8 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     color = MaterialTheme.colorScheme.secondary,
                     modifier = Modifier.weight(1f),
                 )
-                IconButton(onClick = { vm.clearMessage() }, modifier = Modifier.size(24.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = "关闭", modifier = Modifier.size(14.dp))
+                IconButton(onClick = { vm.clearMessage() }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "关闭", modifier = Modifier.size(16.dp))
                 }
             }
         }

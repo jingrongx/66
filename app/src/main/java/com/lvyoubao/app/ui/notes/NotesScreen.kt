@@ -115,8 +115,9 @@ fun NotesScreen(onClose: () -> Unit, app: TravelApp) {
                     vm.addNote(place)
                 },
                 enabled = state.input.isNotBlank(),
+                modifier = Modifier.height(48.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text("记一笔") }
+            ) { Text("记一笔", fontWeight = FontWeight.Bold) }
         }
 
         state.error?.let { error ->
@@ -134,7 +135,7 @@ fun NotesScreen(onClose: () -> Unit, app: TravelApp) {
             enabled = notes.isNotEmpty() && !state.generating,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp),
+                .height(48.dp),
             shape = RoundedCornerShape(14.dp),
         ) {
             Text(if (state.travelogue == null) "把随手记合成一篇游记" else "重新合成游记", fontWeight = FontWeight.Bold)

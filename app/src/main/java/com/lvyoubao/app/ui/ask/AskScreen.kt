@@ -453,8 +453,8 @@ fun AskScreen(
                         TextButton(onClick = { locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) {
                             Text("开启")
                         }
-                        IconButton(onClick = { locationDismissed = true }, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "关闭提示", modifier = Modifier.size(14.dp))
+                        IconButton(onClick = { locationDismissed = true }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "关闭提示", modifier = Modifier.size(16.dp))
                         }
                     }
                 }
@@ -596,8 +596,8 @@ fun AskScreen(
                                             (if (a.isImage) "🖼 " else "📄 ") + a.name.take(16),
                                             style = MaterialTheme.typography.labelMedium,
                                         )
-                                        IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(24.dp)) {
-                                            Icon(Icons.Default.Close, contentDescription = "移除", modifier = Modifier.size(14.dp))
+                                        IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(28.dp)) {
+                                            Icon(Icons.Default.Close, contentDescription = "移除", modifier = Modifier.size(16.dp))
                                         }
                                     }
                                 }
@@ -689,9 +689,10 @@ fun AskScreen(
                             }
                         }
                         // 按住说话：按住录音、松手转文字追加进输入框；连说几段再点发送
+                        // 尺寸与同排的添加附件/发送（48dp IconButton）对齐，三个控件一样高
                         Box(
                             modifier = Modifier
-                                .size(42.dp)
+                                .size(48.dp)
                                 .clip(CircleShape)
                                 .background(
                                     if (recording != null) MaterialTheme.colorScheme.error
@@ -718,7 +719,7 @@ fun AskScreen(
                                     listening -> "…"
                                     else -> "🎤"
                                 },
-                                fontSize = 18.sp,
+                                fontSize = 20.sp,
                             )
                         }
                         if (state.question.isNotBlank() || state.attachments.isNotEmpty()) {
@@ -821,7 +822,7 @@ private fun SessionDrawerRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+        IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
             Icon(
                 Icons.Default.Delete,
                 contentDescription = "删除",

@@ -207,7 +207,7 @@ fun SettingsScreen(
                         enabled = !state.testing,
                         modifier = Modifier
                             .weight(1f)
-                            .height(50.dp),
+                            .height(48.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("测试连接") }
                     Spacer(Modifier.width(12.dp))
@@ -215,7 +215,7 @@ fun SettingsScreen(
                         onClick = { vm.save(onSaved = { savedTick++ }) },
                         modifier = Modifier
                             .weight(1f)
-                            .height(50.dp),
+                            .height(48.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("保存", fontWeight = FontWeight.Bold) }
                 }
@@ -249,7 +249,7 @@ fun SettingsScreen(
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .height(46.dp),
+                            .height(48.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("生成同步二维码") }
                     Spacer(Modifier.width(12.dp))
@@ -260,7 +260,7 @@ fun SettingsScreen(
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .height(46.dp),
+                            .height(48.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("扫码推送", fontWeight = FontWeight.Bold) }
                 }
@@ -320,7 +320,7 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("方言口音识别", style = MaterialTheme.typography.bodyMedium)
+                        Text("方言口音识别", style = MaterialTheme.typography.bodyLarge)
                         Text(
                             "说抚州话、带家乡口音时打开：换用方言口音大模型（免费），识别更准，稍慢一两秒",
                             style = MaterialTheme.typography.labelSmall,
@@ -340,7 +340,7 @@ fun SettingsScreen(
                     onClick = { vm.save(onSaved = { savedTick++ }) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp),
+                        .height(48.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) { Text("保存", fontWeight = FontWeight.Bold) }
                 if (savedTick > 0) {

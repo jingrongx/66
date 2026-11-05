@@ -112,11 +112,12 @@ fun UpdateScreen(onClose: () -> Unit, vm: UpdateViewModel) {
                         Text(
                             state.error ?: "",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            // 错误正文用 error 色，与"检查失败"标题呼应（此前用中性色，错误不像错误）
+                            color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
-                TextButton(onClick = { vm.manualCheck() }) { Text("重试") }
+                TextButton(onClick = { vm.manualCheck() }, modifier = Modifier.padding(top = 4.dp)) { Text("重试") }
             }
 
             state.upToDate -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -178,7 +179,7 @@ fun UpdateScreen(onClose: () -> Unit, vm: UpdateViewModel) {
                             onClick = { vm.install(context) },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(52.dp),
+                                .height(48.dp),
                             shape = MaterialTheme.shapes.medium,
                         ) { Text("安装", fontWeight = FontWeight.Bold) }
                     }
@@ -188,7 +189,7 @@ fun UpdateScreen(onClose: () -> Unit, vm: UpdateViewModel) {
                             onClick = { vm.download() },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(52.dp),
+                                .height(48.dp),
                             shape = MaterialTheme.shapes.medium,
                         ) { Text("下载更新（${formatSize(asset.size)}）", fontWeight = FontWeight.Bold) }
                     }

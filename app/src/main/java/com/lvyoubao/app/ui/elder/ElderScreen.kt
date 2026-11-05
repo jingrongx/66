@@ -297,11 +297,11 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     vm.setElderMode(false)
                     onExit()
                 },
-                modifier = Modifier.height(46.dp),
+                modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                 contentPadding = PaddingValues(horizontal = 14.dp),
-            ) { Text("退出", fontSize = 18.sp) }
+            ) { Text("退出", fontSize = 17.sp, maxLines = 1) }
         }
         // 第二行：三个大导航按钮（新对话 / 历史 / 语音通话）
         Row(
@@ -328,7 +328,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                 shape = RoundedCornerShape(14.dp),
                 contentPadding = PaddingValues(horizontal = 6.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) { Text("📞 通话", fontSize = 17.sp, maxLines = 1) }
+            ) { Text("通话", fontSize = 17.sp, maxLines = 1) }
         }
 
         // ---------- 会话流：整个对话从头到尾 ----------
@@ -365,6 +365,8 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                                         vm.updateQuestion(suggestion)
                                         vm.send(context)
                                     },
+                                    // 长辈模式 chip 加高到 44dp，19sp 字号不再挤在默认 32dp 的框里
+                                    modifier = Modifier.height(44.dp),
                                     label = { Text(suggestion, fontSize = 19.sp) },
                                 )
                             }
@@ -436,8 +438,8 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                                         (if (a.isImage) "🖼 " else "📄 ") + a.name.take(14),
                                         fontSize = 16.sp,
                                     )
-                                    IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(30.dp)) {
-                                        Text("✕", fontSize = 14.sp)
+                                    IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(28.dp)) {
+                                        Text("✕", fontSize = 16.sp)
                                     }
                                 }
                             }
@@ -459,7 +461,8 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     placeholder = {
                         Text(
                             if (recording != null) "正在听你说…" else "按住下方说话，松手就记到这里",
-                            fontSize = 19.sp,
+                            fontSize = 21.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     },
                     maxLines = 4,
@@ -527,7 +530,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                                 holdBig -> "🎤 按住说话"
                                 else -> "🎤 点一下说"
                             },
-                            fontSize = 18.sp,
+                            fontSize = 20.sp,
                             maxLines = 1,
                             fontWeight = FontWeight.Bold,
                             color = if (recording != null) {
@@ -548,7 +551,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                         shape = RoundedCornerShape(20.dp),
                         contentPadding = PaddingValues(horizontal = 14.dp),
                     ) {
-                        Text("发送", fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text("发送", fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                     }
                 }
                 if (state.sending) {
@@ -560,7 +563,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     ) {
                         CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 3.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text("正在帮你想，稍等一下…", fontSize = 17.sp)
+                        Text("正在帮你想，稍等一下…", fontSize = 20.sp)
                     }
                 }
             }
@@ -655,14 +658,14 @@ private fun ElderAssistantCard(
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Button(
                 onClick = onToggleSpeak,
-                modifier = Modifier.height(50.dp),
+                modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 再读一遍", fontSize = 18.sp) }
+            ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 再读一遍", fontSize = 17.sp, maxLines = 1) }
             Button(
                 onClick = onSaveMemory,
-                modifier = Modifier.height(50.dp),
+                modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text("收藏", fontSize = 18.sp) }
+            ) { Text("收藏", fontSize = 17.sp, maxLines = 1) }
         }
     }
 }
@@ -677,7 +680,7 @@ private fun ElderStreamingCard(streamState: ChatViewModel.StreamState?) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 3.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text("正在帮你想…", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        Text("正在帮你想…", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                 } else {
                     if (streamState.answer.isBlank() && streamState.reasoning.isNotBlank()) {
@@ -716,15 +719,15 @@ private fun ElderHistoryOverlay(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("对话历史", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                TextButton(onClick = onClose, modifier = Modifier.height(48.dp)) {
-                    Text("关闭", fontSize = 19.sp)
+                TextButton(onClick = onClose, modifier = Modifier.height(52.dp)) {
+                    Text("关闭", fontSize = 17.sp)
                 }
             }
             Button(
                 onClick = onNew,
-                modifier = Modifier.fillMaxWidth().height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-            ) { Text("➕ 新对话", fontSize = 21.sp, fontWeight = FontWeight.Bold) }
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+            ) { Text("新对话", fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
             Spacer(Modifier.height(12.dp))
             if (sessions.isEmpty()) {
                 Text("还没有对话", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -851,8 +854,8 @@ private fun VoiceCallOverlay(
                 Spacer(Modifier.height(6.dp))
                 Text(
                     it,
-                    fontSize = 15.sp,
-                    lineHeight = 21.sp,
+                    fontSize = 17.sp,
+                    lineHeight = 24.sp,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 20.dp),
                 )
@@ -899,7 +902,7 @@ private fun VoiceCallOverlay(
                                     message.text,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                     fontSize = 17.sp,
-                                    lineHeight = 25.sp,
+                                    lineHeight = 24.sp,
                                 )
                             }
                         }
@@ -947,12 +950,12 @@ private fun VoiceCallOverlay(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 按住说话大按钮（松手即发问，自动等回答、自动朗读）
+                    // 按住说话大按钮（松手即发问，自动等回答、自动朗读）——规格与主界面操作行一致
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .height(84.dp)
-                            .clip(RoundedCornerShape(24.dp))
+                            .height(80.dp)
+                            .clip(RoundedCornerShape(20.dp))
                             .background(
                                 if (recording != null) MaterialTheme.colorScheme.error
                                 else MaterialTheme.colorScheme.primary
@@ -978,11 +981,11 @@ private fun VoiceCallOverlay(
                     }
                     Button(
                         onClick = onHangUp,
-                        modifier = Modifier.height(84.dp),
-                        shape = RoundedCornerShape(24.dp),
+                        modifier = Modifier.height(80.dp),
+                        shape = RoundedCornerShape(20.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         contentPadding = PaddingValues(horizontal = 22.dp),
-                    ) { Text("📵 挂断", fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                    ) { Text("挂断", fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 }
             }
         }

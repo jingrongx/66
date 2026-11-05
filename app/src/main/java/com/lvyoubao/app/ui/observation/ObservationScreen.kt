@@ -36,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -133,14 +134,17 @@ fun ObservationScreen(onClose: () -> Unit, app: TravelApp) {
                     )
                     Spacer(Modifier.weight(1f))
                     if (running) {
-                        Button(onClick = { FatigueSensingService.stop(context) }) { Text("停止") }
+                        Button(onClick = { FatigueSensingService.stop(context) }, modifier = Modifier.height(48.dp)) { Text("停止") }
                     } else {
                         val permissions = buildList {
                             add(Manifest.permission.ACCESS_FINE_LOCATION)
                             add(Manifest.permission.ACCESS_COARSE_LOCATION)
                             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
                         }
-                        Button(onClick = { permissionLauncher.launch(permissions.toTypedArray()) }) {
+                        Button(
+                            onClick = { permissionLauncher.launch(permissions.toTypedArray()) },
+                            modifier = Modifier.height(48.dp),
+                        ) {
                             Text("开启记录")
                         }
                     }
@@ -198,11 +202,10 @@ fun ObservationScreen(onClose: () -> Unit, app: TravelApp) {
                 onClick = { vm.label(ObservationEvent.LABEL_REST, "自报：坐下休息了") },
                 label = { Text("坐下休息了") },
             )
-            AssistChip(
-                onClick = { if (state.isNotEmpty()) vm.shareCsv(context) },
-                label = { Text("导出 CSV") },
-            )
         }
+        // 数据导出是独立功能，不混进自报标签里
+        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = { if (state.isNotEmpty()) vm.shareCsv(context) }) { Text("导出 CSV（给开发者做回测）") }
         message?.let {
             Spacer(Modifier.height(8.dp))
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
