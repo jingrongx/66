@@ -10,6 +10,7 @@ data class AiSettings(
     val themeMode: String = "system",
     val amapKey: String = "",
     val asrKey: String = "",
+    val dialectMode: Boolean = false, // 方言口音识别：赣语抚州话等本地说法（TeleSpeech-ASR 免费模型）
     val elderMode: Boolean = false,
     val autoSpeak: Boolean = false,   // 顶部开关：新回答自动朗读
 )

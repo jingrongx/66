@@ -314,6 +314,27 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("方言口音识别", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "说抚州话、带家乡口音时打开：换用方言口音大模型（免费），识别更准，稍慢一两秒",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.dialectMode,
+                        onCheckedChange = { checked ->
+                            vm.updateDraft { it.copy(dialectMode = checked) }
+                            vm.save(onSaved = {})
+                        },
+                    )
+                }
                 Spacer(Modifier.height(14.dp))
                 Button(
                     onClick = { vm.save(onSaved = { savedTick++ }) },

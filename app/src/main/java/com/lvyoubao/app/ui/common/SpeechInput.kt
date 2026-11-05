@@ -35,8 +35,21 @@ import java.util.concurrent.TimeUnit
 object SpeechInput {
 
     private const val ASR_BASE_URL = "https://api.siliconflow.cn/v1"
+
+    /** 普通识别：SenseVoice 免费模型，普通话准、响应快 */
     private const val ASR_MODEL = "FunAudioLLM/SenseVoiceSmall"
-    private const val MAX_RECORD_MS = 30_000
+
+    /**
+     * 方言口音识别：TeleSpeech-ASR（中国电信 TeleAI 开源，10 万小时语料、覆盖 23 种方言口音，
+     * 赣语抚州话这类本地说法识别明显更好），硅基流动托管，同样是免费模型。
+     */
+    private const val ASR_MODEL_DIALECT = "teleai/teleSpeechASR"
+
+    /**
+     * 按住说话模式下用户自己控制录音时长，这里只留 5 分钟的保险上限（防止忘记松手把存储录满）。
+     * 老的 30 秒上限会把长辈的长话/慢话硬生生截断。
+     */
+    private const val MAX_RECORD_MS = 300_000
 
     /** 云端转文字进行中的一段录音 */
     data class Recording(val recorder: MediaRecorder, val file: File)
@@ -59,6 +72,10 @@ object SpeechInput {
         return first
     }
 
+    /** 系统识别给长辈的宽松停顿参数：至少说 15 秒，静音 8 秒才算说完（很多 ROM 默认静音 1~2 秒就抢着断句） */
+    const val PAUSE_HINT_MS = 8_000L
+    const val MIN_SPEECH_MS = 15_000L
+
     private class RecognizeError(val code: Int, message: String) : IllegalStateException(message)
 
     /** 系统识别：起内置 UI 聆听并返回结果 */
@@ -80,6 +97,11 @@ object SpeechInput {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
                 putExtra(RecognizerIntent.EXTRA_PROMPT, prompt)
+                // 充分的停顿时间：老人说话慢、中途爱停顿，默认的静音断句阈值太急，
+                // 这里放宽到静音 8 秒才算说完、至少给 15 秒说话时间（部分 ROM 不支持则自动忽略）。
+                // 这两个 key 是框架 @hide 常量，公开 SDK 没有符号，只能按字符串传（运行时有效）
+                putExtra("android.speech.extras.SPEECH_INPUT_COMPLETELY_SILENCE_LENGTH_MILLIS", PAUSE_HINT_MS)
+                putExtra("android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", MIN_SPEECH_MS)
             }
             recognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {}
@@ -134,14 +156,16 @@ object SpeechInput {
         Recording(recorder, file)
     }
 
-    /** 停止录音并上传大模型转文字；成功返回识别文本 */
-    suspend fun stopAndTranscribe(recording: Recording, asrKey: String): Result<String> {
-        val stopped = runCatching { recording.recorder.stop() }
+    /** 停止录音并上传大模型转文字；成功返回识别文本。方言开关切换到方言口音模型 */
+    suspend fun stopAndTranscribe(recording: Recording, asrKey: String, dialect: Boolean = false): Result<String> {
+        // stop() 抛错有两种情况：压根没录进去（文件极小）或到时长上限被自动停了（文件是好的），
+        // 所以只看文件大小判断，别误伤长录音
+        runCatching { recording.recorder.stop() }
         runCatching { recording.recorder.release() }
-        val result = if (stopped.isFailure || recording.file.length() < 2_000) {
+        val result = if (recording.file.length() < 2_000) {
             Result.failure(IllegalStateException("没录到声音，请贴近手机再说一次"))
         } else {
-            transcribe(recording.file, asrKey)
+            transcribe(recording.file, asrKey, dialect)
         }
         recording.file.delete()
         return result
@@ -153,12 +177,12 @@ object SpeechInput {
         recording.file.delete()
     }
 
-    private suspend fun transcribe(file: File, asrKey: String): Result<String> =
+    private suspend fun transcribe(file: File, asrKey: String, dialect: Boolean): Result<String> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val body = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
-                    .addFormDataPart("model", ASR_MODEL)
+                    .addFormDataPart("model", if (dialect) ASR_MODEL_DIALECT else ASR_MODEL)
                     .addFormDataPart("file", file.name, file.asRequestBody("audio/mp4".toMediaType()))
                     .build()
                 val request = Request.Builder()

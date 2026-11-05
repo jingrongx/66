@@ -83,6 +83,25 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     fun updateQuestion(value: String) = _ui.update { it.copy(question = value) }
 
+    /**
+     * 按住说话的多段累积：松手一次就往草稿里追加一段，想分几句说都行，
+     * 全部说完再点「发送」。两段之间自动补标点，避免句子粘在一起。
+     */
+    fun appendQuestion(value: String) {
+        val piece = value.trim()
+        if (piece.isEmpty()) return
+        _ui.update { cur ->
+            val old = cur.question.trimEnd()
+            // 上一段以文字结尾（还没断句）就补个逗号再接下一段；以标点结尾则直接接
+            val last = old.lastOrNull()
+            val needsPunct = last != null && last.isLetterOrDigit()
+            cur.copy(question = if (old.isEmpty()) piece else old + (if (needsPunct) "，" else "") + piece)
+        }
+    }
+
+    /** 清空草稿（语音/拍照重新开始） */
+    fun clearQuestion() = _ui.update { it.copy(question = "") }
+
     /** 语音识别不支持等瞬时提示，走统一 error 条展示 */
     fun setTransientError(message: String) = _ui.update { it.copy(error = message) }
 

@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -80,6 +81,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -214,7 +216,7 @@ fun AskScreen(
             scope.launch {
                 HotwordCorrector.buildIfNeeded(vm.sessionList.value, emptyList())
                 SpeechInput.listen(context, "说出来，我帮你问")
-                    .onSuccess { vm.updateQuestion(HotwordCorrector.correct(it)) }
+                    .onSuccess { vm.appendQuestion(HotwordCorrector.correct(it)) }
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
                 listening = false
             }
@@ -225,13 +227,14 @@ fun AskScreen(
         }
     }
 
+    /** 松手：停止录音 → 转文字 → 追加进输入框（可连说几段，点发送才发） */
     fun stopVoice() {
         val rec = recording ?: return
         recording = null
         listening = true
         scope.launch {
-            SpeechInput.stopAndTranscribe(rec, settings.asrKey)
-                .onSuccess { vm.updateQuestion(it) }
+            SpeechInput.stopAndTranscribe(rec, settings.asrKey, settings.dialectMode)
+                .onSuccess { vm.appendQuestion(HotwordCorrector.correct(it)) }
                 .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
             listening = false
         }
@@ -604,7 +607,11 @@ fun AskScreen(
                         value = state.question,
                         onValueChange = vm::updateQuestion,
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("发消息，或说说你想去哪…") },
+                        placeholder = {
+                            Text(
+                                if (recording != null) "正在听你说…" else "发消息，或说说你想去哪…",
+                            )
+                        },
                         maxLines = 4,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = {
@@ -674,13 +681,33 @@ fun AskScreen(
                                 )
                             }
                         }
-                        IconButton(
-                            onClick = { if (recording != null) stopVoice() else startVoice() },
-                            enabled = !listening,
+                        // 按住说话：按住录音、松手转文字追加进输入框；连说几段再点发送
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (recording != null) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                )
+                                .pointerInput("ask-hold-talk") {
+                                    detectTapGestures(
+                                        onPress = {
+                                            startVoice()
+                                            try {
+                                                awaitRelease()
+                                            } catch (_: Exception) {
+                                                // 手势被系统打断也按松手处理
+                                            }
+                                            stopVoice()
+                                        },
+                                    )
+                                },
+                            contentAlignment = Alignment.Center,
                         ) {
                             Text(
                                 when {
-                                    recording != null -> "⏹"
+                                    recording != null -> "🎙"
                                     listening -> "…"
                                     else -> "🎤"
                                 },

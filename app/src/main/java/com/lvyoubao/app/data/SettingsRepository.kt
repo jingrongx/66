@@ -23,6 +23,7 @@ class SettingsRepository(private val context: Context) {
         val themeMode = stringPreferencesKey("theme_mode")
         val amapKey = stringPreferencesKey("amap_key")
         val asrKey = stringPreferencesKey("asr_key")
+        val dialectMode = booleanPreferencesKey("dialect_mode")
         val elderMode = booleanPreferencesKey("elder_mode")
         val autoSpeak = booleanPreferencesKey("auto_speak")
     }
@@ -39,6 +40,7 @@ class SettingsRepository(private val context: Context) {
             themeMode = p[Keys.themeMode] ?: defaults.themeMode,
             amapKey = p[Keys.amapKey] ?: "",
             asrKey = p[Keys.asrKey] ?: "",
+            dialectMode = p[Keys.dialectMode] ?: false,
             elderMode = p[Keys.elderMode] ?: false,
             autoSpeak = p[Keys.autoSpeak] ?: false,
         )
@@ -55,6 +57,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.themeMode] = settings.themeMode
             p[Keys.amapKey] = settings.amapKey
             p[Keys.asrKey] = settings.asrKey
+            p[Keys.dialectMode] = settings.dialectMode
             p[Keys.elderMode] = settings.elderMode
             p[Keys.autoSpeak] = settings.autoSpeak
         }
