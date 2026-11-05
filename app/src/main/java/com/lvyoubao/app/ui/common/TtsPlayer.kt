@@ -7,6 +7,7 @@ import android.speech.tts.UtteranceProgressListener
 import java.io.File
 import java.util.Locale
 import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +47,15 @@ object TtsPlayer {
     private var systemTts: TextToSpeech? = null
     private var systemReady = false
 
+    /**
+     * 播报代次：每次 speak()/stop() 自增。流水线在出声前后都要核对自己的代次，
+     * 对不上就立刻闭嘴——被新播报或手动停止接管的旧流水线（含取消信号被吞、
+     * 延迟回调等“僵尸”情况）一律不得再启动任何音频。这是防重叠的硬保证。
+     */
+    private var generation = 0
+    /** 当前正在播的文本：同一段文本重复触发时直接忽略，不再从头重读（防多触发源互相踩踏） */
+    private var currentText: String? = null
+
     /** 第一句之后每段的目标长度（字）：连接少、抗抖动，Edge 单请求上限 3000 */
     private const val SEGMENT_CHARS = 600
     /** 单段合成重试次数 */
@@ -65,12 +75,18 @@ object TtsPlayer {
     fun speak(context: Context, text: String) {
         val body = text.trim()
         if (body.isEmpty()) return
+        // 同一段文本正在播/正在合成时，重复触发直接忽略。
+        // 两个页面（提问页/长辈模式）同时挂着自动播报、或开关翻转导致重复触发时，
+        // 若各自重启一遍，旧句被拦腰打断、新句从头读，听感就是“话赶话”。
+        if ((_state.value is State.Loading || _state.value is State.Speaking) && body == currentText) return
         stop()
+        val myGen = ++generation
+        currentText = body
         _state.value = State.Loading
         job = scope.launch {
             val chunks = buildChunks(body)
             if (chunks.isEmpty()) {
-                _state.value = State.Idle
+                if (myGen == generation) _state.value = State.Idle
                 return@launch
             }
             val dir = File(context.cacheDir, "tts")
@@ -83,32 +99,48 @@ object TtsPlayer {
                 } else {
                     null
                 }
-                val file = runCatching { cur.await() }.getOrNull()
+                // 注意：不能把“被停止的取消信号”当成合成失败吞掉，
+                // 否则被叫停的旧流水线会误判走系统 TTS 兜底，和新播报叠在一起
+                val file = try {
+                    cur.await()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+                if (myGen != generation) return@launch
                 if (file == null || file.length() == 0L) {
                     // 重试后仍失败：剩余文本整体交给系统 TTS 兜底
-                    speakWithSystem(context, chunks.drop(i).joinToString(""))
+                    speakWithSystem(context, chunks.drop(i).joinToString(""), myGen)
                     return@launch
                 }
-                val ok = playFileAwait(file)
+                val ok = playFileAwait(file, myGen)
                 runCatching { file.delete() }
+                if (myGen != generation) return@launch
                 if (!ok) {
-                    speakWithSystem(context, chunks.drop(i + 1).joinToString(""))
+                    speakWithSystem(context, chunks.drop(i + 1).joinToString(""), myGen)
                     return@launch
                 }
             }
-            if (_state.value is State.Speaking || _state.value is State.Loading) {
+            if (myGen == generation &&
+                (_state.value is State.Speaking || _state.value is State.Loading)
+            ) {
                 _state.value = State.Idle
+                currentText = null
             }
         }
     }
 
     fun stop() {
+        // 先升代次再停：任何在途流水线此后发现自己代次对不上，一律闭嘴
+        generation++
         job?.cancel()
         job = null
         runCatching { player?.let { if (it.isPlaying) it.stop() } }
         runCatching { player?.release() }
         player = null
         runCatching { systemTts?.stop() }
+        currentText = null
         if (_state.value !is State.Idle) _state.value = State.Idle
     }
 
@@ -167,64 +199,92 @@ object TtsPlayer {
     }
 
     /** 播放一个音频文件并挂起直到播完/出错/被取消；返回是否完整播完 */
-    private suspend fun playFileAwait(file: File): Boolean {
+    private suspend fun playFileAwait(file: File, gen: Int): Boolean {
         return withContext(Dispatchers.Main) {
+            // 开播前最后核对一次代次（和 stop()/speak() 同在主线程执行，此检查无竞态窗口）：
+            // 已被接管的旧流水线到此为止，一个音都不许出
+            if (gen != generation) return@withContext false
             suspendCancellableCoroutine { cont ->
-                val started = runCatching {
-                    val p = MediaPlayer()
-                    player = p
-                    p.setDataSource(file.absolutePath)
-                    p.setOnCompletionListener {
+                var started = false
+                var p: MediaPlayer? = null
+                try {
+                    val mp = MediaPlayer()
+                    p = mp
+                    player = mp
+                    mp.setDataSource(file.absolutePath)
+                    mp.setOnCompletionListener {
                         runCatching { it.release() }
                         if (player === it) player = null
                         if (cont.isActive) cont.resume(true)
                     }
-                    p.setOnErrorListener { mp, _, _ ->
-                        runCatching { mp.release() }
-                        if (player === mp) player = null
+                    mp.setOnErrorListener { errPlayer, _, _ ->
+                        runCatching { errPlayer.release() }
+                        if (player === errPlayer) player = null
                         if (cont.isActive) cont.resume(false)
                         true
                     }
-                    p.prepare()
-                    _state.value = State.Speaking
-                    p.start()
-                    true
-                }.getOrElse { false }
-                if (!started && cont.isActive) {
-                    cont.resume(false)
+                    mp.prepare()
+                    if (gen == generation) {
+                        _state.value = State.Speaking
+                        mp.start()
+                        started = true
+                    }
+                } catch (_: Exception) {
+                }
+                if (!started) {
+                    // 创建/预加载失败（或已被接管）：释放自己的播放器并报告失败
+                    runCatching { p?.release() }
+                    if (p != null && player === p) player = null
                 }
                 cont.invokeOnCancellation {
-                    runCatching { player?.release() }
-                    if (player != null) player = null
+                    // 只释放自己创建的那个播放器，绝不能误伤后继流水线的播放器
+                    runCatching { p?.release() }
+                    if (p != null && player === p) player = null
+                }
+                if (!started && cont.isActive) {
+                    cont.resume(false)
                 }
             }
         }
     }
 
     /** 系统 TTS 兜底：初始化（带超时）→ speak → 等待完成 */
-    private suspend fun speakWithSystem(context: Context, text: String) {
+    private suspend fun speakWithSystem(context: Context, text: String, gen: Int) {
+        if (gen != generation) return
         val engine = ensureSystemTts(context)
         if (engine == null) {
-            _state.value = State.Unavailable("语音合成不可用：网络合成多次重试仍失败，这台手机也没有可用的语音引擎")
+            if (gen == generation) {
+                _state.value = State.Unavailable("语音合成不可用：网络合成多次重试仍失败，这台手机也没有可用的语音引擎")
+            }
+            return
+        }
+        if (gen != generation) {
+            runCatching { engine.stop() }
             return
         }
         var speakFailed = false
         withContext(Dispatchers.Main) {
-            runCatching {
+            try {
                 suspendCancellableCoroutine { cont ->
                     engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
-                            _state.value = State.Speaking
+                            if (gen == generation) _state.value = State.Speaking
                         }
 
                         override fun onDone(utteranceId: String?) {
-                            if (_state.value is State.Speaking) _state.value = State.Idle
+                            if (gen == generation) {
+                                if (_state.value is State.Speaking) _state.value = State.Idle
+                                currentText = null
+                            }
                             if (cont.isActive) cont.resume(Unit)
                         }
 
                         @Deprecated("Deprecated in Java")
                         override fun onError(utteranceId: String?) {
-                            if (_state.value is State.Speaking) _state.value = State.Idle
+                            if (gen == generation) {
+                                if (_state.value is State.Speaking) _state.value = State.Idle
+                                currentText = null
+                            }
                             if (cont.isActive) cont.resume(Unit)
                         }
                     })
@@ -240,8 +300,12 @@ object TtsPlayer {
                     }
                     cont.invokeOnCancellation { runCatching { engine.stop() } }
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
             }
         }
+        if (gen != generation) return
         if (speakFailed) {
             _state.value = State.Unavailable("这台手机的语音引擎没有响应")
         } else if (_state.value is State.Loading) {
