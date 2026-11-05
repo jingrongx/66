@@ -12,7 +12,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,11 +22,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 回答朗读（老人/骑行/走路场景解放双眼）。进程级单例。
- * 策略：优先 Edge 云端合成（效果好、零体积、无需 Key），失败回退系统 TTS；
- * 两路都失败才报"不可用"。所有失败落到 [state] 由界面明示。
- *
- * 长文本按句切分流水线：边合成边播（第 i 句播放时第 i+1 句已在后台合成），
- * 首句秒出，不再等整篇合成完才出声。
+ * 模型（v0.8.2 恢复整段式）：全文合成音频 → 整段播放 →（长文才）合成下一段 → 播放，
+ * 严格串行、不并发不预取——杜绝乱序与拼接破音。
+ * 引擎链：Edge 云端合成（免费无 Key）→ 硅基流动 CosyVoice2（配 Key 才启用）→ 系统 TTS；
+ * 全部失败才报"不可用"，落到 [state] 由界面明示。
  */
 object TtsPlayer {
 
@@ -66,10 +64,13 @@ object TtsPlayer {
         cloudKey = key?.takeIf { it.isNotBlank() }
     }
 
-    /** 第一句之后每段的目标长度（字）：连接少、抗抖动，Edge 单请求上限 3000 */
-    private const val SEGMENT_CHARS = 600
+    /** 每段的目标长度（字）：常见回答 ≤800 字 = 整篇一段、一次合成一次播完；两家云端引擎单段上限都在此之内 */
+    private const val SEGMENT_CHARS = 800
     /** 单段合成重试次数 */
     private const val SYNTH_ATTEMPTS = 3
+
+    /** 判定"内容字符"时要排除的全角标点（它们码位都在 CJK 区间内） */
+    private val FULLWIDTH_PUNCT = "。，、；：！？…—·～「」『』《》〈〉（）【】〔〕“”‘’"
 
     /** 播放/合成中 → 停止并返回 false；空闲 → 开始并返回 true */
     fun toggle(context: Context, text: String): Boolean {
@@ -94,41 +95,29 @@ object TtsPlayer {
         currentText = body
         _state.value = State.Loading
         job = scope.launch {
-            val chunks = buildChunks(body)
-            if (chunks.isEmpty()) {
+            val parts = buildParts(body)
+            if (parts.isEmpty()) {
                 if (myGen == generation) _state.value = State.Idle
                 return@launch
             }
             val dir = File(context.cacheDir, "tts")
-            // 流水线：先合成第 1 段；播第 i 段时第 i+1 段已在后台合成
-            var pending: kotlinx.coroutines.Deferred<File?>? = async { synthesizeWithRetry(chunks[0], dir) }
-            for (i in chunks.indices) {
-                val cur = pending ?: break
-                pending = if (i + 1 < chunks.size) {
-                    async { synthesizeWithRetry(chunks[i + 1], dir) }
-                } else {
-                    null
-                }
-                // 注意：不能把“被停止的取消信号”当成合成失败吞掉，
-                // 否则被叫停的旧流水线会误判走系统 TTS 兜底，和新播报叠在一起
-                val file = try {
-                    cur.await()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    null
-                }
+            // 恢复最初方案的模型：合成完整音频 → 整段播放 → 再合成下一段。
+            // 严格串行，不并发、不预取、不交错——常见回答（≤800字）就是一整段音频一次播完，
+            // 从结构上杜绝"有的句子先读、有的后读"和分段拼接处的破音。
+            for (i in parts.indices) {
+                val file = synthesizeWithRetry(parts[i], dir)
+                // 不能把"被停止的取消信号"当成合成失败吞掉，否则旧流水线会走系统 TTS 兜底叠音
                 if (myGen != generation) return@launch
                 if (file == null || file.length() == 0L) {
-                    // 重试后仍失败：剩余文本整体交给系统 TTS 兜底
-                    speakWithSystem(context, chunks.drop(i).joinToString(""), myGen)
+                    // 两级云端合成（Edge→CosyVoice2）都失败：剩余文本整体交给系统 TTS
+                    speakWithSystem(context, parts.drop(i).joinToString(""), myGen)
                     return@launch
                 }
                 val ok = playFileAwait(file, myGen)
                 runCatching { file.delete() }
                 if (myGen != generation) return@launch
                 if (!ok) {
-                    speakWithSystem(context, chunks.drop(i + 1).joinToString(""), myGen)
+                    speakWithSystem(context, parts.drop(i + 1).joinToString(""), myGen)
                     return@launch
                 }
             }
@@ -155,18 +144,17 @@ object TtsPlayer {
     }
 
     /**
-     * 合成分段策略（v0.7.8 重构，修复"播几句就断"）：
-     * v0.7.5 按短句切分后每句各开一条到微软服务器的连接，一篇回答几十条连接，
-     * 网络稍有抖动/被限流就中途失败。现在只拆第一句（保证首句秒出），
-     * 其余按约 600 字合并成大段——连接数降到个位数，且每段自带重试。
+     * 全文分段（v0.8.2 恢复"整段合成整段播"）：短回答就是一整段、合成一次播一次；
+     * 超过 800 字的长文才按句切大段，播完一段再合成下一段（严格串行，不预取不并发）。
+     * internal 是为了单元测试可直接调用。
      */
-    private fun buildChunks(text: String): List<String> {
+    internal fun buildParts(text: String): List<String> {
         val sentences = splitForSpeech(text)
         if (sentences.isEmpty()) return emptyList()
-        if (sentences.size == 1) return sentences
-        val out = mutableListOf<String>(sentences[0])
+        if (sentences.joinToString("").length <= SEGMENT_CHARS) return listOf(sentences.joinToString(""))
+        val out = mutableListOf<String>()
         val sb = StringBuilder()
-        for (s in sentences.drop(1)) {
+        for (s in sentences) {
             if (sb.isNotEmpty() && sb.length + s.length > SEGMENT_CHARS) {
                 out.add(sb.toString())
                 sb.clear()
@@ -216,8 +204,10 @@ object TtsPlayer {
             if (isEnd || isPause || len >= 90) flush()
         }
         flush()
-        // 过滤纯符号段
-        return out.filter { it.any { c -> c.isLetterOrDigit() || c.code > 0x2E80 } }
+        // 过滤纯符号段：全角标点码位也在 0x2E80 以上，不算内容，别为"。，"白跑一次合成
+        return out.filter { seg ->
+            seg.any { c -> c.isLetterOrDigit() || (c.code > 0x2E80 && c !in FULLWIDTH_PUNCT) }
+        }
     }
 
     /**

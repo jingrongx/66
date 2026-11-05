@@ -13,8 +13,8 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 23
-        versionName = "0.8.1"
+        versionCode = 24
+        versionName = "0.8.2"
     }
 
     signingConfigs {
@@ -71,6 +71,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
+    testImplementation("junit:junit:4.13.2")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // 扫码同步：二维码生成与识别（纯 Java 实现无厂商依赖，兼容 API 21+）
