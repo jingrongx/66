@@ -167,7 +167,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
             listening = true
             scope.launch {
                 TtsPlayer.stop()
-                HotwordCorrector.buildIfNeeded(vm.sessionList.value, emptyList())
+                HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                 SpeechInput.listen(context, "请说话")
                     .onSuccess { vm.appendQuestion(HotwordCorrector.correct(it)) }
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }

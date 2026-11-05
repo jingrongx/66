@@ -110,7 +110,8 @@ fun MemoryScreen(onClose: () -> Unit, app: TravelApp) {
                                 color = MaterialTheme.colorScheme.primaryContainer,
                             ) {
                                 Text(
-                                    if (entry.kind == MemoryStore.MemoryEntry.EVIDENCE) "证据" else "偏好",
+                                    if (entry.kind == MemoryStore.MemoryEntry.EVIDENCE) "证据"
+                                    else if (entry.kind == MemoryStore.MemoryEntry.PROFILE) "画像" else "偏好",
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer,

@@ -39,18 +39,27 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class ChatViewModel(app: TravelApp) : ViewModel() {
 
     private val repo = app.settingsRepository
     private val sessions = app.sessionStore
     private val memory = app.memoryStore
+    private val noteStore = app.noteStore
 
     val settings = repo.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings())
     val sessionList = sessions.sessions
     val currentSessionId = sessions.currentSessionId
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** 热词词库语料：随手记 + 记忆画像（语音界面构词库时取用，越用越懂用户的口音词汇） */
+    val quickNotes get() = noteStore.notes.value
+    val memoryFacts
+        get() = memory.profileFacts() +
+            memory.entries.value.filter { it.kind == MemoryStore.MemoryEntry.EVIDENCE }.map { it.title }
 
     val messages: StateFlow<List<SessionMessage>> =
         combine(sessions.sessions, currentSessionId) { list, id ->
@@ -170,6 +179,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 } else {
                     appendLine("位置：未授权定位（不要假设用户位置，答不了就问）")
                 }
+                val profileBlock = memory.profileContext()
+                if (profileBlock.isNotBlank()) {
+                    appendLine()
+                    append(profileBlock)
+                }
                 val memoryBlock = memory.relevantContext(question)
                 if (memoryBlock.isNotBlank()) {
                     appendLine()
@@ -259,6 +273,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     )
                     _stream.value = null
                     _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+                    maybeSummarizeSession(sessionId, settingsValue)
                 },
                 onFailure = { e ->
                     _stream.value = null
@@ -269,7 +284,13 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     fun newSession(onReady: (String) -> Unit = {}) {
-        viewModelScope.launch { onReady(sessions.create().id) }
+        viewModelScope.launch {
+            // 会话收尾：把还没总结过的内容补进画像，再开新会话
+            currentSessionId.value?.let {
+                maybeSummarizeSession(it, repo.settings.firstOrNull() ?: AiSettings(), force = true)
+            }
+            onReady(sessions.create().id)
+        }
     }
 
     fun switchSession(id: String, onReady: () -> Unit = {}) {
@@ -293,6 +314,28 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 source = "AI 回答（用户收藏）",
             )
             _ui.update { it.copy(error = null) }
+        }
+    }
+
+    /**
+     * 记忆飞轮：攒够 3 句新用户消息就把会话交给 AI 总结成画像，越聊越懂用户；
+     * 结束会话时 force 补总结。失败静默跳过，下一批再试；互斥避免并发总结。
+     */
+    private val summarizeMutex = Mutex()
+    private val summarizedUpto = HashMap<String, Int>()
+
+    private fun maybeSummarizeSession(sessionId: String, settings: AiSettings, force: Boolean = false) {
+        if (settings.apiKey.isBlank()) return
+        viewModelScope.launch {
+            val session = sessions.get(sessionId) ?: return@launch
+            val userCount = session.messages.count { it.role == "user" }
+            val done = summarizedUpto[sessionId] ?: 0
+            if (userCount == 0 || userCount <= done) return@launch
+            if (!force && summarizedUpto.containsKey(sessionId) && userCount - done < 3) return@launch
+            summarizedUpto[sessionId] = userCount
+            summarizeMutex.withLock {
+                runCatching { memory.updateProfileFromSession(session, settings) }
+            }
         }
     }
 

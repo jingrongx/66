@@ -215,7 +215,7 @@ fun AskScreen(
         } else if (SpeechInput.isAvailable(context)) {
             listening = true
             scope.launch {
-                HotwordCorrector.buildIfNeeded(vm.sessionList.value, emptyList())
+                HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                 SpeechInput.listen(context, "说出来，我帮你问")
                     .onSuccess { vm.appendQuestion(HotwordCorrector.correct(it)) }
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }

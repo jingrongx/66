@@ -6,7 +6,7 @@ import net.sourceforge.pinyin4j.format.HanyuPinyinOutputFormat
 import net.sourceforge.pinyin4j.format.HanyuPinyinToneType
 
 /**
- * 语音输入热词纠正：从用户自己的聊天记录、随手记、地图卡里挖高频词建词库，
+ * 语音输入热词纠正：从用户自己的聊天记录、随手记、记忆画像、地图卡里挖高频词建词库，
  * 语音识别结果里同拼音的片段替换成熟词——越用越贴合用户习惯。
  * 拼音用 tinyPinyin（纯本地，无网络）；只有整段拼音完全一致才替换，误纠有限。
  */
@@ -17,8 +17,12 @@ object HotwordCorrector {
     @Volatile
     private var builtAt = 0L
 
-    /** 每 5 分钟重建一次词库；语料=用户消息（权重1）+ 随手记（权重2）+ 地点名称（权重6） */
-    fun buildIfNeeded(sessions: List<ChatSession>, notes: List<QuickNote>) {
+    /** 每 5 分钟重建一次词库；语料=用户消息（权重1）+ 随手记（权重2）+ 记忆事实（权重5）+ 地点名称（权重6） */
+    fun buildIfNeeded(
+        sessions: List<ChatSession>,
+        notes: List<QuickNote>,
+        memoryFacts: List<String> = emptyList(),
+    ) {
         val now = System.currentTimeMillis()
         if (lexicon.isNotEmpty() && now - builtAt < 5 * 60_000L) return
         builtAt = now
@@ -40,6 +44,7 @@ object HotwordCorrector {
             .filter { it.role == "user" }
             .forEach { feed(it.text, 1) }
         notes.forEach { feed(it.text, 2) }
+        memoryFacts.forEach { feed(it, 5) }
         sessions.asSequence()
             .flatMap { it.messages.asSequence() }
             .forEach { m ->
@@ -56,7 +61,7 @@ object HotwordCorrector {
         )
         lexicon = counts.filter { (k, v) -> v >= 3 && k !in stop }
             .entries.sortedByDescending { it.value }
-            .take(300)
+            .take(400)
             .associate { it.key to it.key }
     }
 
