@@ -53,8 +53,18 @@ object TtsPlayer {
      * 延迟回调等“僵尸”情况）一律不得再启动任何音频。这是防重叠的硬保证。
      */
     private var generation = 0
+
     /** 当前正在播的文本：同一段文本重复触发时直接忽略，不再从头重读（防多触发源互相踩踏） */
     private var currentText: String? = null
+
+    /** 硅基流动云端朗读兜底用的 Key（复用语音识别 Key）；由界面层按设置注入，空则跳过该级 */
+    @Volatile
+    private var cloudKey: String? = null
+
+    /** 界面层在设置变化时注入；Key 只在本机，用于 Edge 失败时的云端合成兜底 */
+    fun setCloudKey(key: String?) {
+        cloudKey = key?.takeIf { it.isNotBlank() }
+    }
 
     /** 第一句之后每段的目标长度（字）：连接少、抗抖动，Edge 单请求上限 3000 */
     private const val SEGMENT_CHARS = 600
@@ -167,12 +177,24 @@ object TtsPlayer {
         return out
     }
 
-    /** 单段合成：失败自动重试（网络抖动/限流下，多试几次基本都能过） */
+    /**
+     * 单段合成引擎链：Edge（免费无 Key，主力）→ 硅基流动 CosyVoice2（配了语音识别 Key 才启用，
+     * 普通 HTTP 比 WebSocket 抗抖动，Edge 协议再变动时也顶得住）→ 返回 null 交给系统 TTS。
+     * 每级自带重试；"播几句就断"多因单引擎中途失败，两级接力后剩余段落不再陪葬。
+     */
     private suspend fun synthesizeWithRetry(text: String, dir: File): File? {
         repeat(SYNTH_ATTEMPTS) { attempt ->
             if (attempt > 0) kotlinx.coroutines.delay(500L * attempt)
             val file = runCatching { EdgeTts.synthesize(text, dir) }.getOrNull()
             if (file != null && file.length() > 0) return file
+        }
+        val key = cloudKey
+        if (key != null) {
+            repeat(2) { attempt ->
+                if (attempt > 0) kotlinx.coroutines.delay(400L)
+                val file = runCatching { CloudTts.synthesize(text, dir, key) }.getOrNull()
+                if (file != null && file.length() > 0) return file
+            }
         }
         return null
     }
@@ -198,53 +220,49 @@ object TtsPlayer {
         return out.filter { it.any { c -> c.isLetterOrDigit() || c.code > 0x2E80 } }
     }
 
-    /** 播放一个音频文件并挂起直到播完/出错/被取消；返回是否完整播完 */
+    /**
+     * 播放一个音频文件并挂起直到播完/出错/被取消；返回是否完整播完。
+     * 不再依赖 OnCompletionListener——部分 ROM 的播放完成回调不触发，
+     * 流水线会永久挂死（"播几句就不播了"的根因之一）；改为轮询 isPlaying，
+     * 播完/出错/被新播报接管都能可靠退出，还顺带消掉了强杀播放器时的"破音"。
+     */
     private suspend fun playFileAwait(file: File, gen: Int): Boolean {
         return withContext(Dispatchers.Main) {
             // 开播前最后核对一次代次（和 stop()/speak() 同在主线程执行，此检查无竞态窗口）：
             // 已被接管的旧流水线到此为止，一个音都不许出
             if (gen != generation) return@withContext false
-            suspendCancellableCoroutine { cont ->
-                var started = false
-                var p: MediaPlayer? = null
-                try {
-                    val mp = MediaPlayer()
-                    p = mp
-                    player = mp
-                    mp.setDataSource(file.absolutePath)
-                    mp.setOnCompletionListener {
-                        runCatching { it.release() }
-                        if (player === it) player = null
-                        if (cont.isActive) cont.resume(true)
-                    }
-                    mp.setOnErrorListener { errPlayer, _, _ ->
-                        runCatching { errPlayer.release() }
-                        if (player === errPlayer) player = null
-                        if (cont.isActive) cont.resume(false)
-                        true
-                    }
-                    mp.prepare()
-                    if (gen == generation) {
-                        _state.value = State.Speaking
-                        mp.start()
-                        started = true
-                    }
-                } catch (_: Exception) {
+            val mp = MediaPlayer()
+            player = mp
+            var started = false
+            try {
+                mp.setDataSource(file.absolutePath)
+                mp.prepare()
+                if (gen == generation) {
+                    _state.value = State.Speaking
+                    mp.start()
+                    started = true
                 }
-                if (!started) {
-                    // 创建/预加载失败（或已被接管）：释放自己的播放器并报告失败
-                    runCatching { p?.release() }
-                    if (p != null && player === p) player = null
-                }
-                cont.invokeOnCancellation {
-                    // 只释放自己创建的那个播放器，绝不能误伤后继流水线的播放器
-                    runCatching { p?.release() }
-                    if (p != null && player === p) player = null
-                }
-                if (!started && cont.isActive) {
-                    cont.resume(false)
-                }
+            } catch (_: Exception) {
             }
+            if (!started) {
+                // 创建/预加载失败（或已被接管）：只释放自己这个播放器，不误伤后继流水线
+                runCatching { mp.release() }
+                if (player === mp) player = null
+                return@withContext false
+            }
+            try {
+                while (true) {
+                    if (gen != generation) break
+                    val playing = runCatching { mp.isPlaying }.getOrDefault(false)
+                    if (!playing) break
+                    kotlinx.coroutines.delay(150)
+                }
+            } finally {
+                runCatching { if (mp.isPlaying) mp.stop() }
+                runCatching { mp.release() }
+                if (player === mp) player = null
+            }
+            gen == generation
         }
     }
 
@@ -254,7 +272,9 @@ object TtsPlayer {
         val engine = ensureSystemTts(context)
         if (engine == null) {
             if (gen == generation) {
-                _state.value = State.Unavailable("语音合成不可用：网络合成多次重试仍失败，这台手机也没有可用的语音引擎")
+                _state.value = State.Unavailable(
+                    "朗读不可用：免费朗读和云端兜底都失败了，这台手机也没有可用的语音引擎。请检查网络后重试；可在设置里填「语音识别 Key」启用云端兜底",
+                )
             }
             return
         }

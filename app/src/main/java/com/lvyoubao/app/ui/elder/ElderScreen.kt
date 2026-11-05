@@ -313,18 +313,21 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                 onClick = { keyboard?.hide(); vm.newSession() },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text("新对话", fontSize = 19.sp) }
+                contentPadding = PaddingValues(horizontal = 6.dp),
+            ) { Text("新对话", fontSize = 17.sp, maxLines = 1) }
             Button(
                 onClick = { keyboard?.hide(); showHistory = true },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text("对话历史", fontSize = 19.sp) }
+                contentPadding = PaddingValues(horizontal = 6.dp),
+            ) { Text("历史对话", fontSize = 17.sp, maxLines = 1) }
             Button(
                 onClick = { keyboard?.hide(); showCall = true },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
+                contentPadding = PaddingValues(horizontal = 6.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) { Text("📞 语音通话", fontSize = 19.sp) }
+            ) { Text("📞 通话", fontSize = 17.sp, maxLines = 1) }
         }
 
         // ---------- 会话流：整个对话从头到尾 ----------
@@ -468,7 +471,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 按住说话大按钮
+                    // 按住说话大按钮（标签保持一行，不换行不截断）
                     val holdBig = settings.asrKey.isNotBlank()
                     Box(
                         modifier = Modifier
@@ -476,42 +479,34 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                             .height(80.dp)
                             .clip(RoundedCornerShape(20.dp))
                             .background(
-                                when {
-                                    recording != null -> MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.primary
-                                }
+                                if (recording != null) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary
                             )
                             .then(holdToTalkModifier(autoSend = false)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        if (recording != null) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("🎙 ${recordTick}s", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onError)
-                                Text("松手记下来", fontSize = 16.sp, color = MaterialTheme.colorScheme.onError)
-                            }
-                        } else {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    if (listening) "正在记录…" else if (holdBig) "🎤 按住说话" else "🎤 点一下说",
-                                    fontSize = 22.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                )
-                                if (!listening) {
-                                    Text(
-                                        "可以说好几段再发送",
-                                        fontSize = 14.sp,
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                    )
-                                }
-                            }
-                        }
+                        Text(
+                            when {
+                                recording != null -> "松手（${recordTick}s）"
+                                listening -> "正在记录…"
+                                holdBig -> "🎤 按住说话"
+                                else -> "🎤 点一下说"
+                            },
+                            fontSize = 18.sp,
+                            maxLines = 1,
+                            fontWeight = FontWeight.Bold,
+                            color = if (recording != null) {
+                                MaterialTheme.colorScheme.onError
+                            } else {
+                                MaterialTheme.colorScheme.onPrimary
+                            },
+                        )
                     }
                     // 拍照
                     Box(
                         modifier = Modifier
-                            .size(80.dp)
-                            .clip(RoundedCornerShape(20.dp))
+                            .size(68.dp)
+                            .clip(RoundedCornerShape(18.dp))
                             .background(MaterialTheme.colorScheme.secondaryContainer)
                             .clickable {
                                 keyboard?.hide()
@@ -520,12 +515,12 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                                 cameraLauncher.launch(uri)
                             },
                         contentAlignment = Alignment.Center,
-                    ) { Text("📷", fontSize = 30.sp) }
+                    ) { Text("📷", fontSize = 26.sp) }
                     // 相册
                     Box(
                         modifier = Modifier
-                            .size(80.dp)
-                            .clip(RoundedCornerShape(20.dp))
+                            .size(68.dp)
+                            .clip(RoundedCornerShape(18.dp))
                             .background(MaterialTheme.colorScheme.secondaryContainer)
                             .clickable {
                                 keyboard?.hide()
@@ -534,7 +529,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                                 )
                             },
                         contentAlignment = Alignment.Center,
-                    ) { Text("🖼", fontSize = 30.sp) }
+                    ) { Text("🖼", fontSize = 26.sp) }
                     // 发送
                     Button(
                         onClick = {
@@ -544,8 +539,9 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                         enabled = canSend,
                         modifier = Modifier.height(80.dp),
                         shape = RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp),
                     ) {
-                        Text("发送", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Text("发送", fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                     }
                 }
                 if (state.sending) {
@@ -579,6 +575,8 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
     // ---------- 语音通话（全屏） ----------
     if (showCall) {
         VoiceCallOverlay(
+            messages = messages,
+            streamState = streamState,
             sending = state.sending,
             listening = listening,
             recording = recording,
@@ -594,24 +592,26 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
     }
 }
 
-/** 用户消息：右侧大气泡，超大字 */
+/** 用户消息：右侧大气泡，超大字，长按可选中复制 */
 @Composable
 private fun ElderUserBubble(message: SessionMessage) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
     ) {
-        Surface(
-            shape = RoundedCornerShape(22.dp, 6.dp, 22.dp, 22.dp),
-            color = MaterialTheme.colorScheme.primaryContainer,
-        ) {
-            Text(
-                (if (message.hadImage) "🖼 " else "") + message.text,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                fontSize = 22.sp,
-                lineHeight = 32.sp,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+        androidx.compose.foundation.text.selection.SelectionContainer {
+            Surface(
+                shape = RoundedCornerShape(22.dp, 6.dp, 22.dp, 22.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+            ) {
+                Text(
+                    (if (message.hadImage) "🖼 " else "") + message.text,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    fontSize = 22.sp,
+                    lineHeight = 32.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
         }
     }
 }
@@ -626,59 +626,64 @@ private fun ElderAssistantCard(
     onSaveMemory: () -> Unit,
 ) {
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
-        Column(Modifier.padding(18.dp)) {
-            Text(message.text, fontSize = 25.sp, lineHeight = 37.sp, fontWeight = FontWeight.Bold)
-            message.steps.forEachIndexed { index, step ->
-                Spacer(Modifier.height(10.dp))
-                Text("${index + 1}. $step", fontSize = 22.sp, lineHeight = 32.sp)
+        // 文字整体可长按选中、自由复制（按钮不受影响）
+        androidx.compose.foundation.text.selection.SelectionContainer {
+            Column(Modifier.padding(18.dp)) {
+                Text(message.text, fontSize = 25.sp, lineHeight = 37.sp, fontWeight = FontWeight.Bold)
+                message.steps.forEachIndexed { index, step ->
+                    Spacer(Modifier.height(10.dp))
+                    Text("${index + 1}. $step", fontSize = 22.sp, lineHeight = 32.sp)
+                }
+                message.action?.let {
+                    Spacer(Modifier.height(12.dp))
+                    Text("👉 $it", fontSize = 21.sp, color = MaterialTheme.colorScheme.primary)
+                }
             }
-            message.action?.let {
-                Spacer(Modifier.height(12.dp))
-                Text("👉 $it", fontSize = 21.sp, color = MaterialTheme.colorScheme.primary)
-            }
-            message.mapCard?.let { card ->
-                Spacer(Modifier.height(8.dp))
-                RouteMapCard(card = card, app = app, elder = true)
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Button(
-                    onClick = onToggleSpeak,
-                    modifier = Modifier.height(50.dp),
-                    shape = RoundedCornerShape(14.dp),
-                ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 再读一遍", fontSize = 18.sp) }
-                Button(
-                    onClick = onSaveMemory,
-                    modifier = Modifier.height(50.dp),
-                    shape = RoundedCornerShape(14.dp),
-                ) { Text("收藏", fontSize = 18.sp) }
-            }
+        }
+        message.mapCard?.let { card ->
+            Spacer(Modifier.height(8.dp))
+            RouteMapCard(card = card, app = app, elder = true)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Button(
+                onClick = onToggleSpeak,
+                modifier = Modifier.height(50.dp),
+                shape = RoundedCornerShape(14.dp),
+            ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 再读一遍", fontSize = 18.sp) }
+            Button(
+                onClick = onSaveMemory,
+                modifier = Modifier.height(50.dp),
+                shape = RoundedCornerShape(14.dp),
+            ) { Text("收藏", fontSize = 18.sp) }
         }
     }
 }
 
-/** 生成中的回答：实时流式正文，超大字 */
+/** 生成中的回答：实时流式正文，超大字，可选中复制 */
 @Composable
 private fun ElderStreamingCard(streamState: ChatViewModel.StreamState?) {
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
-        Column(Modifier.padding(18.dp)) {
-            if (streamState == null || (streamState.answer.isBlank() && streamState.reasoning.isBlank())) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 3.dp)
-                    Spacer(Modifier.width(10.dp))
-                    Text("正在帮你想…", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                }
-            } else {
-                if (streamState.answer.isBlank() && streamState.reasoning.isNotBlank()) {
-                    Text("正在想…", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (streamState.answer.isNotBlank()) {
-                    Text(
-                        streamState.answer,
-                        fontSize = 25.sp,
-                        lineHeight = 37.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
+        androidx.compose.foundation.text.selection.SelectionContainer {
+            Column(Modifier.padding(18.dp)) {
+                if (streamState == null || (streamState.answer.isBlank() && streamState.reasoning.isBlank())) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 3.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text("正在帮你想…", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    if (streamState.answer.isBlank() && streamState.reasoning.isNotBlank()) {
+                        Text("正在想…", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (streamState.answer.isNotBlank()) {
+                        Text(
+                            streamState.answer,
+                            fontSize = 25.sp,
+                            lineHeight = 37.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
                 }
             }
         }
@@ -773,10 +778,13 @@ private fun ElderHistoryOverlay(
 /**
  * 语音通话：像打电话一样的全屏界面。
  * 按住说话、松手就问，回答自动朗读；朗读时随时按住即可插话（会先停掉朗读再录）。
- * 全链路免费：录音→云端方言口音转文字→大模型回答→Edge 朗读。
+ * 中间默认展示会话文字稿（含正在生成的回答），看得见 AI 在说什么，也可长按选中复制。
+ * 全链路免费：录音→云端方言口音转文字→大模型回答→Edge/云端朗读。
  */
 @Composable
 private fun VoiceCallOverlay(
+    messages: List<SessionMessage>,
+    streamState: ChatViewModel.StreamState?,
     sending: Boolean,
     listening: Boolean,
     recording: SpeechInput.Recording?,
@@ -793,28 +801,29 @@ private fun VoiceCallOverlay(
             seconds++
         }
     }
+    val transcriptState = rememberLazyListState()
+    // 新消息/流式输出增长时文字稿滚到底
+    LaunchedEffect(messages.size, sending, streamState?.answer?.length) {
+        if (messages.isNotEmpty()) {
+            val target = (messages.size - 1 + if (sending) 1 else 0).coerceAtLeast(0)
+            runCatching { transcriptState.animateScrollToItem(target) }
+        }
+    }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = 24.dp),
+                .padding(horizontal = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(28.dp))
-            Text("语音通话中", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            Text(formatCallDuration(seconds), fontSize = 19.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(36.dp))
-            Box(
-                modifier = Modifier.size(130.dp).clip(RoundedCornerShape(65.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    if (ttsSpeaking) "🗣" else "🌟",
-                    fontSize = 60.sp,
-                )
+            Spacer(Modifier.height(18.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("语音通话中", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(12.dp))
+                Text(formatCallDuration(seconds), fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(12.dp))
             val status = when {
                 recording != null -> "正在听你说…（${recordTick}s，说完松手）"
                 listening -> "正在记下来…"
@@ -822,17 +831,86 @@ private fun VoiceCallOverlay(
                 ttsSpeaking -> "正在回答，想插话就按住说话"
                 else -> "按住下面的按钮说话"
             }
-            Text(status, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+            Text(status, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             ttsUnavailable?.let {
-                Spacer(Modifier.height(8.dp))
-                Text(it, fontSize = 16.sp, color = MaterialTheme.colorScheme.error)
+                Spacer(Modifier.height(6.dp))
+                Text(it, fontSize = 15.sp, lineHeight = 21.sp, color = MaterialTheme.colorScheme.error)
             }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(10.dp))
+
+            // 会话文字稿：默认可见，看得见 AI 说了什么，长按可选中复制
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                LazyColumn(
+                    state = transcriptState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(messages) { message ->
+                        if (message.role == "user") {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                ) {
+                                    Text(
+                                        message.text,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        fontSize = 17.sp,
+                                        lineHeight = 24.sp,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    )
+                                }
+                            }
+                        } else {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            ) {
+                                Text(
+                                    message.text,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    fontSize = 17.sp,
+                                    lineHeight = 25.sp,
+                                )
+                            }
+                        }
+                    }
+                    if (sending) {
+                        item {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            ) {
+                                Text(
+                                    streamState?.answer?.takeIf { it.isNotBlank() }
+                                        ?: streamState?.reasoning?.takeIf { it.isNotBlank() }?.let { "（思考中）" + it.takeLast(160) }
+                                        ?: "正在帮你想…",
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    fontSize = 17.sp,
+                                    lineHeight = 25.sp,
+                                    color = if (streamState?.answer?.isNotBlank() == true) {
+                                        MaterialTheme.colorScheme.onSurface
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
             // 按住说话大按钮（松手即发问，自动等回答、自动朗读）
             Box(
                 modifier = Modifier
-                    .size(150.dp)
-                    .clip(RoundedCornerShape(75.dp))
+                    .size(140.dp)
+                    .clip(RoundedCornerShape(70.dp))
                     .background(
                         if (recording != null) MaterialTheme.colorScheme.error
                         else MaterialTheme.colorScheme.primary
@@ -842,20 +920,21 @@ private fun VoiceCallOverlay(
             ) {
                 Text(
                     if (recording != null) "松手\n我就回答" else "按住\n说话",
-                    fontSize = 26.sp,
-                    lineHeight = 34.sp,
+                    fontSize = 25.sp,
+                    lineHeight = 33.sp,
                     fontWeight = FontWeight.Bold,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     color = if (recording != null) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimary,
                 )
             }
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(16.dp))
             Button(
                 onClick = onHangUp,
-                modifier = Modifier.fillMaxWidth(0.62f).height(62.dp),
-                shape = RoundedCornerShape(31.dp),
+                modifier = Modifier.fillMaxWidth(0.62f).height(58.dp),
+                shape = RoundedCornerShape(29.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-            ) { Text("📵 挂断", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
-            Spacer(Modifier.height(28.dp))
+            ) { Text("📵 挂断", fontSize = 21.sp, fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(20.dp))
         }
     }
 }

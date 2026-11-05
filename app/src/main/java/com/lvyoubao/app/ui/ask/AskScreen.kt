@@ -831,16 +831,18 @@ private fun UserBubble(message: SessionMessage) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
     ) {
-        Surface(
-            shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp),
-            color = MaterialTheme.colorScheme.primaryContainer,
-        ) {
-            Text(
-                (if (message.hadImage) "🖼 " else "") + message.text,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+        androidx.compose.foundation.text.selection.SelectionContainer {
+            Surface(
+                shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+            ) {
+                Text(
+                    (if (message.hadImage) "🖼 " else "") + message.text,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
         }
     }
 }
@@ -854,45 +856,47 @@ private fun StreamingCard(st: ChatViewModel.StreamState) {
         if (hasAnswer) expanded = false
     }
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
-        Column(Modifier.padding(20.dp)) {
-            if (hasReasoning) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable { expanded = !expanded }
-                        .padding(vertical = 2.dp),
-                ) {
-                    Text(
-                        if (!hasAnswer) "🤔 思考中…" else (if (expanded) "▼ 已深度思考（点收起）" else "▶ 已深度思考（点展开）"),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (expanded || !hasAnswer) {
-                    Text(
-                        st.reasoning,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        lineHeight = 20.sp,
+        androidx.compose.foundation.text.selection.SelectionContainer {
+            Column(Modifier.padding(20.dp)) {
+                if (hasReasoning) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .heightIn(max = 200.dp)
-                            .verticalScroll(rememberScrollState())
-                            .padding(top = 6.dp),
-                    )
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { expanded = !expanded }
+                            .padding(vertical = 2.dp),
+                    ) {
+                        Text(
+                            if (!hasAnswer) "🤔 思考中…" else (if (expanded) "▼ 已深度思考（点收起）" else "▶ 已深度思考（点展开）"),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (expanded || !hasAnswer) {
+                        Text(
+                            st.reasoning,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 20.sp,
+                            modifier = Modifier
+                                .heightIn(max = 200.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(top = 6.dp),
+                        )
+                    }
+                    if (hasAnswer) Spacer(Modifier.height(10.dp))
                 }
-                if (hasAnswer) Spacer(Modifier.height(10.dp))
-            }
-            if (hasAnswer) {
-                Text(
-                    st.answer,
-                    fontSize = 20.sp,
-                    lineHeight = 30.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-            } else if (!hasReasoning) {
-                Text("正在思考…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (hasAnswer) {
+                    Text(
+                        st.answer,
+                        fontSize = 20.sp,
+                        lineHeight = 30.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                } else if (!hasReasoning) {
+                    Text("正在思考…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }
@@ -909,42 +913,47 @@ private fun AssistantCard(
     val ttsText = remember(message.ts) { ChatViewModel.speakableText(message) }
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.padding(20.dp)) {
-            Text(
-                message.text,
-                fontSize = 20.sp,
-                lineHeight = 30.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            if (message.steps.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                message.steps.forEachIndexed { index, step ->
-                    Row(Modifier.padding(vertical = 3.dp)) {
-                        Text(
-                            "${index + 1}. ",
-                            fontSize = 18.sp,
-                            lineHeight = 27.sp,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            step,
-                            fontSize = 18.sp,
-                            lineHeight = 27.sp,
-                        )
-                    }
-                }
-            }
-            message.action?.let { action ->
-                Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.LocationOn,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp),
+            // 文字整体可长按选中、自由复制（地图卡和按钮不受影响）
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Column {
+                    Text(
+                        message.text,
+                        fontSize = 20.sp,
+                        lineHeight = 30.sp,
+                        fontWeight = FontWeight.Medium,
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(action, style = MaterialTheme.typography.bodyLarge)
+                    if (message.steps.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        message.steps.forEachIndexed { index, step ->
+                            Row(Modifier.padding(vertical = 3.dp)) {
+                                Text(
+                                    "${index + 1}. ",
+                                    fontSize = 18.sp,
+                                    lineHeight = 27.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    step,
+                                    fontSize = 18.sp,
+                                    lineHeight = 27.sp,
+                                )
+                            }
+                        }
+                    }
+                    message.action?.let { action ->
+                        Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.LocationOn,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(action, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
                 }
             }
             // 问路线/地点时：回答下方直接给可交互的地图卡

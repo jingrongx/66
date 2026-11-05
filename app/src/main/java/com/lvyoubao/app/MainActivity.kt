@@ -43,6 +43,11 @@ class MainActivity : ComponentActivity() {
             val app = LocalContext.current.applicationContext as TravelApp
             val appSettings by app.settingsRepository.settings
                 .collectAsState(initial = AiSettings())
+            // 把语音识别 Key 同时作为云端朗读兜底的 Key（同一硅基流动账号）：
+            // Edge 朗读中途失败时换云端接力，剩余段落不再陪葬
+            LaunchedEffect(appSettings.asrKey) {
+                com.lvyoubao.app.ui.common.TtsPlayer.setCloudKey(appSettings.asrKey)
+            }
             LvyoubaoTheme(themeMode = appSettings.themeMode) {
                 // Surface 统一提供主题背景色和内容色（LocalContentColor）：
                 // 否则未显式指定颜色的标题/图标会用默认黑色，深色主题下不可读
