@@ -628,14 +628,20 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     }
 
     // ---------- 设置 / 更新（家人帮忙配置时全屏盖在大字模式上） ----------
+    // 这两页自身不带背景色（普通模式里靠 MainActivity 根布局的 Surface 补底），
+    // 叠在大字模式上必须自己垫一整屏不透明 Surface，不然底下会话内容会透出来
     if (showUpdate) {
-        UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+            UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
+        }
     } else if (showSettings) {
-        SettingsScreen(
-            onClose = { showSettings = false },
-            onOpenUpdate = { showUpdate = true },
-            app = app,
-        )
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+            SettingsScreen(
+                onClose = { showSettings = false },
+                onOpenUpdate = { showUpdate = true },
+                app = app,
+            )
+        }
     }
 }
 
