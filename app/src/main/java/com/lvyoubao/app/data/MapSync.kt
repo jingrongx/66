@@ -109,7 +109,12 @@ object MapSync {
                         } catch (_: Exception) {
                             break
                         }
-                        handleClient(client, token)
+                        // 每个连接独立线程：一个慢/僵死连接不能把 accept 堵住（大文件传输最长 3 分钟）
+                        Thread { handleClient(client, token) }.apply {
+                            isDaemon = true
+                            name = "map-sync-conn"
+                            start()
+                        }
                     }
                 }.apply {
                     isDaemon = true
@@ -259,8 +264,9 @@ object MapSync {
                         else -> respond(s, """{"ok":false,"error":"unknown"}""")
                     }
                 }
-            } catch (_: Exception) {
-                // 单个连接失败不影响服务继续
+            } catch (e: Exception) {
+                // 单个连接失败不影响服务继续，但要在日志里可见（对端 VPN 劫持/异常断流时便于定位）
+                if (running) onEvent("一次连接处理出错：${e.message ?: e.javaClass.simpleName}")
             }
         }
 

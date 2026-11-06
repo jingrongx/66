@@ -198,9 +198,17 @@ class MapViewModel(
                         )
                     }
                 },
-                onFailure = { e ->
-                    _ui.update { it.copy(syncBusy = false, message = e.message ?: "连接失败") }
-                },
+            onFailure = { e ->
+                val raw = e.message ?: "连接失败"
+                val hint = when {
+                    raw.contains("unexpected end of stream", true) || raw.contains("Connection reset", true) ->
+                        "连接被中途掐断。最常见原因：这台手机开着 VPN/代理，把 192.168.x 的局域网请求也劫走了——请暂时关闭 VPN（或在其分流规则里加局域网直连）再扫；另外确认对方还停在「出示二维码」界面。"
+                    raw.contains("Failed to connect", true) || raw.contains("refused", true) || raw.contains("timeout", true) || raw.contains("超时", true) ->
+                        "连不上对端。请确认：① 两台设备在同一 Wi-Fi/热点（路由器若开了 AP 隔离会互 ping 不通）；② 对方已点「出示二维码」并停在地图页；③ IP/端口/口令抄写无误。"
+                    else -> ""
+                }
+                _ui.update { it.copy(syncBusy = false, message = if (hint.isBlank()) raw else "$raw\n💡 $hint") }
+            },
             )
         }
     }
