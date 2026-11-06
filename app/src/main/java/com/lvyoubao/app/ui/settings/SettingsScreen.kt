@@ -92,6 +92,7 @@ fun SettingsScreen(
         }
     }
     var themeDialog by remember { mutableStateOf(false) }
+    var styleDialog by remember { mutableStateOf(false) }
 
     val versionLabel = remember {
         runCatching {
@@ -378,6 +379,16 @@ fun SettingsScreen(
                     onClick = { themeDialog = true },
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                SettingRow(
+                    title = "回答风格",
+                    value = when (state.draft.answerStyle) {
+                        "medium" -> "中等"
+                        "detailed" -> "详尽"
+                        else -> "简洁"
+                    },
+                    onClick = { styleDialog = true },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -521,6 +532,46 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { themeDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (styleDialog) {
+        AlertDialog(
+            onDismissRequest = { styleDialog = false },
+            title = { Text("回答风格") },
+            text = {
+                Column {
+                    listOf(
+                        "concise" to "简洁 · 平时问答一两句，问“详细”才展开",
+                        "medium" to "中等 · 攻略类给 3-5 条要点",
+                        "detailed" to "详尽 · 攻略类 5-8 条要点讲全",
+                    ).forEach { (value, label) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { vm.updateDraft { it.copy(answerStyle = value) } }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = state.draft.answerStyle == value,
+                                onClick = { vm.updateDraft { it.copy(answerStyle = value) } },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(label)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    vm.save(onSaved = {})
+                    styleDialog = false
+                }) { Text("确认") }
+            },
+            dismissButton = {
+                TextButton(onClick = { styleDialog = false }) { Text("取消") }
             },
         )
     }

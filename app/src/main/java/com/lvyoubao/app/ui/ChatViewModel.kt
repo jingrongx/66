@@ -232,6 +232,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
             val payload = listOf(
                 OutMessage("system", AiClient.SYSTEM_PROMPT),
+                // 回答详略档（设置页：简洁/中等/详尽），优先级高于基础提示词里的长度要求
+                OutMessage("system", AiClient.answerStyleRule(settingsValue.answerStyle)),
                 OutMessage("system", contextBlock),
             ) + (weatherBlock?.let { listOf(OutMessage("system", it)) } ?: emptyList()) + history + listOf(
                 OutMessage(

@@ -601,6 +601,21 @@ class AiClient(private val settings: AiSettings) {
             - map 字段必须和 answer/steps 一起输出，绝不允许只输出一段 map JSON、也绝不允许把 JSON 当回答正文；用户看不到 JSON，只看得到 answer 的中文
         """.trimIndent()
 
+        /**
+         * 回答详略指令（设置页可选 简洁/中等/详尽，默认简洁）。
+         * 单独一条 system 消息发，声明优先级最高：与基础提示词里的长度要求冲突时以这条为准；
+         * 但地点位置类（基础提示词第 3 条）任何时候都是 1-2 句短答，不受详略影响。
+         * 用户在提问里明确要"详细说说/给攻略"时，即使简洁档也要展开要点。
+         */
+        fun answerStyleRule(style: String): String {
+            val body = when (style) {
+                "medium" -> "中等——快问快答 1-2 句带关键数字；攻略、路线、方案对比类给一句总述 + 3-5 条要点。"
+                "detailed" -> "详尽——攻略、路线、方案对比类给一句总述 + 5-8 条要点，把费用、耗时、班次、注意事项、备选方案讲全；只有纯闲聊才简短。"
+                else -> "简洁（平时问答的默认档）——answer 只用 1-2 句给结论并带上最关键的一两个数字，steps 一律留空；只有用户在提问里明确要求详细（如\"详细说说\"\"给我攻略\"\"一步步讲\"）才按攻略类展开要点。"
+            }
+            return "【回答详略 · 用户设置】$body 本条优先级最高，与基础提示词里任何长度/条数要求冲突时以本条为准；但地点位置类问题任何时候都是 1-2 句短答，不受本条影响。"
+        }
+
         /** JSON 字符串转义还原：流式 answer 剥壳与宽容解析共用 */
         private fun unescapeJson(s: String): String {
             val sb = StringBuilder(s.length)
