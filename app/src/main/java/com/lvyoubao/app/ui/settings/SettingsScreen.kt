@@ -152,13 +152,13 @@ fun SettingsScreen(
                     shape = RoundedCornerShape(14.dp),
                 )
                 Spacer(Modifier.height(12.dp))
-                FieldLabel("API Key")
+                FieldLabel("API Key（每个供应商各自记住，互不串用）")
                 OutlinedTextField(
                     value = state.draft.apiKey,
                     onValueChange = { value -> vm.updateDraft { it.copy(apiKey = value.trim()) } },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    placeholder = { Text("sk-…") },
+                    placeholder = { Text("填当前供应商的 Key，如 sk-…") },
                     visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     trailingIcon = {

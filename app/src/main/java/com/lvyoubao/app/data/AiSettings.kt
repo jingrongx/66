@@ -1,5 +1,7 @@
 package com.lvyoubao.app.data
 
+import kotlinx.serialization.Serializable
+
 data class AiSettings(
     val presetId: String = ProviderPresets.first().id,
     val baseUrl: String = ProviderPresets.first().baseUrl,
@@ -15,4 +17,5 @@ data class AiSettings(
     val largeTextMode: Boolean = false, // 大字模式：打开则启动直接进大字模式，关闭则进普通模式
     val homeAddress: String = "",     // 常用地址（家）：问「回家的路」直接导航回家，不用每次问地址
     val autoSpeak: Boolean = false,   // 顶部开关：新回答自动朗读
+    val savedProviders: Map<String, ProviderCredentials> = emptyMap(), // 每个供应商各自记住的接口配置，切换时恢复自己的，互不带Key
 )

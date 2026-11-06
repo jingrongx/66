@@ -7,8 +7,10 @@ import com.lvyoubao.app.data.AiClient
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.ConfigSyncCodec
 import com.lvyoubao.app.data.ConfigSyncServer
+import com.lvyoubao.app.data.ProviderCredentials
 import com.lvyoubao.app.data.ProviderPreset
 import com.lvyoubao.app.data.SyncableConfig
+import com.lvyoubao.app.data.presetById
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -67,13 +69,41 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
     fun updateDraft(transform: (AiSettings) -> AiSettings) =
         _ui.update { it.copy(draft = transform(it.draft), testResult = null) }
 
-    fun selectPreset(preset: ProviderPreset) = updateDraft { current ->
-        current.copy(
-            presetId = preset.id,
-            baseUrl = preset.baseUrl.ifEmpty { current.baseUrl },
-            model = preset.defaultModel.ifEmpty { current.model },
-            thinking = if (preset.supportsThinkingToggle) current.thinking else false,
-        )
+    /**
+     * 切换供应商：先把当前供应商的接口配置存档（配过 Key、或自定义填过地址才算配置过），
+     * 再载入目标供应商的配置——配过的原样恢复自己的，没配过的给干净默认（自定义=三项全空）。
+     * 绝不把上一个供应商的 Key/地址/模型带到下一个头上。
+     */
+    fun selectPreset(preset: ProviderPreset) {
+        _ui.update { state ->
+            val current = state.draft
+            val currentPreset = presetById(current.presetId)
+            val configured = current.apiKey.isNotBlank() ||
+                (currentPreset.id == "custom" && current.baseUrl.isNotBlank())
+            val saved = if (configured) {
+                current.savedProviders + (currentPreset.id to ProviderCredentials(
+                    baseUrl = current.baseUrl,
+                    apiKey = current.apiKey,
+                    model = current.model,
+                ))
+            } else {
+                current.savedProviders
+            }
+            val restored = saved[preset.id]
+            state.copy(
+                draft = current.copy(
+                    savedProviders = saved,
+                    presetId = preset.id,
+                    baseUrl = restored?.baseUrl?.ifBlank { preset.baseUrl } ?: preset.baseUrl,
+                    apiKey = restored?.apiKey.orEmpty(),
+                    model = restored?.model?.ifBlank { preset.defaultModel } ?: preset.defaultModel,
+                    thinking = if (preset.supportsThinkingToggle) current.thinking else false,
+                ),
+                // 可用模型列表/测试结果是上一个供应商的，切走即作废
+                testResult = null,
+                fetchedModels = emptyList(),
+            )
+        }
     }
 
     fun save(onSaved: () -> Unit) {

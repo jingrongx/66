@@ -7,9 +7,14 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 private val Context.dataStore by preferencesDataStore(name = "ai_settings")
 private val Context.sessionDataStore by preferencesDataStore(name = "session_prefs")
+
+/** 每供应商接口配置存档的 JSON 编解码 */
+private val providerJson = Json { ignoreUnknownKeys = true }
 
 class SettingsRepository(private val context: Context) {
 
@@ -29,6 +34,7 @@ class SettingsRepository(private val context: Context) {
         val largeTextMode = booleanPreferencesKey("elder_mode")
         val homeAddress = stringPreferencesKey("home_address")
         val autoSpeak = booleanPreferencesKey("auto_speak")
+        val savedProviders = stringPreferencesKey("saved_providers")
     }
 
     val settings: Flow<AiSettings> = context.dataStore.data.map { p ->
@@ -48,6 +54,10 @@ class SettingsRepository(private val context: Context) {
             largeTextMode = p[Keys.largeTextMode] ?: false,
             homeAddress = p[Keys.homeAddress] ?: "",
             autoSpeak = p[Keys.autoSpeak] ?: false,
+            savedProviders = p[Keys.savedProviders]?.let { s ->
+                runCatching { providerJson.decodeFromString<Map<String, ProviderCredentials>>(s) }
+                    .getOrDefault(emptyMap())
+            } ?: emptyMap(),
         )
     }
 
@@ -67,6 +77,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.largeTextMode] = settings.largeTextMode
             p[Keys.homeAddress] = settings.homeAddress
             p[Keys.autoSpeak] = settings.autoSpeak
+            p[Keys.savedProviders] = providerJson.encodeToString(settings.savedProviders)
         }
     }
 
