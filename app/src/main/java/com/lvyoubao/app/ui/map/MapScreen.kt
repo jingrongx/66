@@ -137,10 +137,11 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 state.maps.forEach { map ->
+                    val hasUpdate = state.updatesAvailable.contains(map.name.removeSuffix(".map"))
                     FilterChip(
                         selected = selectedMap?.path == map.path,
                         onClick = { selectedMap = map; tab = "view" },
-                        label = { Text(MapRegions.displayName(map.name)) },
+                        label = { Text(MapRegions.displayName(map.name) + if (hasUpdate) " ·有新版" else "") },
                     )
                 }
             }
@@ -180,11 +181,26 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
 
         if (tab == "download" || selectedMap?.exists() != true) {
             // 下载管理
-            Text(
-                "下载所在省份的离线地图（约 50–200MB，一次下载永久离线）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "下载所在省份的离线地图（约 50–200MB，一次下载永久离线）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                // 地图数据有时效性（OSM 定期更新）：手动触发一次全量检查
+                TextButton(onClick = { vm.refreshRemoteList(force = true) }, enabled = !state.loadingRemote) {
+                    Text(if (state.loadingRemote) "检查中…" else "检查更新")
+                }
+            }
+            if (state.updatesAvailable.isNotEmpty()) {
+                Text(
+                    "有 ${state.updatesAvailable.size} 个已下载省区的底图出了新版，下面点「更新」即可（多段并行下载，中断会续传）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+                Spacer(Modifier.height(4.dp))
+            }
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -212,20 +228,43 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     items(state.remoteList) { region ->
+                        val hasUpdate = state.updatesAvailable.contains(region)
+                        val hasLocal = state.maps.any { it.name == "$region.map" }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(
-                                MapRegions.displayName(region),
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    MapRegions.displayName(region),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (hasUpdate) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                state.remoteDates[region]?.let { date ->
+                                    Text(
+                                        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.CHINA)
+                                            .format(java.util.Date(date)) + " 数据" + if (hasUpdate) " · 有新版" else "",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (hasUpdate) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            AssistChip(
+                                onClick = { vm.download(region) },
+                                label = {
+                                    Text(
+                                        when {
+                                            hasUpdate -> "更新"
+                                            hasLocal -> "重下"
+                                            else -> "下载"
+                                        },
+                                    )
+                                },
                             )
-                            AssistChip(onClick = { vm.download(region) }, label = { Text("下载") })
                         }
                     }
                 }
