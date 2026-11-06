@@ -72,6 +72,13 @@ import kotlinx.coroutines.withContext
 
 private val ME_ARGB = android.graphics.Color.argb(255, 21, 101, 192)
 
+/** 字节数可读化：进度卡显示 已下载/总量 用 */
+private fun fmtSize(bytes: Long): String = when {
+    bytes >= 1L shl 20 -> "%.1f MB".format(bytes / 1048576f)
+    bytes >= 1L shl 10 -> "${bytes / 1024} KB"
+    else -> "$bytes B"
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MapScreen(onClose: () -> Unit, app: TravelApp) {
@@ -174,6 +181,22 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                         progress = { state.progress / 100f },
                         modifier = Modifier.fillMaxWidth().height(6.dp),
                     )
+                    if (state.totalBytes > 0) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            buildString {
+                                append("${fmtSize(state.progressBytes)} / ${fmtSize(state.totalBytes)}")
+                                append(" · ${state.speedKbs} KB/s")
+                                if (state.speedKbs > 0) {
+                                    val remainSec = (state.totalBytes - state.progressBytes) / (state.speedKbs * 1024)
+                                    append(" · 剩余约 ")
+                                    append(if (remainSec >= 90) "${(remainSec + 59) / 60} 分钟" else "${remainSec.coerceAtLeast(1)} 秒")
+                                }
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))

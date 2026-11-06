@@ -34,12 +34,39 @@ class MapViewModel(
         val loadingRemote: Boolean = false,
         val downloading: String? = null,             // 正在下载的省区名
         val progress: Int = 0,
+        val progressBytes: Long = 0,                 // 已下载字节（进度卡显示速度/剩余时间用）
+        val totalBytes: Long = 0,
+        val speedKbs: Long = 0,                      // 实测速度（KB/s，指数滑动平均）
         val message: String? = null,
         val routeSummary: String? = null,
         val routing: Boolean = false,
         val routePoints: List<Pair<Double, Double>> = emptyList(),
         val trackPoints: List<Pair<Double, Double>> = emptyList(),  // 感知轨迹（足迹叠加）
     )
+
+    /** 下载速度表：指数滑动平均，避免瞬时抖动跳来跳去 */
+    private class SpeedMeter {
+        private var lastTs = 0L
+        private var lastBytes = 0L
+        private var ema = 0f
+
+        fun tick(done: Long): Float = synchronized(this) {
+            val now = System.currentTimeMillis()
+            if (lastTs == 0L) {
+                lastTs = now
+                lastBytes = done
+                return 0f
+            }
+            val dt = now - lastTs
+            if (dt >= 300) {
+                val instant = (done - lastBytes).coerceAtLeast(0) * 1000f / dt
+                ema = if (ema == 0f) instant else ema * 0.7f + instant * 0.3f
+                lastTs = now
+                lastBytes = done
+            }
+            ema
+        }
+    }
 
     /** 只存「上次检查更新时间」，用于每天进页自动检查一次（OSM 数据定期更新） */
     @kotlinx.serialization.Serializable
@@ -208,12 +235,29 @@ class MapViewModel(
         else "https://download.mapsforge.org/maps/v5/asia/china/$fileName.map"
         downloadJob = viewModelScope.launch {
             val resumed = part.exists() && File(part.parentFile, part.name + ".meta").exists()
-            _ui.update { it.copy(downloading = region, progress = 0, message = null) }
+            _ui.update {
+                it.copy(
+                    downloading = region,
+                    progress = 0,
+                    progressBytes = 0,
+                    totalBytes = 0,
+                    speedKbs = 0,
+                    message = null,
+                )
+            }
+            val meter = SpeedMeter()
             try {
-                // 分 8 段并行 + 断点续传：取消/失败留下的 .part/.meta 会接着传，不从头来
+                // 分段并行 + 断点续传：取消/失败留下的 .part/.meta 会接着传，不从头来
                 MapDownloader.download(url, part) { done, total ->
-                    val pct = (done * 100 / total).toInt()
-                    _ui.update { it.copy(progress = pct) }
+                    val kbs = (meter.tick(done) / 1024).toLong().coerceAtLeast(0)
+                    _ui.update {
+                        it.copy(
+                            progress = (done * 100 / total).toInt(),
+                            progressBytes = done,
+                            totalBytes = total,
+                            speedKbs = kbs,
+                        )
+                    }
                 }
                 // 完整下完才验证+改名：半截文件进地图页会必崩
                 val invalid = withContext(Dispatchers.IO) {
