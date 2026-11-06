@@ -486,9 +486,11 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                     },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = {
+                        // 一行放得下的写法：21sp 大字下原句太长会折行，不好看
                         Text(
-                            if (recording != null) "正在听你说…" else "按住下方说话，松手就记到这里",
+                            if (recording != null) "正在听你说…" else "按住下方说话，松手记到这里",
                             fontSize = 21.sp,
+                            maxLines = 1,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     },
@@ -554,9 +556,11 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                             when {
                                 recording != null -> "松手（${recordTick}s）"
                                 listening -> "正在记录…"
-                                holdBig -> "🎤 按住说话"
-                                else -> "🎤 点一下说"
+                                // 去掉麦克风 emoji：按钮宽度本就紧张，emoji 挤得文字贴边
+                                holdBig -> "按住说话"
+                                else -> "点一下说"
                             },
+                            modifier = Modifier.padding(horizontal = 10.dp),
                             fontSize = 20.sp,
                             maxLines = 1,
                             fontWeight = FontWeight.Bold,
@@ -713,7 +717,11 @@ private fun LargeTextAssistantCard(
             RouteMapCard(card = card, app = app, largeText = true)
         }
         Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // 按钮行与卡片边缘留出与正文一致的内边距，不再贴着圆角边
+        Row(
+            modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             Button(
                 onClick = onToggleSpeak,
                 modifier = Modifier.height(52.dp),
@@ -1086,6 +1094,7 @@ private fun VoiceCallOverlay(
                                     listening -> "正在记录…"
                                     else -> "按住说话"
                                 },
+                                modifier = Modifier.padding(horizontal = 10.dp),
                                 fontSize = 20.sp,
                                 maxLines = 1,
                                 fontWeight = FontWeight.Bold,
