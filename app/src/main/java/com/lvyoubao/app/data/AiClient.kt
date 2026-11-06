@@ -460,15 +460,34 @@ class AiClient(private val settings: AiSettings) {
             val parsed = runCatching {
                 json.decodeFromString<AssistantReply>(content.substring(start, end + 1))
             }.getOrNull()
-            if (parsed != null && (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() })) {
-                return parsed.copy(
-                    answer = stripMarkdown(parsed.answer.trim()),
-                    steps = parsed.steps.map { stripMarkdown(it.trim()) }.filter { it.isNotEmpty() },
-                    action = parsed.action?.trim()
-                        ?.takeIf { it.isNotEmpty() && !it.equals("null", true) }
-                        ?.let { stripMarkdown(it) },
-                    map = normalizeMapIntent(parsed.map),
-                )
+            if (parsed != null) {
+                val cleanAction = parsed.action?.trim()
+                    ?.takeIf { it.isNotEmpty() && !it.equals("null", true) }
+                    ?.let { stripMarkdown(it) }
+                val mapOk = normalizeMapIntent(parsed.map)
+                if (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() }) {
+                    return parsed.copy(
+                        answer = stripMarkdown(parsed.answer.trim()),
+                        steps = parsed.steps.map { stripMarkdown(it.trim()) }.filter { it.isNotEmpty() },
+                        action = cleanAction,
+                        map = mapOk,
+                    )
+                }
+                // 模型偶尔少写 answer 字段（信封里只有 map/action）：此前直接丢弃整段，
+                // 裸 JSON 就漏到回答卡上了（如 {"map":{"type":"place","keyword":"龙虎山风景区"},"action":"…"}）。
+                // 地图意图有效就转成"已放到地图上"的回答；只有建议就把建议当回答
+                if (mapOk != null || cleanAction != null) {
+                    val where = mapOk?.destination?.ifBlank { mapOk.keyword }.orEmpty()
+                    return if (where.isNotBlank()) {
+                        AssistantReply(
+                            answer = "帮你把「$where」放到地图上了，下方可以直接看位置和路线。",
+                            action = cleanAction,
+                            map = mapOk,
+                        )
+                    } else {
+                        AssistantReply(answer = cleanAction.orEmpty(), action = null, map = mapOk)
+                    }
+                }
             }
             // 严格解析失败：模型的 JSON 字符串值里常有未转义引号（如 搜"赣运"），
             // 按字段边界把 answer/steps/action/map 抠出来，绝不把整段裸 JSON 当回答摆给用户
@@ -526,8 +545,6 @@ class AiClient(private val settings: AiSettings) {
             .find(envelope)?.groupValues?.get(1)
             ?: Regex("\"answer\"\\s*:\\s*\"(.*)\"", RegexOption.DOT_MATCHES_ALL)
                 .find(envelope)?.groupValues?.get(1)
-            ?: return null
-        if (answer.isBlank()) return null
         val steps = Regex("\"steps\"\\s*:\\s*\\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL)
             .find(envelope)?.groupValues?.get(1)
             ?.split("\",\"")
@@ -552,6 +569,25 @@ class AiClient(private val settings: AiSettings) {
                     destination = field("destination"),
                 )
             } else null
+        }
+        // answer 字段缺失/为空：模型偶尔只给 map/action（如 {"map":{...},"action":"…"}），
+        // 有货就补一条兜底回答，别把整段裸 JSON 漏给用户；map/action 也全空才放弃
+        if (answer.isNullOrBlank()) {
+            val cleanAction = action?.let {
+                stripMarkdown(unescapeJson(it)).trim().takeIf { s -> s.isNotEmpty() && !s.equals("null", true) }
+            }
+            val mapOk = normalizeMapIntent(mapIntent)
+            if (mapOk == null && cleanAction == null) return null
+            val where = mapOk?.destination?.ifBlank { mapOk.keyword }.orEmpty()
+            return if (where.isNotBlank()) {
+                AssistantReply(
+                    answer = "帮你把「$where」放到地图上了，下方可以直接看位置和路线。",
+                    action = cleanAction,
+                    map = mapOk,
+                )
+            } else {
+                AssistantReply(answer = cleanAction.orEmpty(), action = null, map = mapOk)
+            }
         }
         return AssistantReply(
             answer = stripMarkdown(unescapeJson(answer).trim()),
