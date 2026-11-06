@@ -391,34 +391,6 @@ class AiClient(private val settings: AiSettings) {
             }
         }
 
-        private fun unescapeJson(s: String): String {
-            val sb = StringBuilder(s.length)
-            var i = 0
-            while (i < s.length) {
-                val ch = s[i]
-                if (ch == 92.toChar() && i + 1 < s.length) {
-                    when (val n = s[i + 1]) {
-                        'n' -> { sb.append('\n'); i += 2 }
-                        't' -> { sb.append('\t'); i += 2 }
-                        'r' -> { i += 2 }
-                        '"' -> { sb.append('"'); i += 2 }
-                        'u' -> {
-                            if (i + 5 < s.length) {
-                                runCatching { sb.append(s.substring(i + 2, i + 6).toInt(16).toChar()) }
-                                i += 6
-                            } else { i = s.length }
-                        }
-                        '/' -> { sb.append('/'); i += 2 }
-                        else -> { sb.append(n); i += 2 }
-                    }
-                } else {
-                    sb.append(ch)
-                    i++
-                }
-            }
-            return sb.toString()
-        }
-
         companion object {
             // "answer":"...（可未闭合）——值部分贪婪匹配到当前位置
             private val ANSWER_FIELD = Regex("\"answer\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)")
@@ -476,28 +448,16 @@ class AiClient(private val settings: AiSettings) {
                 json.decodeFromString<AssistantReply>(content.substring(start, end + 1))
             }.getOrNull()
             if (parsed != null && (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() })) {
-                val mapIntent = parsed.map
-                    ?.takeIf { m ->
-                        val isRoute = m.type.equals("route", true) || m.type == "路线" || m.type == "导航"
-                        (isRoute && m.destination.isNotBlank()) ||
-                            (!isRoute && m.keyword.isNotBlank())
-                    }
-                    ?.let { m ->
-                        val isRoute = m.type.equals("route", true) || m.type == "路线" || m.type == "导航"
-                        m.copy(
-                            type = if (isRoute) "route" else "place",
-                            keyword = m.keyword.trim(),
-                            origin = m.origin.trim(),
-                            destination = m.destination.trim(),
-                        )
-                    }
                 return parsed.copy(
                     answer = parsed.answer.trim(),
                     steps = parsed.steps.map { it.trim() }.filter { it.isNotEmpty() },
                     action = parsed.action?.trim()?.takeIf { it.isNotEmpty() && !it.equals("null", true) },
-                    map = mapIntent,
+                    map = normalizeMapIntent(parsed.map),
                 )
             }
+            // 严格解析失败：模型的 JSON 字符串值里常有未转义引号（如 搜"赣运"），
+            // 按字段边界把 answer/steps/action/map 抠出来，绝不把整段裸 JSON 当回答摆给用户
+            lenientReply(content.substring(start, end + 1))?.let { return it }
         }
         // 模型把 map 意图 JSON 单独当回答输出（如 {"type":"place","keyword":"麻姑山"}）：
         // 识别出来转成真正的地图意图，别把裸 JSON 显示给用户
@@ -525,6 +485,65 @@ class AiClient(private val settings: AiSettings) {
         }
         // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答，交给规则校验层标记
         return AssistantReply(answer = content.trim())
+    }
+
+    /** map 意图归一：route 要有终点、place 要有关键词，中英写法统一成 place/route */
+    private fun normalizeMapIntent(m: MapIntent?): MapIntent? {
+        if (m == null) return null
+        val isRoute = m.type.equals("route", true) || m.type == "路线" || m.type == "导航"
+        val valid = (isRoute && m.destination.isNotBlank()) || (!isRoute && m.keyword.isNotBlank())
+        if (!valid) return null
+        return m.copy(
+            type = if (isRoute) "route" else "place",
+            keyword = m.keyword.trim(),
+            origin = m.origin.trim(),
+            destination = m.destination.trim(),
+        )
+    }
+
+    /**
+     * JSON 信封的宽容解析：模型输出的字符串值常带未转义引号，严格 JSON 解析必失败，
+     * 整段裸 JSON 就会漏到回答卡上。按字段边界（", "steps" / ", "action" / ", "map" / "}）
+     * 把各字段抠出来；抠不出非空 answer 返回 null，继续走裸 JSON 意图 / 纯文本兜底。
+     */
+    private fun lenientReply(envelope: String): AssistantReply? {
+        val answer = Regex("\"answer\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"(steps|action|map)\"", RegexOption.DOT_MATCHES_ALL)
+            .find(envelope)?.groupValues?.get(1)
+            ?: Regex("\"answer\"\\s*:\\s*\"(.*)\"", RegexOption.DOT_MATCHES_ALL)
+                .find(envelope)?.groupValues?.get(1)
+            ?: return null
+        if (answer.isBlank()) return null
+        val steps = Regex("\"steps\"\\s*:\\s*\\[(.*?)\\]", RegexOption.DOT_MATCHES_ALL)
+            .find(envelope)?.groupValues?.get(1)
+            ?.split("\",\"")
+            ?.map { unescapeJson(it.trim().trim('"', ' ', ',')) }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+        val action = Regex("\"action\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"map\"", RegexOption.DOT_MATCHES_ALL)
+            .find(envelope)?.groupValues?.get(1)
+            ?: Regex("\"action\"\\s*:\\s*\"(.*?)\"\\s*\\}", RegexOption.DOT_MATCHES_ALL)
+                .find(envelope)?.groupValues?.get(1)
+        val mapIntent = Regex("\"map\"\\s*:\\s*\\{", RegexOption.DOT_MATCHES_ALL).find(envelope)?.let { mm ->
+            val bodyStart = mm.range.last + 1
+            val bodyEnd = envelope.indexOf('}', bodyStart)
+            if (bodyEnd > bodyStart) {
+                val body = envelope.substring(bodyStart, bodyEnd)
+                fun field(name: String): String =
+                    Regex("\"$name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(body)?.groupValues?.get(1).orEmpty()
+                MapIntent(
+                    type = field("type").ifBlank { "place" },
+                    keyword = field("keyword"),
+                    origin = field("origin"),
+                    destination = field("destination"),
+                )
+            } else null
+        }
+        return AssistantReply(
+            answer = unescapeJson(answer).trim(),
+            steps = steps,
+            action = action?.let { unescapeJson(it).trim().takeIf { s -> s.isNotEmpty() && !s.equals("null", true) } },
+            map = normalizeMapIntent(mapIntent),
+        )
     }
 
     /** 兜底读取思考模型放在 reasoning_content 里的正文（部分服务商在 content 留空时用） */
@@ -565,10 +584,11 @@ class AiClient(private val settings: AiSettings) {
         val SYSTEM_PROMPT = """
             你是全能生活助手「旅游宝」：旅行是你的看家本领（路线、玩法、吃饭、休息、交通、天气、门票、关门时间等），像懂行的贴身向导；但能力绝不设限——生活百科、做菜、健康常识、学习工作、闲聊解闷等任何日常话题都照常认真回答，绝不拒答、绝不说"我只能答旅行问题"。
             按问题类型组织回答：
-            1. 快问快答（还要走多久、附近有没有吃的、该不该回）：answer 用 1-2 句话，必须包含具体数字（距离/时间/价格/排队分钟），steps 留空。
+            1. 快问快答（还要走多久、该不该回）：answer 用 1-2 句话，必须包含具体数字（距离/时间/价格/排队分钟），steps 留空。
             2. 攻略与路线（怎么玩、怎么上去、有什么好玩的、值不值得去）：answer 给一句总述，steps 给 3-5 条要点，每条都要具体可执行并带数字（耗时、费用、距离、班次、发车时间），按先后顺序排列；上山路线要写清入口位置、方式（徒步/索道/车）、大致耗时和体力要求。
-            3. 需要实时信息（附近地点、天气、去某地的路线）时，先调用工具查真实数据，再回答；绝不编造数字。
+            3. 涉及地点位置（附近吃的/歇脚/厕所/药店/加油站在哪、某地在哪、从A到B怎么走、回家的路）：必须先调用 search_poi / get_route 查真实数据再回答，绝不回答"没法实时确认"，也绝不让用户自己去地图搜；answer 只用 1-2 句给结论（最近的名字+距离/步行时间），steps 留空，并输出 map 字段。绝不要写"打开地图APP→点搜索→筛距离"这类使用教程——界面会直接在回答下方摆出地图卡，用户点「去这里」就开始导航，教程对他们毫无用处。
             4. 不确定的数字绝不编造：优先使用搜索结果或工具返回的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。
+            5. 情境里给了「常用地址·家的地址」时，问回家/回家的路怎么走：直接输出 map（type=route，origin 留空=当前位置，destination 填家的地址），answer 一句话报距离和预计时间；绝不要反问"回哪"，也不要联想成歌名/游戏/影视。
             以 json 格式输出：{"answer": "一句话总结，不超过2句", "steps": ["要点1", "要点2", ...]，快问快答时为空数组, "action": "一句话的下一步动作建议，没有则为 null"}
             注意：answer 字段必须放在 JSON 最前面（用户边生成边看，answer 先出才有流式体验）
             另外，当回答涉及具体地点时（某景点/场馆/店铺的位置、怎么去、从A到B、值得一去的去处），加一个 "map" 字段让界面在回答下方配一张地图：
@@ -580,5 +600,34 @@ class AiClient(private val settings: AiSettings) {
             - 地点名要规范完整（用官方名称，不要写"那个博物馆"），宁缺毋滥：拿不准就别输出 map
             - map 字段必须和 answer/steps 一起输出，绝不允许只输出一段 map JSON、也绝不允许把 JSON 当回答正文；用户看不到 JSON，只看得到 answer 的中文
         """.trimIndent()
+
+        /** JSON 字符串转义还原：流式 answer 剥壳与宽容解析共用 */
+        private fun unescapeJson(s: String): String {
+            val sb = StringBuilder(s.length)
+            var i = 0
+            while (i < s.length) {
+                val ch = s[i]
+                if (ch == 92.toChar() && i + 1 < s.length) {
+                    when (val n = s[i + 1]) {
+                        'n' -> { sb.append('\n'); i += 2 }
+                        't' -> { sb.append('\t'); i += 2 }
+                        'r' -> { i += 2 }
+                        '"' -> { sb.append('"'); i += 2 }
+                        'u' -> {
+                            if (i + 5 < s.length) {
+                                runCatching { sb.append(s.substring(i + 2, i + 6).toInt(16).toChar()) }
+                                i += 6
+                            } else { i = s.length }
+                        }
+                        '/' -> { sb.append('/'); i += 2 }
+                        else -> { sb.append(n); i += 2 }
+                    }
+                } else {
+                    sb.append(ch)
+                    i++
+                }
+            }
+            return sb.toString()
+        }
     }
 }

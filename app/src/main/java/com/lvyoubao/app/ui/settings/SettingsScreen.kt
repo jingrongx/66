@@ -308,8 +308,18 @@ fun SettingsScreen(
                     },
                     shape = RoundedCornerShape(14.dp),
                 )
+                Spacer(Modifier.height(12.dp))
+                FieldLabel("常用地址（家）——问「回家的路」直接导航回家")
+                OutlinedTextField(
+                    value = state.draft.homeAddress,
+                    onValueChange = { value -> vm.updateDraft { it.copy(homeAddress = value) } },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("小区名或详细地址，如：抚州市临川区某路某小区") },
+                    shape = RoundedCornerShape(14.dp),
+                )
                 Text(
-                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。",
+                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。常用地址填好后点下方「保存」，问「回家的路」就直接导航回家，不再追问地址。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),

@@ -12,5 +12,6 @@ data class AiSettings(
     val asrKey: String = "",
     val dialectMode: Boolean = false, // 方言口音识别：赣语抚州话等本地说法（TeleSpeech-ASR 免费模型）
     val largeTextMode: Boolean = false, // 大字模式：打开则启动直接进大字模式，关闭则进普通模式
+    val homeAddress: String = "",     // 常用地址（家）：问「回家的路」直接导航回家，不用每次问地址
     val autoSpeak: Boolean = false,   // 顶部开关：新回答自动朗读
 )

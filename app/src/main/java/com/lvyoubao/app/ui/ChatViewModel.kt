@@ -174,6 +174,12 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 } else {
                     appendLine("位置：未授权定位（不要假设用户位置，答不了就问）")
                 }
+                val home = settingsValue.homeAddress.trim()
+                if (home.isNotBlank()) {
+                    appendLine()
+                    appendLine("【常用地址】家的地址：$home")
+                    appendLine("用户问回家/回家的路怎么走时，目的地就是它：map 字段 type=route、destination 填这个地址、origin 留空（=当前位置），answer 一句话报距离和预计时间；绝不要反问回哪，也不要联想成歌名/游戏/影视。")
+                }
                 val profileBlock = memory.profileContext()
                 if (profileBlock.isNotBlank()) {
                     appendLine()

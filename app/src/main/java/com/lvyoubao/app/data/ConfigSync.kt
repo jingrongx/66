@@ -21,6 +21,7 @@ data class SyncableConfig(
     val model: String = "",
     val amapKey: String = "",
     val asrKey: String = "",
+    val homeAddress: String = "",
 )
 
 object ConfigSyncCodec {
@@ -37,6 +38,7 @@ object ConfigSyncCodec {
         model = s.model,
         amapKey = s.amapKey,
         asrKey = s.asrKey,
+        homeAddress = s.homeAddress,
     )
 
     /** 把配置合并回 AiSettings（只覆盖载荷里非空的字段） */
@@ -47,6 +49,7 @@ object ConfigSyncCodec {
         model = c.model.ifEmpty { s.model },
         amapKey = c.amapKey.ifEmpty { s.amapKey },
         asrKey = c.asrKey.ifEmpty { s.asrKey },
+        homeAddress = c.homeAddress.ifEmpty { s.homeAddress },
     )
 
     fun encodeJson(c: SyncableConfig): String = json.encodeToString(c)
