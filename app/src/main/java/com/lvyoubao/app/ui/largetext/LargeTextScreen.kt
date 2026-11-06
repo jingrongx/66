@@ -98,6 +98,7 @@ private val LargeTextSuggestions = listOf(
  *   全部说完再点旁边的「发送」才发出去（充分的停顿时间由握住时长自己决定）；
  * - 拍照提问：拍照/相册的图挂在草稿上，跟语音一起发送；
  * - 语音通话：全屏通话界面，按住说话松手即问，回答自动朗读，像打电话一样聊；
+ *   通话里也能拍照/选相册挂图，说完松手图文一起发，文字稿显示与朗读同一份全文（v0.8.8）；
  * - 对话历史：大字号列表，点开切换、可删、可新建；
  * - 右上角「设置」进设置页（家人帮着配 AI/大字模式开关都在这），「退出」直接退出应用；
  * - 是否默认进入大字模式由设置里的开关决定（设置里关了，下次启动就是普通模式）。
@@ -614,12 +615,26 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
             messages = messages,
             streamState = streamState,
             sending = state.sending,
+            attachments = state.attachments,
             listening = listening,
             recording = recording,
             recordTick = recordTick,
             ttsSpeaking = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
             ttsUnavailable = (ttsState as? TtsPlayer.State.Unavailable)?.reason,
             holdModifier = holdToTalkModifier(autoSend = true),
+            onPickCamera = {
+                keyboard?.hide()
+                val uri = newCameraImageUri(context)
+                pendingCameraUri = uri
+                cameraLauncher.launch(uri)
+            },
+            onPickGallery = {
+                keyboard?.hide()
+                galleryLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+            onRemoveAttachment = { vm.removeAttachment(it) },
             onHangUp = {
                 TtsPlayer.stop()
                 showCall = false
@@ -831,21 +846,28 @@ private fun LargeTextHistoryOverlay(
 /**
  * 语音通话：像打电话一样的全屏界面。
  * 按住说话、松手就问，回答自动朗读；朗读时随时按住即可插话（会先停掉朗读再录）。
- * 中间展示会话文字稿（含正在生成的回答），看得见 AI 在说什么，也可长按选中复制；
- * 按住说话/挂断固定在底部常驻操作区（跟主界面同一个套路），消息再多也盖不住。
+ * 中间展示会话文字稿（含正在生成的回答）：内容与朗读同一份全文（回答+要点+建议，
+ * v0.8.8 起不再只有正文——之前"语音播报是完整的、文字稿缺内容"就是这来的），
+ * 字号 22sp 与主界面一致，可长按选中复制；
+ * 底部常驻操作区：拍照/相册可把图挂到草稿（说完松手图文一起发）+ 按住说话/挂断。
  * 全链路免费：录音→云端方言口音转文字→大模型回答→Edge/云端朗读。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun VoiceCallOverlay(
     messages: List<SessionMessage>,
     streamState: ChatViewModel.StreamState?,
     sending: Boolean,
+    attachments: List<ChatViewModel.PendingAttachment>,
     listening: Boolean,
     recording: SpeechInput.Recording?,
     recordTick: Int,
     ttsSpeaking: Boolean,
     ttsUnavailable: String?,
     holdModifier: Modifier,
+    onPickCamera: () -> Unit,
+    onPickGallery: () -> Unit,
+    onRemoveAttachment: (ChatViewModel.PendingAttachment) -> Unit,
     onHangUp: () -> Unit,
 ) {
     var seconds by remember { mutableIntStateOf(0) }
@@ -928,10 +950,10 @@ private fun VoiceCallOverlay(
                                     color = MaterialTheme.colorScheme.primaryContainer,
                                 ) {
                                     Text(
-                                        message.text,
+                                        (if (message.hadImage) "🖼 " else "") + message.text,
                                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        fontSize = 17.sp,
-                                        lineHeight = 24.sp,
+                                        fontSize = 22.sp,
+                                        lineHeight = 32.sp,
                                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                                     )
                                 }
@@ -942,10 +964,12 @@ private fun VoiceCallOverlay(
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
                             ) {
                                 Text(
-                                    message.text,
+                                    // 文字稿 = 朗读同一份全文（回答+要点+建议），只是把"第N条"换成编号换行，
+                                    // 之前只显示正文，播报完整而文字缺内容
+                                    callTranscriptText(message),
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    fontSize = 17.sp,
-                                    lineHeight = 24.sp,
+                                    fontSize = 22.sp,
+                                    lineHeight = 32.sp,
                                 )
                             }
                         }
@@ -963,8 +987,8 @@ private fun VoiceCallOverlay(
                                         ?: streamState?.reasoning?.takeIf { it.isNotBlank() }?.let { "（思考中）" + it.takeLast(160) }
                                         ?: "正在帮你想…",
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    fontSize = 17.sp,
-                                    lineHeight = 25.sp,
+                                    fontSize = 22.sp,
+                                    lineHeight = 32.sp,
                                     color = if (streamState?.answer?.isNotBlank() == true) {
                                         MaterialTheme.colorScheme.onSurface
                                     } else {
@@ -978,7 +1002,7 @@ private fun VoiceCallOverlay(
             }
 
             // 底部操作区：跟主界面同一个套路——常驻底栏、永远在最上层，
-            // 两个大按钮放屏幕最底下，文字稿再多也只在自己的滚动区里滚，压不住它们
+            // 大按钮放屏幕最底下，文字稿再多也只在自己的滚动区里滚，压不住它们
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -986,49 +1010,100 @@ private fun VoiceCallOverlay(
                 shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
                 tonalElevation = 3.dp,
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 按住说话大按钮（松手即发问，自动等回答、自动朗读）——规格与主界面操作行一致
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(80.dp)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(
-                                if (recording != null) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.primary
-                            )
-                            .then(holdModifier),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            when {
-                                recording != null -> "松手（${recordTick}s）"
-                                listening -> "正在记录…"
-                                else -> "🎤 按住说话"
-                            },
-                            fontSize = 20.sp,
-                            maxLines = 1,
-                            fontWeight = FontWeight.Bold,
-                            color = if (recording != null) {
-                                MaterialTheme.colorScheme.onError
-                            } else {
-                                MaterialTheme.colorScheme.onPrimary
-                            },
-                        )
+                    // 通话里挂的图（拍照/相册），跟主页同一份草稿；说完话松手就图文一起发
+                    if (attachments.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            attachments.forEach { a ->
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(start = 12.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            (if (a.isImage) "🖼 " else "📄 ") + a.name.take(14),
+                                            fontSize = 16.sp,
+                                        )
+                                        IconButton(
+                                            onClick = { onRemoveAttachment(a) },
+                                            modifier = Modifier.size(28.dp),
+                                        ) { Text("✕", fontSize = 16.sp) }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
                     }
-                    Button(
-                        onClick = onHangUp,
-                        modifier = Modifier.height(80.dp),
-                        shape = RoundedCornerShape(20.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                        contentPadding = PaddingValues(horizontal = 22.dp),
-                    ) { Text("挂断", fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // 拍照：图挂到草稿上，按住说话问，松手图文一起发出
+                        Box(
+                            modifier = Modifier
+                                .size(68.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(MaterialTheme.colorScheme.secondaryContainer)
+                                .clickable(onClick = onPickCamera),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("📷", fontSize = 26.sp) }
+                        // 相册
+                        Box(
+                            modifier = Modifier
+                                .size(68.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(MaterialTheme.colorScheme.secondaryContainer)
+                                .clickable(onClick = onPickGallery),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("🖼", fontSize = 26.sp) }
+                        // 按住说话大按钮（松手即发问，自动等回答、自动朗读）——规格与主界面操作行一致
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(80.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(
+                                    if (recording != null) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.primary
+                                )
+                                .then(holdModifier),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                when {
+                                    recording != null -> "松手（${recordTick}s）"
+                                    listening -> "正在记录…"
+                                    else -> "按住说话"
+                                },
+                                fontSize = 20.sp,
+                                maxLines = 1,
+                                fontWeight = FontWeight.Bold,
+                                color = if (recording != null) {
+                                    MaterialTheme.colorScheme.onError
+                                } else {
+                                    MaterialTheme.colorScheme.onPrimary
+                                },
+                            )
+                        }
+                        Button(
+                            onClick = onHangUp,
+                            modifier = Modifier.height(80.dp),
+                            shape = RoundedCornerShape(20.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            contentPadding = PaddingValues(horizontal = 14.dp),
+                        ) { Text("挂断", fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+                    }
                 }
             }
         }
@@ -1039,6 +1114,13 @@ private fun formatCallDuration(seconds: Int): String {
     val m = seconds / 60
     val s = seconds % 60
     return "%02d:%02d".format(Locale.CHINA, m, s)
+}
+
+/** 通话文字稿的全文：与朗读同一份内容（回答 + 要点 + 建议），只是换成编号换行排版 */
+private fun callTranscriptText(message: SessionMessage): String = buildString {
+    append(message.text)
+    message.steps.forEachIndexed { i, s -> append("\n${i + 1}. $s") }
+    message.action?.let { append("\n👉 $it") }
 }
 
 private fun newCameraImageUri(context: android.content.Context): android.net.Uri {
