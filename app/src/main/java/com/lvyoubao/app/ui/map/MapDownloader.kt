@@ -12,6 +12,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -66,8 +67,9 @@ internal object MapDownloader {
      * 下载 [url] 到 [part]（挂起， cancellable）。完成后 [part] 是完整文件。
      * [onProgress] 在 IO 线程回调 (doneBytes, totalBytes)。
      * 取消/失败时保留 .part + .meta（断点），下次调用同参数自动续传。
+     * 全程切到 IO 线程：探测/写盘都是网络与文件操作，跑到主线程会直接 NetworkOnMainThreadException 崩溃。
      */
-    suspend fun download(url: String, part: File, onProgress: (Long, Long) -> Unit) {
+    suspend fun download(url: String, part: File, onProgress: (Long, Long) -> Unit) = withContext(Dispatchers.IO) {
         coroutineScope {
             val client = client()
             // Range 探测：要 1 个字节，看回 206 还是 200，顺带拿总大小
