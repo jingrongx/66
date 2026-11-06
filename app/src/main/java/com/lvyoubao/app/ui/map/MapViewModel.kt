@@ -8,6 +8,8 @@ import com.lvyoubao.app.data.ApiException
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.BRouterClient
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.MapSync
+import com.lvyoubao.app.data.MapSyncMapInfo
 import com.lvyoubao.app.data.SettingsRepository
 import com.lvyoubao.app.data.TrackStore
 import java.io.File
@@ -40,6 +42,15 @@ class MapViewModel(
         val speedKbs: Long = 0,                      // 实测速度（KB/s，指数滑动平均）
         val message: String? = null,
         val routeSummary: String? = null,
+        // —— 设备间同步（局域网/热点直连） ——
+        val myDeviceName: String = "",               // 本机名：中文随机名+型号
+        val syncServerQr: String? = null,            // 出示中的同步二维码内容（null=未出示）
+        val syncServerHint: String? = null,          // IP/端口/口令（对端手动连接用）
+        val syncPeerName: String? = null,            // 对端设备名
+        val syncPeerMaps: List<MapSyncMapInfo> = emptyList(), // 对端地图清单（含数据日期）
+        val syncSelected: Set<String> = emptySet(),  // 勾选要同步的省份（.map 文件名）
+        val syncBusy: Boolean = false,
+        val syncLog: String? = null,
         val routing: Boolean = false,
         val routePoints: List<Pair<Double, Double>> = emptyList(),
         val trackPoints: List<Pair<Double, Double>> = emptyList(),  // 感知轨迹（足迹叠加）
@@ -80,6 +91,176 @@ class MapViewModel(
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     private var downloadJob: kotlinx.coroutines.Job? = null
+
+    // ---------- 设备间同步 ----------
+    private var syncServer: MapSync.Server? = null
+    private var lastPeer: Pair<String, MapSync.Endpoint>? = null
+
+    override fun onCleared() {
+        syncServer?.stop()
+        super.onCleared()
+    }
+
+    private fun ensureDeviceName(onReady: (String) -> Unit) {
+        viewModelScope.launch {
+            val current = repo.settings.firstOrNull() ?: return@launch
+            val name = current.deviceName.ifBlank { MapSync.generateName() }
+            if (name != current.deviceName) repo.save(current.copy(deviceName = name))
+            onReady(name)
+        }
+    }
+
+    /** 出示二维码：起局域网服务，对端扫码后自动互传（对端也可以连我，方向由数据新旧决定） */
+    fun startSyncServer() {
+        if (_ui.value.syncServerQr != null) return
+        ensureDeviceName { name ->
+            val model = (android.os.Build.MODEL ?: "").trim().take(20)
+            val server = MapSync.Server(
+                mapDir = mapDir,
+                myName = name,
+                myModel = model,
+                onEvent = { ev -> appendSyncLog(ev) },
+                onMapsChanged = {
+                    refreshMaps()
+                    // 本机地图变了，重算与对端的方向标注
+                    _ui.update { st -> st.copy(updatesAvailable = st.updatesAvailable) }
+                },
+            )
+            val endpoint = server.start()
+            syncServer = server
+            if (endpoint == null) {
+                _ui.update { it.copy(message = "开启同步失败：本机没有可用的 Wi-Fi/热点地址。请先连 Wi-Fi 或开一个热点。") }
+            } else {
+                lastPeer = endpoint.host to MapSync.Endpoint(endpoint.host, endpoint.port, endpoint.token, endpoint.qrContent)
+                _ui.update {
+                    it.copy(
+                        myDeviceName = name,
+                        syncServerQr = endpoint.qrContent,
+                        syncServerHint = "IP ${endpoint.host} · 端口 ${endpoint.port} · 口令 ${endpoint.token}（对端手动连接时填）",
+                    )
+                }
+            }
+        }
+    }
+
+    fun stopSyncServer() {
+        syncServer?.stop()
+        syncServer = null
+        _ui.update { it.copy(syncServerQr = null, syncServerHint = null) }
+    }
+
+    private fun appendSyncLog(line: String) {
+        _ui.update { st -> st.copy(syncLog = (st.syncLog?.let { "$it\n" } ?: "") + line) }
+    }
+
+    fun toggleSyncSelected(name: String) {
+        _ui.update { st ->
+            val s = st.syncSelected.toMutableSet()
+            if (!s.add(name)) s.remove(name)
+            st.copy(syncSelected = s)
+        }
+    }
+
+    /** 扫码连接：识别 lvyoubao://mapsync/ 二维码 */
+    fun connectFromQr(content: String) {
+        val endpoint = MapSync.parseQr(content)
+        if (endpoint == null) {
+            _ui.update { it.copy(message = "这不是旅游宝的地图同步码，请扫对端「设备同步 → 出示二维码」里的码") }
+            return
+        }
+        connectPeer(endpoint.host, endpoint.port, endpoint.token)
+    }
+
+    /** 手动连接（二维码里的 IP 对不上时兜底） */
+    fun connectPeer(host: String, port: Int, token: String) {
+        if (_ui.value.syncBusy || host.isBlank() || port !in 1..65535 || token.isBlank()) {
+            _ui.update { it.copy(message = if (port !in 1..65535) "端口不对，请对照对端出示的 IP/端口/口令" else null) }
+            return
+        }
+        lastPeer = host to MapSync.Endpoint(host, port, token, MapSync.qr(host, port, token))
+        viewModelScope.launch {
+            _ui.update { it.copy(syncBusy = true, syncLog = null) }
+            runCatching { MapSync.fetchInfo(host, port, token) }.fold(
+                onSuccess = { info ->
+                    val local = _ui.value.maps.associate { it.name to it.lastModified() }
+                    // 默认勾选：两边数据不一样的（一边没有的也算）
+                    val diff = info.maps
+                        .filter { m -> (local[m.file] ?: 0L) + 60_000 < m.date }
+                        .map { it.file } +
+                        local.keys.filter { n -> info.maps.none { it.file == n } }
+                    _ui.update {
+                        it.copy(
+                            syncBusy = false,
+                            syncPeerName = "${info.name}（${info.model}）",
+                            syncPeerMaps = info.maps,
+                            syncSelected = diff.toSet(),
+                            syncLog = "已连接对端。勾选要同步的省份，点「开始同步」——数据新的会覆盖旧的。",
+                        )
+                    }
+                },
+                onFailure = { e ->
+                    _ui.update { it.copy(syncBusy = false, message = e.message ?: "连接失败") }
+                },
+            )
+        }
+    }
+
+    /** 按勾选互传：每省数据新的一方发给旧的一方 */
+    fun runMapSync() {
+        val peer = lastPeer ?: return
+        val selected = _ui.value.syncSelected.toList()
+        if (selected.isEmpty() || _ui.value.syncBusy) return
+        val (host, endpoint) = peer
+        viewModelScope.launch {
+            _ui.update { it.copy(syncBusy = true, syncLog = "开始同步…") }
+            var sent = 0
+            var received = 0
+            var skipped = 0
+            selected.forEach { name ->
+                val localFile = mapDir.listFiles { f -> f.name == name }?.firstOrNull()
+                val localDate = localFile?.lastModified() ?: 0L
+                val peerInfo = _ui.value.syncPeerMaps.firstOrNull { it.file == name }
+                val peerDate = peerInfo?.date ?: 0L
+                try {
+                    when {
+                        localDate > peerDate + 60_000 && localFile != null -> {
+                            appendSyncLog("$name：推送给对端…")
+                            if (MapSync.uploadMap(host, endpoint.port, endpoint.token, localFile)) {
+                                sent++
+                                appendSyncLog("$name：✓ 已推送")
+                            } else {
+                                skipped++
+                                appendSyncLog("$name：对端更新，已跳过")
+                            }
+                        }
+
+                        peerDate > localDate + 60_000 && peerInfo != null -> {
+                            appendSyncLog("$name：从对端接收…")
+                            MapSync.downloadMap(host, endpoint.port, endpoint.token, name, mapDir, peerDate) { _, _ -> }
+                            received++
+                            appendSyncLog("$name：✓ 已接收")
+                        }
+
+                        else -> {
+                            skipped++
+                            appendSyncLog("$name：两边一致，跳过")
+                        }
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    appendSyncLog("$name：失败（${e.message ?: "网络异常"}）")
+                }
+            }
+            refreshMaps()
+            // 同步完刷新对端清单，方向标注跟着更新
+            runCatching { MapSync.fetchInfo(host, endpoint.port, endpoint.token) }.onSuccess { info ->
+                _ui.update { it.copy(syncPeerMaps = info.maps) }
+            }
+            appendSyncLog("完成：发送 $sent 个、接收 $received 个、跳过 $skipped 个")
+            _ui.update { it.copy(syncBusy = false) }
+        }
+    }
 
     init {
         cleanLegacyPartials()

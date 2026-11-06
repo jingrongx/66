@@ -64,6 +64,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.MapSyncMapInfo
 import com.lvyoubao.app.data.NavigationTracker
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -89,9 +90,12 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
     val me by NavigationTracker.fix.collectAsState()
     val context = LocalContext.current
 
-    // 地图页可见期间订阅定位：给「我的位置」和实时位置点供数
+    // 地图页可见期间订阅定位：给「我的位置」和实时位置点供数；离开页面时停掉地图同步服务
     androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { NavigationTracker.stop(context) }
+        onDispose {
+            NavigationTracker.stop(context)
+            vm.stopSyncServer()
+        }
     }
     val scope = rememberCoroutineScope()
     var selectedMap by remember { mutableStateOf<File?>(null) }
@@ -130,10 +134,11 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
         }
         Spacer(Modifier.height(8.dp))
 
-        // 页内切换：查看已下载 / 下载更多省份
+        // 页内切换：查看已下载 / 下载更多省份 / 设备同步
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = tab == "view", onClick = { tab = "view" }, label = { Text("查看地图") })
             FilterChip(selected = tab == "download", onClick = { tab = "download" }, label = { Text("下载更多省份") })
+            FilterChip(selected = tab == "sync", onClick = { tab = "sync" }, label = { Text("设备同步") })
         }
         Spacer(Modifier.height(8.dp))
 
@@ -202,7 +207,173 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
             Spacer(Modifier.height(8.dp))
         }
 
-        if (tab == "download" || selectedMap?.exists() != true) {
+        if (tab == "sync") {
+            // ---------- 设备间同步：局域网/热点直连，扫码或手动配对，互相同步离线地图 ----------
+            var showSyncScanner by remember { mutableStateOf(false) }
+            var manualDialog by remember { mutableStateOf(false) }
+            var manualHost by remember { mutableStateOf("") }
+            var manualPort by remember { mutableStateOf("") }
+            var manualToken by remember { mutableStateOf("") }
+
+            Text(
+                "两台设备连同一个 Wi-Fi（或一方开热点、另一方连上热点），即可互相同步离线地图；数据新的覆盖旧的，完全离线可用。鸿蒙设备同样支持。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text("我的设备：${state.myDeviceName.ifBlank { "（点「出示二维码」自动生成）" }}", style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { vm.startSyncServer() }, enabled = state.syncServerQr == null) { Text("出示二维码") }
+                TextButton(onClick = { vm.stopSyncServer() }, enabled = state.syncServerQr != null) { Text("停止出示") }
+            }
+            state.syncServerQr?.let { qr ->
+                Spacer(Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    com.lvyoubao.app.ui.sync.QrCodeImage(qr)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "对端点「扫码连接」扫这个码（也可手动填下面三项）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        state.syncServerHint ?: "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { showSyncScanner = true }, enabled = !state.syncBusy) { Text("扫码连接") }
+                TextButton(onClick = { manualDialog = true }, enabled = !state.syncBusy) { Text("手动连接") }
+            }
+            state.syncPeerName?.let { peer ->
+                Spacer(Modifier.height(8.dp))
+                Text("对端：$peer", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    val localDates = state.maps.associate { it.name to it.lastModified() }
+                    val peerDates = state.syncPeerMaps.associate { it.file to it.date }
+                    val names = (localDates.keys + peerDates.keys).sorted()
+                    items(names) { name ->
+                        val ld = localDates[name] ?: 0L
+                        val pd = peerDates[name] ?: 0L
+                        val dir = when {
+                            ld == 0L -> "← 从对端接收（本地没有）"
+                            pd == 0L -> "→ 发送给对端（对端没有）"
+                            ld > pd + 60_000 -> "→ 本地较新，发过去"
+                            pd > ld + 60_000 -> "← 对端较新，收过来"
+                            else -> "＝ 两边一致"
+                        }
+                        val fmt: (Long) -> String = { ms ->
+                            if (ms <= 0L) "无"
+                            else java.text.SimpleDateFormat("MM-dd", java.util.Locale.CHINA).format(java.util.Date(ms))
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            androidx.compose.material3.Checkbox(
+                                checked = state.syncSelected.contains(name),
+                                onCheckedChange = { vm.toggleSyncSelected(name) },
+                                enabled = dir != "＝ 两边一致" && !state.syncBusy,
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    MapRegions.displayName(name),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    "$dir · 本地 ${fmt(ld)} / 对端 ${fmt(pd)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                Button(
+                    onClick = { vm.runMapSync() },
+                    enabled = state.syncSelected.isNotEmpty() && !state.syncBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (state.syncBusy) "同步中…" else "开始同步（已选 ${state.syncSelected.size} 个）")
+                }
+                state.syncLog?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                }
+            }
+            if (showSyncScanner) {
+                com.lvyoubao.app.ui.sync.QrScanScreen(
+                    onResult = { content ->
+                        showSyncScanner = false
+                        vm.connectFromQr(content)
+                    },
+                    onClose = { showSyncScanner = false },
+                )
+            }
+            if (manualDialog) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { manualDialog = false },
+                    title = { Text("手动连接") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "三项都印在对方「出示二维码」界面下方",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedTextField(
+                                value = manualHost,
+                                onValueChange = { manualHost = it.trim() },
+                                label = { Text("IP 地址") },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                            )
+                            OutlinedTextField(
+                                value = manualPort,
+                                onValueChange = { manualPort = it.trim() },
+                                label = { Text("端口") },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                            )
+                            OutlinedTextField(
+                                value = manualToken,
+                                onValueChange = { manualToken = it.trim() },
+                                label = { Text("口令") },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                manualDialog = false
+                                vm.connectPeer(manualHost, manualPort.toIntOrNull() ?: 0, manualToken)
+                            },
+                        ) { Text("连接") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { manualDialog = false }) { Text("取消") }
+                    },
+                )
+            }
+        } else if (tab == "download" || selectedMap?.exists() != true) {
             // 下载管理
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
