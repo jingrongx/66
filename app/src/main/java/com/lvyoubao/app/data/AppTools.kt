@@ -1,6 +1,7 @@
 package com.lvyoubao.app.data
 
 import android.content.Context
+import com.lvyoubao.app.data.observation.FatigueEngine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -108,15 +109,28 @@ object AppTools {
         val place = LocationContext.current(context) ?: throw ApiException("没有位置信息")
         if (settings.amapKey.isNotBlank()) {
             val amap = AmapClient(settings.amapKey)
-            val to = AmapClient.resolveDestination(amap, destination, place.lon, place.lat)
-                ?: throw ApiException("无法解析目的地「$destination」的坐标")
+            // 目的地是「回家」类词时直接用设置的家庭地址：AI 偶尔只传一个"家"字，
+            // 附近 POI 检索会命中别家含"家"的店，跳高德就带错地址
+            val home = settings.homeAddress.trim()
+            val destinationText = if (AmapClient.isHomeDestination(destination) && home.isNotBlank()) home else destination
+            val to = if (destinationText == home) {
+                amap.geocode(destinationText)?.let {
+                    AmapClient.ResolvedDest(it.first, it.second, AmapClient.cleanPlaceName(destinationText))
+                }
+            } else {
+                AmapClient.resolveDestination(amap, destinationText, place.lon, place.lat)
+            } ?: throw ApiException("无法解析目的地「$destinationText」的坐标")
+            // 出行方式按直线距离自动选：超过 2 公里用驾车（跨城回家步行规划不合理也容易失败）
+            val straightKm = FatigueEngine.haversine(place.lat, place.lon, to.lat, to.lon) / 1000.0
+            val routeMode = if (straightKm > 2.0) RouteMode.DRIVE else RouteMode.WALK
             // 新接口带分步指引；异常时退回旧步行接口（无指引但能画线）
             val card = runCatching {
-                val plan = amap.routePlans(RouteMode.WALK, place.lon, place.lat, to.lon, to.lat).firstOrNull()
+                val plan = amap.routePlans(routeMode, place.lon, place.lat, to.lon, to.lat).firstOrNull()
                 if (plan != null) {
                     MapCardData(
                         kind = "route",
                         title = to.name,
+                        mode = routeMode.name,
                         fromLat = place.lat,
                         fromLon = place.lon,
                         toLat = to.lat,
@@ -142,7 +156,7 @@ object AppTools {
                 }
             }.getOrElse { throw it }
             onMapCard(card)
-            return "步行至「${to.name}」：${MapCardData.distanceText(card.distanceM)}，${MapCardData.durationText(card.durationMin)}（高德步行路线）"
+            return "${routeMode.label}至「${to.name}」：${MapCardData.distanceText(card.distanceM)}，${MapCardData.durationText(card.durationMin)}（高德${routeMode.label}路线）"
         }
         if (BRouterClient.isInstalled(context)) {
             // BRouter 需要坐标起点：先粗定位（用当前坐标），目的地用文本让 BRouter 不行——

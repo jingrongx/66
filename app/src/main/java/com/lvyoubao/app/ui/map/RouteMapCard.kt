@@ -8,6 +8,8 @@ import android.hardware.SensorManager
 import android.view.MotionEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,12 +60,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -122,15 +127,21 @@ fun RouteMapCard(
     val scope = rememberCoroutineScope()
     val settings by app.settingsRepository.settings.collectAsState(initial = AiSettings())
 
-    val mapFile = remember(card) {
-        pickMapFile(context, listOf(card.fromLon to card.fromLat, card.toLon to card.toLat))
+    val mapFiles = remember(card) {
+        pickMapFiles(
+            context,
+            listOf(card.fromLon to card.fromLat, card.toLon to card.toLat) +
+                card.points.map { p -> (p.getOrNull(0) ?: 0.0) to (p.getOrNull(1) ?: 0.0) },
+        )
     }
 
     // ---- 目的地（地点卡可换选）与路线方案 ----
     var dest by remember(card) { mutableStateOf(card.toLon to card.toLat) }   // (经度, 纬度)
     var selectedPoi by remember(card) { mutableStateOf<MapPoi?>(card.pois.firstOrNull()) }
     var plans by remember(card) { mutableStateOf<Map<RouteMode, List<RoutePlan>>>(emptyMap()) }
-    var mode by remember(card) { mutableStateOf(RouteMode.WALK) }
+    // 卡片自带初始出行方式（跨城"回家"这类长距离生成时就是驾车），旧卡片没有该字段默认步行
+    val cardMode = remember(card) { runCatching { RouteMode.valueOf(card.mode) }.getOrDefault(RouteMode.WALK) }
+    var mode by remember(card) { mutableStateOf(cardMode) }
     var planIndex by remember(card) { mutableStateOf(0) }
     var loading by remember(card) { mutableStateOf(false) }
     var error by remember(card) { mutableStateOf<String?>(null) }
@@ -138,6 +149,8 @@ fun RouteMapCard(
     var expanded by rememberSaveable { mutableStateOf(false) }
     var navigating by rememberSaveable { mutableStateOf(false) }
     var voiceOn by rememberSaveable { mutableStateOf(true) }
+    var poisExpanded by remember { mutableStateOf(false) }       // 地点卡候选列表展开（默认只露 3 条）
+    var panelFull by rememberSaveable { mutableStateOf(false) }  // 全屏底部面板展开（默认收起，不再占半屏）
     var showSteps by remember { mutableStateOf(false) }
     var lastAnnouncedStep by remember { mutableStateOf(-1) }
     var lastReplanAt by remember { mutableStateOf(0L) }
@@ -148,7 +161,7 @@ fun RouteMapCard(
     val cardPlan = remember(card) {
         if (card.kind != "route" || card.points.size < 2) null
         else RoutePlan(
-            mode = RouteMode.WALK,
+            mode = cardMode,
             distanceM = card.distanceM,
             durationMin = card.durationMin,
             points = card.points.map { p -> (p.getOrNull(0) ?: 0.0) to (p.getOrNull(1) ?: 0.0) },
@@ -156,7 +169,7 @@ fun RouteMapCard(
         )
     }
     val currentPlan: RoutePlan? = plans[mode]?.getOrNull(planIndex)
-        ?: cardPlan.takeIf { mode == RouteMode.WALK && dest == (card.toLon to card.toLat) }
+        ?: cardPlan.takeIf { mode == cardMode && dest == (card.toLon to card.toLat) }
 
     val me by NavigationTracker.fix.collectAsState()
 
@@ -362,7 +375,7 @@ fun RouteMapCard(
     // ---- 地图视图（内嵌与全屏共用；重建时自动重画所有图层） ----
     @Composable
     fun CardMap(modifier: Modifier) {
-        if (mapFile == null) {
+        if (mapFiles.isEmpty()) {
             Box(
                 modifier = modifier
                     .clip(RoundedCornerShape(14.dp))
@@ -382,24 +395,32 @@ fun RouteMapCard(
             return
         }
         AndroidView(
-            modifier = modifier.clip(RoundedCornerShape(if (expanded) 0.dp else 14.dp)),
+            modifier = modifier
+                .clip(RoundedCornerShape(if (expanded) 0.dp else 14.dp))
+                // 手势锁：从 Compose 层消费全部触摸事件，会话列表（LazyColumn）不再抢走拖动/双指缩放
+                // （原生 requestDisallowInterceptTouchEvent 对 Compose 滚动容器无效，这是此前
+                // 卡片地图拖不动、缩不了而离线地图页正常的根因；地图自身手势见 MapView.onTouchEvent）
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        do {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            event.changes.forEach { it.consume() }
+                        } while (event.changes.any { it.pressed })
+                    }
+                },
             factory = { ctx ->
                 val centerLat = if (card.hasOrigin) (card.fromLat + dest.second) / 2 else dest.second
                 val centerLon = if (card.hasOrigin) (card.fromLon + dest.first) / 2 else dest.first
-                buildOfflineMapView(ctx, mapFile, centerLat, centerLon, 14.toByte())
+                buildOfflineMapViewMulti(ctx, mapFiles, centerLat, centerLon, 14.toByte())
                     .also { mv ->
                         mapViewRef = mv
                         lastDrawKey = ""      // 重建后强制重画图层
                         lastMeDrawn = null
-                        // 拖动时告诉父容器别抢手势（会话列表会吃掉纵向滑动，导致内嵌地图拖不动）
-                        mv.setOnTouchListener { v, ev ->
-                            when (ev.actionMasked) {
-                                MotionEvent.ACTION_DOWN -> {
-                                    v.parent?.requestDisallowInterceptTouchEvent(true)
-                                    if (navigating) userDragging = true   // 手动看图时暂停自动跟图
-                                }
-                                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-                                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                        // 手动看图时暂停自动跟图（事件已在 Compose 层锁给地图，这里不再需要防父容器拦截）
+                        mv.setOnTouchListener { _, ev ->
+                            if (ev.actionMasked == MotionEvent.ACTION_DOWN && navigating) {
+                                userDragging = true
                             }
                             false   // 事件继续交给地图自己处理
                         }
@@ -534,8 +555,10 @@ fun RouteMapCard(
     }
 
     // ---- 信息面板（标题/方式/方案/指引/操作），内嵌与全屏共用 ----
+    // compact=true（全屏默认收起态）：只留标题/摘要/方式/错误/操作，
+    // 候选点列表、方案切换、分步指引这些"长内容"展开后才出现——不再一进全屏就占半屏
     @Composable
-    fun InfoPanel(modifier: Modifier) {
+    fun InfoPanel(modifier: Modifier, compact: Boolean = false) {
         Column(modifier) {
             // 导航横幅（全屏时顶部另有精简横幅，这里导航中只显示操作行）
             if (!(expanded && navigating && nav != null)) {
@@ -587,10 +610,11 @@ fun RouteMapCard(
                 )
             }
 
-            // 地点卡候选点列表
-            if (card.kind == "place" && card.pois.isNotEmpty()) {
+            // 地点卡候选点列表：默认最多露 3 条，多则折叠（此前一进全屏就被整列占半屏且收不起来）
+            if (card.kind == "place" && card.pois.isNotEmpty() && !compact) {
                 Spacer(Modifier.height(6.dp))
-                card.pois.forEach { poi ->
+                val shownPois = if (poisExpanded) card.pois else card.pois.take(3)
+                shownPois.forEach { poi ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -628,6 +652,14 @@ fun RouteMapCard(
                         }
                     }
                 }
+                if (card.pois.size > 3) {
+                    TextButton(onClick = { poisExpanded = !poisExpanded }) {
+                        Text(
+                            if (poisExpanded) "收起候选列表" else "展开全部 ${card.pois.size} 个候选点（已显示 ${shownPois.size} 个）",
+                            fontSize = if (big) 18.sp else 14.sp,
+                        )
+                    }
+                }
             }
 
             // 出行方式（FlowRow 挤不下自动换行，不再竖排）
@@ -653,7 +685,7 @@ fun RouteMapCard(
 
             // 多方案切换
             val planList = plans[mode]
-            if (planList != null && planList.size > 1) {
+            if (!compact && planList != null && planList.size > 1) {
                 Spacer(Modifier.height(6.dp))
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -677,7 +709,7 @@ fun RouteMapCard(
 
             // 分步指引
             val steps = currentPlan?.steps.orEmpty()
-            if (steps.isNotEmpty()) {
+            if (!compact && steps.isNotEmpty()) {
                 Spacer(Modifier.height(4.dp))
                 TextButton(onClick = { showSteps = !showSteps }) {
                     Text(if (showSteps) "收起分步指引" else "查看分步指引（${steps.size} 步）", fontSize = if (big) 18.sp else 14.sp)
@@ -766,7 +798,7 @@ fun RouteMapCard(
                         .fillMaxWidth()
                         .height(if (big) 250.dp else 210.dp),
                 )
-                if (mapFile != null) {
+                if (mapFiles.isNotEmpty()) {
                     // 右下角：全屏 + 我的位置，纵向排开互不遮挡
                     Column(
                         horizontalAlignment = Alignment.End,
@@ -919,6 +951,7 @@ fun RouteMapCard(
                     }
 
                     // 底部悬浮面板（高度变化实时回传给控制列做避让）
+                    // 默认收起：只留标题/摘要/方式/操作，点「展开面板」才显示候选点与分步指引
                     Surface(
                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
                         shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
@@ -931,11 +964,25 @@ fun RouteMapCard(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = if (big) 430.dp else 340.dp)
+                                .heightIn(max = if (panelFull) (if (big) 430.dp else 340.dp) else Dp.Unspecified)
                                 .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
                         ) {
-                            InfoPanel(Modifier.fillMaxWidth())
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    if (panelFull) "⌄ 收起面板" else "⌃ 展开面板（候选点/方案/分步指引）",
+                                    fontSize = if (big) 16.sp else 13.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .clickable { panelFull = !panelFull }
+                                        .padding(vertical = 4.dp),
+                                )
+                            }
+                            InfoPanel(Modifier.fillMaxWidth(), compact = !panelFull)
                             Spacer(Modifier.height(8.dp))
                         }
                     }

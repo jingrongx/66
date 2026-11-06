@@ -144,24 +144,40 @@ internal fun swapBaseMap(
  * 挑一张覆盖所有关键点的离线地图；都不覆盖就退回最新一张（和离线地图页的默认选择一致）。
  * points 传 (经度, 纬度) 对。
  */
-internal fun pickMapFile(context: Context, points: List<Pair<Double, Double>>): File? {
+internal fun pickMapFile(context: Context, points: List<Pair<Double, Double>>): File? =
+    pickMapFiles(context, points).lastOrNull()
+
+/**
+ * 挑出所有与关键点范围相交的离线地图，按省名排序返回。
+ * 跨省路线（如江西→上海）没有一张图能覆盖全程，此前只挑一张就退回
+ * 「文件名排序的最后一张」，显示的根本不是路线所在区域——用户"已下载该省地图却不显示"的根因。
+ * 改为返回全部相交省份，渲染层逐张叠 TileRendererLayer，路线全程都有底图。
+ * points 传 (经度, 纬度) 对；一张都不相交时退回最新一张（与离线地图页默认一致）。
+ */
+internal fun pickMapFiles(context: Context, points: List<Pair<Double, Double>>): List<File> {
     val maps = File(context.filesDir, "maps")
         .listFiles { f -> f.name.endsWith(".map") }
         ?.sortedBy { it.name }
         .orEmpty()
-    if (maps.isEmpty()) return null
+    if (maps.isEmpty()) return emptyList()
     val targets = points.filter { it.first != 0.0 || it.second != 0.0 }
-    return maps.lastOrNull { m ->
+    if (targets.isEmpty()) return listOf(maps.last())
+    // 用路线包络框和每张图的省界框做相交判断：几千个折线点逐点 contains 太慢，也漏掉途经省
+    val envelope = org.mapsforge.core.model.BoundingBox(
+        targets.minOf { it.second }, targets.minOf { it.first },
+        targets.maxOf { it.second }, targets.maxOf { it.first },
+    )
+    val covering = maps.filter { m ->
         runCatching {
             val mf = org.mapsforge.map.reader.MapFile(m)
             try {
-                val bb = mf.mapFileInfo.boundingBox
-                targets.all { bb.contains(LatLong(it.second, it.first)) }
+                mf.mapFileInfo.boundingBox.intersects(envelope)
             } finally {
                 runCatching { mf.close() }
             }
         }.getOrDefault(false)
-    } ?: maps.last()
+    }
+    return covering.ifEmpty { listOf(maps.last()) }
 }
 
 /** 找一个能把所有点装下的缩放级别（留 18% 边距） */
@@ -187,29 +203,46 @@ internal fun buildOfflineMapView(
     centerLat: Double,
     centerLon: Double,
     zoom: Byte,
+): org.mapsforge.map.android.view.MapView = buildOfflineMapViewMulti(
+    context, listOf(mapFile), centerLat, centerLon, zoom,
+)
+
+/**
+ * 多张底图叠加的地图视图：跨省路线（江西→上海）全程都有底图。
+ * 每张 .map 一个 TileRendererLayer，互不重叠（省界框相交才入选），叠几层就渲染几省。
+ * 各层独立 TileCache（id 带下标防共享冲突），装饰（路线、标记）由调用方按需叠加。
+ */
+internal fun buildOfflineMapViewMulti(
+    context: Context,
+    mapFiles: List<File>,
+    centerLat: Double,
+    centerLon: Double,
+    zoom: Byte,
 ): org.mapsforge.map.android.view.MapView {
     ensureGraphicFactory(context)
     val mapView = org.mapsforge.map.android.view.MapView(context)
     mapView.isClickable = true
-    val tileCache = org.mapsforge.map.android.util.AndroidUtil.createTileCache(
-        context,
-        "lvyoubao-map",
-        mapView.model.displayModel.tileSize,
-        1.0f,
-        1.5,
-    )
-    val mapDataStore = org.mapsforge.map.reader.MapFile(mapFile)
-    val rendererLayer = org.mapsforge.map.layer.renderer.TileRendererLayer(
-        tileCache,
-        mapDataStore,
-        mapView.model.mapViewPosition,
-        false,
-        true,
-        false,
-        AndroidGraphicFactory.INSTANCE,
-    )
-    runCatching { rendererLayer.setXmlRenderTheme(org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT) }
-    mapView.layerManager.layers.add(rendererLayer)
+    mapFiles.forEachIndexed { i, file ->
+        val tileCache = org.mapsforge.map.android.util.AndroidUtil.createTileCache(
+            context,
+            "lvyoubao-map-$i",
+            mapView.model.displayModel.tileSize,
+            1.0f,
+            1.5,
+        )
+        val mapDataStore = runCatching { org.mapsforge.map.reader.MapFile(file) }.getOrNull() ?: return@forEachIndexed
+        val rendererLayer = org.mapsforge.map.layer.renderer.TileRendererLayer(
+            tileCache,
+            mapDataStore,
+            mapView.model.mapViewPosition,
+            false,
+            true,
+            false,
+            AndroidGraphicFactory.INSTANCE,
+        )
+        runCatching { rendererLayer.setXmlRenderTheme(org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT) }
+        mapView.layerManager.layers.add(rendererLayer)
+    }
     // 内置缩放按钮位置固定在右下，会挡住自绘的「我的位置/全屏」等操作，统一关掉、由界面层自己画
     runCatching { mapView.setBuiltInZoomControls(false) }
     mapView.model.mapViewPosition.setCenter(LatLong(centerLat, centerLon))

@@ -9,6 +9,7 @@ package com.lvyoubao.app.data
 data class MapCardData(
     val kind: String = "route",          // route=路线卡 / place=地点卡
     val title: String = "",              // 目的地名称或地点关键词
+    val mode: String = "WALK",           // 卡片初始出行方式（WALK/RIDE/DRIVE/BUS）：跨城长距离自动用 DRIVE，旧卡片默认步行
     val fromLat: Double = 0.0,
     val fromLon: Double = 0.0,
     val toLat: Double = 0.0,

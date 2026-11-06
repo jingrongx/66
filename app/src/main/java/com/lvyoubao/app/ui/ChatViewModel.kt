@@ -14,6 +14,7 @@ import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.AmapClient
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.observation.FatigueEngine
 import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.MapIntent
 import com.lvyoubao.app.data.MapPoi
@@ -344,9 +345,12 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     /**
      * AI 输出的地图意图 → 地图卡：
-     * route=解析起点（AI 给了起点名就按名解析，否则用当前位置）和终点坐标，规划步行路线；
+     * route=解析起点（AI 给了起点名就按名解析，否则用当前位置）和终点坐标，规划路线；
      * place=按关键词搜附近 POI。地名解析都带上当前城市，避免"市图书馆"解析到外地。
-     * 失败静默返回 null，不影响回答本身。
+     * 目的地是「家」类词时直接用设置的家庭地址（AI 偶尔不按提示词填完整地址，
+     * 只传一个"家"字会被附近 POI 检索命中成别家店——跳高德就带错了地址）。
+     * 出行方式按起终点直线距离自动选：超过 2 公里用驾车（"回家的路"跨城几百公里，
+     * 之前的步行规划既不合理也容易失败）。失败静默返回 null，不影响回答本身。
      */
     private suspend fun buildMapCardFromIntent(
         context: Context,
@@ -360,24 +364,35 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 val here = LocationContext.current(context)
                 val city = here?.let { amap.regeocodeCity(it.lon, it.lat) }
                 if (intent.type == "route" && intent.destination.isNotBlank()) {
+                    val home = settings.homeAddress.trim()
+                    val destinationText = if (AmapClient.isHomeDestination(intent.destination) && home.isNotBlank()) home else intent.destination
                     val from = if (intent.origin.isNotBlank()) {
                         amap.geocode(intent.origin, city)
                     } else {
                         here?.let { it.lon to it.lat }
                     } ?: return@withContext null
-                    // POI 优先解析（坐标更贴近实际入口，名称取高德实际命中的），拿不到再地理编码
-                    val to = runCatching {
-                        AmapClient.resolveDestination(amap, intent.destination, from.first, from.second)
-                    }.getOrNull()
-                        ?: amap.geocode(intent.destination, city)?.let {
-                            AmapClient.ResolvedDest(it.first, it.second, AmapClient.cleanPlaceName(intent.destination))
+                    // 家在几百公里外时，以当前位置为中心的 POI 检索必然落空甚至误命中，直接地理编码
+                    val to = if (destinationText == home) {
+                        amap.geocode(destinationText)?.let {
+                            AmapClient.ResolvedDest(it.first, it.second, AmapClient.cleanPlaceName(destinationText))
                         }
-                        ?: return@withContext null
-                    val plan = amap.routePlans(RouteMode.WALK, from.first, from.second, to.lon, to.lat)
+                    } else {
+                        // POI 优先解析（坐标更贴近实际入口，名称取高德实际命中的），拿不到再地理编码
+                        runCatching {
+                            AmapClient.resolveDestination(amap, destinationText, from.first, from.second)
+                        }.getOrNull()
+                            ?: amap.geocode(destinationText, city)?.let {
+                                AmapClient.ResolvedDest(it.first, it.second, AmapClient.cleanPlaceName(destinationText))
+                            }
+                    } ?: return@withContext null
+                    val straightKm = FatigueEngine.haversine(from.second, from.first, to.lat, to.lon) / 1000.0
+                    val routeMode = if (straightKm > 2.0) RouteMode.DRIVE else RouteMode.WALK
+                    val plan = amap.routePlans(routeMode, from.first, from.second, to.lon, to.lat)
                         .firstOrNull() ?: return@withContext null
                     MapCardData(
                         kind = "route",
                         title = to.name,
+                        mode = routeMode.name,
                         fromLat = from.second,
                         fromLon = from.first,
                         toLat = to.lat,

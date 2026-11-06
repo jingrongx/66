@@ -310,6 +310,20 @@ class AmapClient(private val key: String) {
     }.getOrNull()
 
     companion object {
+        /** 「回家」类目的地词：命中且设置里有家庭地址时，直接用地址解析，不再附近 POI 检索 */
+        val HOME_WORDS = setOf("家", "我家", "老家", "家里", "家地址", "家庭地址", "住所", "住处", "屋里")
+
+        /**
+         * 判断目的地文本是不是「回家」类：剥掉引导词后看是否等于 HOME_WORDS 里的词。
+         * 枚举法不误伤（"家装市场""家具城"这类含"家"的真地名不命中）。
+         */
+        fun isHomeDestination(destination: String): Boolean {
+            val d = destination.trim()
+                .replace(Regex("^(回|去|到|返回|回我|回个|导航回|导航去|带我去|带我回|怎么回|怎么去|怎么到)"), "")
+                .replace(Regex("(那边|那里|那儿|这边)$"), "")
+                .trim()
+            return d in HOME_WORDS
+        }
         /**
          * 目的地解析：POI 检索优先（坐标贴近实际入口/门址），名称对得上才采信；
          * 兜底地理编码。解决"高德导航传过去的终点有点不准、要手动纠正"的问题。
