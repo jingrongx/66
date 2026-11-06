@@ -11,6 +11,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -19,9 +20,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.compose.ui.unit.Density
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.ui.ask.AskScreen
 import com.lvyoubao.app.ui.largetext.LargeTextScreen
@@ -48,17 +51,25 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(appSettings.asrKey) {
                 com.lvyoubao.app.ui.common.TtsPlayer.setCloudKey(appSettings.asrKey)
             }
-            LvyoubaoTheme(themeMode = appSettings.themeMode) {
-                // Surface 统一提供主题背景色和内容色（LocalContentColor）：
-                // 否则未显式指定颜色的标题/图标会用默认黑色，深色主题下不可读
-                Surface(modifier = Modifier.fillMaxSize()) {
-                if (appSettings.largeTextMode) {
-                    // 大字模式是启动默认模式：设置里开着就直接进大字模式，关了就是普通模式；
-                    // 退出（按钮/返回键）= 退出应用，不再从这里切回普通模式
-                    LargeTextScreen(app = app, onExitApp = { finishAffinity() })
-                } else {
-                    AppRoot(app)
-                }
+            val density = LocalDensity.current
+            // 锁定系统字体缩放（关怀模式/大字体把 fontScale 放大后，固定字号的设计布局会被二次
+            // 放大挤爆：按钮文字换行、标题溢出、底栏挤成一团）。放大字号由应用自己的「大字模式」
+            // 负责并按设计排版；dp 尺寸仍随系统"显示大小"整体等比缩放，无障碍不受影响。
+            CompositionLocalProvider(
+                LocalDensity provides Density(density = density.density, fontScale = 1f),
+            ) {
+                LvyoubaoTheme(themeMode = appSettings.themeMode) {
+                    // Surface 统一提供主题背景色和内容色（LocalContentColor）：
+                    // 否则未显式指定颜色的标题/图标会用默认黑色，深色主题下不可读
+                    Surface(modifier = Modifier.fillMaxSize()) {
+                        if (appSettings.largeTextMode) {
+                            // 大字模式是启动默认模式：设置里开着就直接进大字模式，关了就是普通模式；
+                            // 退出（按钮/返回键）= 退出应用，不再从这里切回普通模式
+                            LargeTextScreen(app = app, onExitApp = { finishAffinity() })
+                        } else {
+                            AppRoot(app)
+                        }
+                    }
                 }
             }
         }
