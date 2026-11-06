@@ -13,6 +13,7 @@ data class AiSettings(
     val themeMode: String = "system",
     val amapKey: String = "",
     val asrKey: String = "",
+    val mapMirrorUrl: String = "",    // 离线地图镜像前缀（如自托管 OSS/NAS），下载优先走镜像、失败回退官方源
     val dialectMode: Boolean = false, // 方言口音识别：赣语抚州话等本地说法（TeleSpeech-ASR 免费模型）
     val largeTextMode: Boolean = false, // 大字模式：打开则启动直接进大字模式，关闭则进普通模式
     val homeAddress: String = "",     // 常用地址（家）：问「回家的路」直接导航回家，不用每次问地址

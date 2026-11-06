@@ -23,6 +23,7 @@ data class SyncableConfig(
     val asrKey: String = "",
     val homeAddress: String = "",
     val answerStyle: String = "",
+    val mapMirrorUrl: String = "",
 )
 
 object ConfigSyncCodec {
@@ -41,6 +42,7 @@ object ConfigSyncCodec {
         asrKey = s.asrKey,
         homeAddress = s.homeAddress,
         answerStyle = s.answerStyle,
+        mapMirrorUrl = s.mapMirrorUrl,
     )
 
     /** 把配置合并回 AiSettings（只覆盖载荷里非空的字段） */
@@ -53,6 +55,7 @@ object ConfigSyncCodec {
         asrKey = c.asrKey.ifEmpty { s.asrKey },
         homeAddress = c.homeAddress.ifEmpty { s.homeAddress },
         answerStyle = c.answerStyle.ifEmpty { s.answerStyle },
+        mapMirrorUrl = c.mapMirrorUrl.ifEmpty { s.mapMirrorUrl },
     )
 
     fun encodeJson(c: SyncableConfig): String = json.encodeToString(c)

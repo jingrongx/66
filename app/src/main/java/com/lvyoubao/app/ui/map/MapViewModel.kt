@@ -33,6 +33,7 @@ class MapViewModel(
         val updatesAvailable: Set<String> = emptySet(),  // 本地已有且远端数据更新的省区
         val loadingRemote: Boolean = false,
         val downloading: String? = null,             // 正在下载的省区名
+        val mirrorUrl: String = "",                  // 自建镜像前缀（国内加速）：下载优先走镜像，失败回退官方
         val progress: Int = 0,
         val progressBytes: Long = 0,                 // 已下载字节（进度卡显示速度/剩余时间用）
         val totalBytes: Long = 0,
@@ -87,6 +88,25 @@ class MapViewModel(
         refreshRemoteList(force = lastCheckStale())
         validateMaps()
         refreshTrack()
+        viewModelScope.launch {
+            val mirror = repo.settings.firstOrNull()?.mapMirrorUrl.orEmpty()
+            _ui.update { it.copy(mirrorUrl = mirror) }
+        }
+    }
+
+    /** 保存/清除镜像源前缀（存进全局设置，随扫码同步到车机） */
+    fun setMirror(url: String) {
+        viewModelScope.launch {
+            val trimmed = url.trim().trimEnd('/')
+            val current = repo.settings.firstOrNull() ?: return@launch
+            repo.save(current.copy(mapMirrorUrl = trimmed))
+            _ui.update {
+                it.copy(
+                    mirrorUrl = trimmed,
+                    message = if (trimmed.isBlank()) "已清除镜像源，恢复官方直连" else "镜像源已保存，下载将优先走镜像、失败自动回退官方",
+                )
+            }
+        }
     }
 
     private fun lastCheckStale(): Boolean = runCatching {
@@ -231,8 +251,14 @@ class MapViewModel(
             .removeSuffix(".map")
         val dest = File(mapDir, "$fileName.map")
         val part = File(mapDir, "$fileName.map.part")
-        val url = if (region.startsWith("http")) region
+        val official = if (region.startsWith("http")) region
         else "https://download.mapsforge.org/maps/v5/asia/china/$fileName.map"
+        // 镜像优先、官方兜底：自建镜像（OSS/NAS/Gitee 等）通常比德国官方源快一个数量级
+        val mirror = _ui.value.mirrorUrl.trim().trimEnd('/')
+        val urls = buildList {
+            if (mirror.isNotBlank() && !region.startsWith("http")) add("$mirror/$fileName.map")
+            add(official)
+        }
         downloadJob = viewModelScope.launch {
             val resumed = part.exists() && File(part.parentFile, part.name + ".meta").exists()
             _ui.update {
@@ -247,18 +273,32 @@ class MapViewModel(
             }
             val meter = SpeedMeter()
             try {
-                // 分段并行 + 断点续传：取消/失败留下的 .part/.meta 会接着传，不从头来
-                MapDownloader.download(url, part) { done, total ->
-                    val kbs = (meter.tick(done) / 1024).toLong().coerceAtLeast(0)
-                    _ui.update {
-                        it.copy(
-                            progress = (done * 100 / total).toInt(),
-                            progressBytes = done,
-                            totalBytes = total,
-                            speedKbs = kbs,
-                        )
+                var lastError: ApiException? = null
+                for (candidate in urls) {
+                    try {
+                        MapDownloader.download(candidate, part) { done, total ->
+                            val kbs = (meter.tick(done) / 1024).toLong().coerceAtLeast(0)
+                            _ui.update {
+                                it.copy(
+                                    progress = (done * 100 / total).toInt(),
+                                    progressBytes = done,
+                                    totalBytes = total,
+                                    speedKbs = kbs,
+                                )
+                            }
+                        }
+                        lastError = null
+                        break
+                    } catch (ce: kotlinx.coroutines.CancellationException) {
+                        throw ce
+                    } catch (e: ApiException) {
+                        lastError = e
+                        if (candidate != urls.last()) {
+                            _ui.update { it.copy(message = "镜像下载失败（${e.message}），回退官方源…") }
+                        }
                     }
                 }
+                lastError?.let { throw it }
                 // 完整下完才验证+改名：半截文件进地图页会必崩
                 val invalid = withContext(Dispatchers.IO) {
                     runCatching {

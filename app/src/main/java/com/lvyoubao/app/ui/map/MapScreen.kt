@@ -216,6 +216,44 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     Text(if (state.loadingRemote) "检查中…" else "检查更新")
                 }
             }
+            // 镜像源加速（可选）：官方源在德国，把 .map 自托管到 OSS/NAS 等国内可达处后，下载快一个数量级
+            var showMirrorEdit by remember { mutableStateOf(false) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (state.mirrorUrl.isBlank()) "镜像源加速（可选）：自托管 .map 文件，下载快一个数量级"
+                    else "镜像源：$state.mirrorUrl",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                TextButton(onClick = { showMirrorEdit = !showMirrorEdit }) {
+                    Text(if (showMirrorEdit) "收起" else if (state.mirrorUrl.isBlank()) "设置" else "修改")
+                }
+            }
+            if (showMirrorEdit) {
+                var mirrorDraft by remember(showMirrorEdit) { mutableStateOf(state.mirrorUrl) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = mirrorDraft,
+                        onValueChange = { mirrorDraft = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = { Text("镜像前缀，如 https://xxx/…/china（末尾省区名.map）") },
+                        shape = RoundedCornerShape(14.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    AssistChip(
+                        onClick = {
+                            vm.setMirror(mirrorDraft)
+                            showMirrorEdit = false
+                        },
+                        label = { Text("保存") },
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+            }
             if (state.updatesAvailable.isNotEmpty()) {
                 Text(
                     "有 ${state.updatesAvailable.size} 个已下载省区的底图出了新版，下面点「更新」即可（多段并行下载，中断会续传）",
