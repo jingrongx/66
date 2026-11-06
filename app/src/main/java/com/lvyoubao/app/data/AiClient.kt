@@ -376,19 +376,32 @@ class AiClient(private val settings: AiSettings) {
                 if (trimmed.isNotEmpty() && !trimmed.startsWith("{")) mode = 2
             }
             if (mode == 2) {
-                if (s.length > emitted) {
-                    sink.invoke(s.substring(emitted))
-                    emitted = s.length
+                // 流式阶段同步清 ** / 反引号（终稿 parseReply 还会全量清一遍），避免星号在生成中一闪而过
+                val clean = stripStreamMarkdown(s)
+                if (clean.length > emitted) {
+                    sink.invoke(clean.substring(emitted))
+                    emitted = clean.length
                 }
                 return
             }
             // JSON 模式：answer 值可以未闭合（流式增长），贪婪匹配到当前末尾
             val m = ANSWER_FIELD.find(s) ?: return
             val raw = unescapeJson(m.groupValues[1])
-            if (raw.length > emitted) {
-                sink.invoke(raw.substring(emitted))
-                emitted = raw.length
+            val clean = stripStreamMarkdown(raw)
+            if (clean.length > emitted) {
+                sink.invoke(clean.substring(emitted))
+                emitted = clean.length
             }
+        }
+
+        /**
+         * 流式阶段的安全剥离：只清上下文无关的 ** 和反引号；末尾孤立的 * 可能与下一字符组成 **，
+         * 押着一个不发（前缀稳定，已发出的文字不会被改写）。行首 # 等交给终稿统一清理。
+         */
+        private fun stripStreamMarkdown(s: String): String {
+            var t = s.replace("**", "").replace("`", "")
+            if (t.endsWith("*")) t = t.dropLast(1)
+            return t
         }
 
         companion object {
@@ -449,9 +462,11 @@ class AiClient(private val settings: AiSettings) {
             }.getOrNull()
             if (parsed != null && (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() })) {
                 return parsed.copy(
-                    answer = parsed.answer.trim(),
-                    steps = parsed.steps.map { it.trim() }.filter { it.isNotEmpty() },
-                    action = parsed.action?.trim()?.takeIf { it.isNotEmpty() && !it.equals("null", true) },
+                    answer = stripMarkdown(parsed.answer.trim()),
+                    steps = parsed.steps.map { stripMarkdown(it.trim()) }.filter { it.isNotEmpty() },
+                    action = parsed.action?.trim()
+                        ?.takeIf { it.isNotEmpty() && !it.equals("null", true) }
+                        ?.let { stripMarkdown(it) },
                     map = normalizeMapIntent(parsed.map),
                 )
             }
@@ -483,8 +498,8 @@ class AiClient(private val settings: AiSettings) {
                 map = bareIntent,
             )
         }
-        // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答，交给规则校验层标记
-        return AssistantReply(answer = content.trim())
+        // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答（同样清 Markdown），交给规则校验层标记
+        return AssistantReply(answer = stripMarkdown(content.trim()))
     }
 
     /** map 意图归一：route 要有终点、place 要有关键词，中英写法统一成 place/route */
@@ -539,9 +554,11 @@ class AiClient(private val settings: AiSettings) {
             } else null
         }
         return AssistantReply(
-            answer = unescapeJson(answer).trim(),
-            steps = steps,
-            action = action?.let { unescapeJson(it).trim().takeIf { s -> s.isNotEmpty() && !s.equals("null", true) } },
+            answer = stripMarkdown(unescapeJson(answer).trim()),
+            steps = steps.map { stripMarkdown(unescapeJson(it)) }.filter { it.isNotEmpty() },
+            action = action?.let {
+                stripMarkdown(unescapeJson(it)).trim().takeIf { s -> s.isNotEmpty() && !s.equals("null", true) }
+            },
             map = normalizeMapIntent(mapIntent),
         )
     }
@@ -600,6 +617,22 @@ class AiClient(private val settings: AiSettings) {
             - 地点名要规范完整（用官方名称，不要写"那个博物馆"），宁缺毋滥：拿不准就别输出 map
             - map 字段必须和 answer/steps 一起输出，绝不允许只输出一段 map JSON、也绝不允许把 JSON 当回答正文；用户看不到 JSON，只看得到 answer 的中文
         """.trimIndent()
+
+        /**
+         * 清掉模型输出里的 Markdown 痕迹：星号加粗、下划线加粗、反引号代码、三反引号代码块、
+         * 行首井号标题、行首星号和圆点列表符。
+         * 界面卡片是纯文本渲染，星号井号原样摆出来只会碍眼；语音播报同样不该读这些符号。
+         */
+        internal fun stripMarkdown(s: String): String {
+            var t = s
+                .replace("```", "")
+                .replace("**", "")
+                .replace("__", "")
+                .replace("`", "")
+            t = t.replace(Regex("(?m)^#{1,6} +"), "")      // 行首标题井号（# 后必须带空格，#话题标签 不受影响）
+            t = t.replace(Regex("(?m)^[ \\t]*[*•][ \\t]+"), "") // 行首圆点/星号列表符
+            return t.trim()
+        }
 
         /**
          * 回答详略指令（设置页可选 简洁/中等/详尽，默认简洁）。
