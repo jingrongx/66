@@ -127,11 +127,6 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     /** 顶部「自动播报」开关：打开后每条新回答自动朗读 */
     fun setAutoSpeak(value: Boolean) = updateSettings { it.copy(autoSpeak = value) }
 
-    /** 进长辈模式默认打开自动播报（语音优先），用户仍可随时在顶部关掉 */
-    fun setElderMode(value: Boolean) = updateSettings {
-        it.copy(elderMode = value, autoSpeak = if (value) true else it.autoSpeak)
-    }
-
     private fun updateSettings(transform: (AiSettings) -> AiSettings) {
         viewModelScope.launch { repo.save(transform(settings.value)) }
     }
@@ -448,7 +443,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     companion object {
         /** 天气类问题（强制注入专业气象数据） */
         val WEATHER_INTENT = Regex("天气|下雨|下雪|降雪|降雨|天晴|放晴|转晴|晴不晴|气温|温度|几度|冷不冷|热不热|穿什么|带伞|雨伞|刮风|风力|风速|湿度|降水")
-        /** 拼一条消息的可朗读文本（回答 + 要点 + 建议），会话页与长辈模式共用 */
+        /** 拼一条消息的可朗读文本（回答 + 要点 + 建议），会话页与大字模式共用 */
         fun speakableText(message: SessionMessage): String = buildString {
             append(message.text)
             message.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }

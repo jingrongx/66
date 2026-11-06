@@ -24,7 +24,7 @@ object CloudTts {
     private const val ENDPOINT = "https://api.siliconflow.cn/v1/audio/speech"
     private const val MODEL = "FunAudioLLM/CosyVoice2-0.5B"
 
-    /** 预设沉稳女声，吐字清楚，长辈听得清 */
+    /** 预设沉稳女声，吐字清楚，听得清 */
     private const val VOICE = "speech:anna"
 
     /** 单次合成上限（字符），与 TtsPlayer 分段大小匹配 */

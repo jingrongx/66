@@ -116,7 +116,7 @@ private data class NavState(
 fun RouteMapCard(
     card: MapCardData,
     app: TravelApp,
-    elder: Boolean = false,
+    largeText: Boolean = false,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -171,7 +171,7 @@ fun RouteMapCard(
     var lastMeDrawn by remember { mutableStateOf<NavigationTracker.Fix?>(null) }
     var followZoomed by remember { mutableStateOf(false) }
 
-    val big = elder
+    val big = largeText
 
     // ---- 路线查询 ----
     suspend fun resolveFrom(): Pair<Double, Double> {
@@ -640,7 +640,7 @@ fun RouteMapCard(
                     FilterChip(
                         selected = mode == m,
                         onClick = { switchMode(m) },
-                        // 长辈模式大字不再挤默认 32dp 高的 chip
+                        // 大字模式大字不再挤默认 32dp 高的 chip
                         modifier = if (big) Modifier.height(44.dp) else Modifier,
                         label = { Text("${MODE_EMOJI[m]}${m.label}", fontSize = if (big) 18.sp else 14.sp) },
                     )
@@ -709,7 +709,7 @@ fun RouteMapCard(
                     Button(
                         onClick = { startNavigation() },
                         enabled = currentPlan != null || card.kind == "place",
-                        // 同排按钮统一 48dp（长辈 56dp）、同一字号，主按钮加粗
+                        // 同排按钮统一 48dp（大字模式 56dp）、同一字号，主按钮加粗
                         modifier = Modifier.height(if (big) 56.dp else 48.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("开始导航", fontSize = if (big) 20.sp else 15.sp, fontWeight = FontWeight.Bold) }
@@ -729,7 +729,7 @@ fun RouteMapCard(
                         Text(
                             if (voiceOn) "🔊 播报中" else "🔇 已静音",
                             fontSize = if (big) 20.sp else 15.sp,
-                            // 高度与同排 48dp 按钮对齐（长辈 56dp），不再靠 padding 拼出 38dp 矮按钮
+                            // 高度与同排 48dp 按钮对齐（大字模式 56dp），不再靠 padding 拼出 38dp 矮按钮
                             modifier = Modifier
                                 .heightIn(min = if (big) 56.dp else 48.dp)
                                 .padding(horizontal = 14.dp)
@@ -868,7 +868,7 @@ fun RouteMapCard(
                                     }
                                     Text(
                                         headline,
-                                        // 与内嵌导航横幅同规格（17/13，长辈 24/19），同一信息两处一个口径
+                                        // 与内嵌导航横幅同规格（17/13，大字模式 24/19），同一信息两处一个口径
                                         fontSize = if (big) 24.sp else 17.sp,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1,

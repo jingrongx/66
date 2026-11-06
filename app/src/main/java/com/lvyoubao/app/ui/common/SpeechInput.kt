@@ -47,7 +47,7 @@ object SpeechInput {
 
     /**
      * 按住说话模式下用户自己控制录音时长，这里只留 5 分钟的保险上限（防止忘记松手把存储录满）。
-     * 老的 30 秒上限会把长辈的长话/慢话硬生生截断。
+     * 老的 30 秒上限会把长话/慢话硬生生截断。
      */
     private const val MAX_RECORD_MS = 300_000
 
@@ -72,7 +72,7 @@ object SpeechInput {
         return first
     }
 
-    /** 系统识别给长辈的宽松停顿参数：至少说 15 秒，静音 8 秒才算说完（很多 ROM 默认静音 1~2 秒就抢着断句） */
+    /** 系统识别给大字模式的宽松停顿参数：至少说 15 秒，静音 8 秒才算说完（很多 ROM 默认静音 1~2 秒就抢着断句） */
     const val PAUSE_HINT_MS = 8_000L
     const val MIN_SPEECH_MS = 15_000L
 

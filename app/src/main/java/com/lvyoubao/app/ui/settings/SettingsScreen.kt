@@ -375,17 +375,20 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("长辈模式", style = MaterialTheme.typography.bodyLarge)
+                        Text("大字模式", style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            "超大字体 · 语音优先 · 回答自动朗读",
+                            "超大字体 · 语音优先 · 回答自动朗读 · 启动默认进大字模式",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     androidx.compose.material3.Switch(
-                        checked = state.draft.elderMode,
+                        checked = state.draft.largeTextMode,
                         onCheckedChange = { checked ->
-                            vm.updateDraft { it.copy(elderMode = checked) }
+                            // 打开时联动打开自动播报（语音优先）；关闭不动自动播报，尊重用户特意关过的选择
+                            vm.updateDraft {
+                                it.copy(largeTextMode = checked, autoSpeak = if (checked) true else it.autoSpeak)
+                            }
                             vm.save(onSaved = {})
                         },
                     )

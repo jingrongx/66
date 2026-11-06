@@ -24,7 +24,8 @@ class SettingsRepository(private val context: Context) {
         val amapKey = stringPreferencesKey("amap_key")
         val asrKey = stringPreferencesKey("asr_key")
         val dialectMode = booleanPreferencesKey("dialect_mode")
-        val elderMode = booleanPreferencesKey("elder_mode")
+        // 存储键沿用旧名 elder_mode：应用内叫法已改「大字模式」，但用户已保存的开关不丢
+        val largeTextMode = booleanPreferencesKey("elder_mode")
         val autoSpeak = booleanPreferencesKey("auto_speak")
     }
 
@@ -41,7 +42,7 @@ class SettingsRepository(private val context: Context) {
             amapKey = p[Keys.amapKey] ?: "",
             asrKey = p[Keys.asrKey] ?: "",
             dialectMode = p[Keys.dialectMode] ?: false,
-            elderMode = p[Keys.elderMode] ?: false,
+            largeTextMode = p[Keys.largeTextMode] ?: false,
             autoSpeak = p[Keys.autoSpeak] ?: false,
         )
     }
@@ -58,7 +59,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.amapKey] = settings.amapKey
             p[Keys.asrKey] = settings.asrKey
             p[Keys.dialectMode] = settings.dialectMode
-            p[Keys.elderMode] = settings.elderMode
+            p[Keys.largeTextMode] = settings.largeTextMode
             p[Keys.autoSpeak] = settings.autoSpeak
         }
     }

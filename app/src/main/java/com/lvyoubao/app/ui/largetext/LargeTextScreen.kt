@@ -1,4 +1,4 @@
-package com.lvyoubao.app.ui.elder
+package com.lvyoubao.app.ui.largetext
 
 import android.Manifest
 import androidx.activity.compose.BackHandler
@@ -73,14 +73,17 @@ import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
+import com.lvyoubao.app.ui.settings.SettingsScreen
+import com.lvyoubao.app.ui.update.UpdateScreen
+import com.lvyoubao.app.ui.update.UpdateViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** 长辈模式的大字号常用问法 */
-private val ElderSuggestions = listOf(
+/** 大字模式的大字号常用问法 */
+private val LargeTextSuggestions = listOf(
     "附近有啥好吃的？",
     "今天天气怎么样？",
     "附近哪能坐下歇会？",
@@ -88,18 +91,20 @@ private val ElderSuggestions = listOf(
 )
 
 /**
- * 长辈模式（v0.8.0 重构）：
+ * 大字模式（v0.8.0 会话流重构，v0.8.6 改名并接管启动默认模式）：
  * - 会话流：整段对话像微信一样从头到尾摆出来，不再只显示最后一张卡片；
  * - 底部操作区：固定在屏幕底部、永远可见，卡片/流式输出再长也遮不住按钮；
  * - 按住说话：按住录音、松手就记下来，可以连说好几段，说多少记多少，
  *   全部说完再点旁边的「发送」才发出去（充分的停顿时间由握住时长自己决定）；
  * - 拍照提问：拍照/相册的图挂在草稿上，跟语音一起发送；
  * - 语音通话：全屏通话界面，按住说话松手即问，回答自动朗读，像打电话一样聊；
- * - 对话历史：大字号列表，点开切换、可删、可新建。
+ * - 对话历史：大字号列表，点开切换、可删、可新建；
+ * - 右上角「设置」进设置页（家人帮着配 AI/大字模式开关都在这），「退出」直接退出应用；
+ * - 是否默认进入大字模式由设置里的开关决定（设置里关了，下次启动就是普通模式）。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
+fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     val vm: ChatViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { ChatViewModel(app) } } },
     )
@@ -116,22 +121,31 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
 
     var showHistory by remember { mutableStateOf(false) }
     var showCall by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showUpdate by remember { mutableStateOf(false) }
     var listening by remember { mutableStateOf(false) } // 转写/系统识别进行中
     var recording by remember { mutableStateOf<SpeechInput.Recording?>(null) }
     var recordStartTs by remember { mutableStateOf(0L) }
     var recordTick by remember { mutableIntStateOf(0) } // 录音秒数（每秒自增驱动刷新）
 
+    val updateVm: UpdateViewModel = viewModel(
+        factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
+    )
+
     BackHandler {
         when {
+            showUpdate -> showUpdate = false
+            showSettings -> showSettings = false
             showHistory -> showHistory = false
             showCall -> {
                 TtsPlayer.stop()
                 showCall = false
             }
             else -> {
+                // 大字模式是本应用的默认模式：返回键/退出键都是退出应用（回到桌面），
+                // 不再切回普通模式——模式切换只认设置里的「大字模式」开关
                 TtsPlayer.stop()
-                vm.setElderMode(false)
-                onExit()
+                onExitApp()
             }
         }
     }
@@ -253,11 +267,12 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
     var spokenTs by remember { mutableStateOf(0L) }
     val ttsState by TtsPlayer.state.collectAsState()
-    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showCall) {
+    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showCall, showSettings, showUpdate) {
         val msg = lastAssistant ?: return@LaunchedEffect
-        // 只读 20 秒内的新回答：切历史/重进不再把旧消息复读一遍
+        // 只读 20 秒内的新回答：切历史/重进不再把旧消息复读一遍；停在设置/更新页时也先别出声
         val fresh = System.currentTimeMillis() - msg.ts < 20_000
-        if ((showCall || settings.autoSpeak) && msg.ts != spokenTs && fresh) {
+        val overlayOpen = showSettings || showUpdate
+        if ((showCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         }
@@ -278,7 +293,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
-        // ---------- 头部：标题 + 退出 ----------
+        // ---------- 头部：标题 + 设置 + 退出 ----------
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -286,16 +301,27 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "旅游宝 · 长辈模式",
-                fontSize = 24.sp,
+                "旅游宝 · 大字模式",
+                fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f),
             )
+            // 设置：家人帮着配的地方（AI、大字模式开关都在设置里），全屏盖在大字模式上
+            Button(
+                onClick = {
+                    keyboard?.hide()
+                    showSettings = true
+                },
+                modifier = Modifier.height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp),
+            ) { Text("设置", fontSize = 17.sp, maxLines = 1) }
+            Spacer(Modifier.width(8.dp))
+            // 退出：直接退出应用回桌面，不再切模式（模式切换只认设置里的「大字模式」开关）
             Button(
                 onClick = {
                     TtsPlayer.stop()
-                    vm.setElderMode(false)
-                    onExit()
+                    onExitApp()
                 },
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
@@ -359,13 +385,13 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            ElderSuggestions.forEach { suggestion ->
+                            LargeTextSuggestions.forEach { suggestion ->
                                 AssistChip(
                                     onClick = {
                                         vm.updateQuestion(suggestion)
                                         vm.send(context)
                                     },
-                                    // 长辈模式 chip 加高到 44dp，19sp 字号不再挤在默认 32dp 的框里
+                                    // 大字模式 chip 加高到 44dp，19sp 字号不再挤在默认 32dp 的框里
                                     modifier = Modifier.height(44.dp),
                                     label = { Text(suggestion, fontSize = 19.sp) },
                                 )
@@ -376,8 +402,8 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
             }
             items(messages) { message ->
                 when (message.role) {
-                    "user" -> ElderUserBubble(message)
-                    else -> ElderAssistantCard(
+                    "user" -> LargeTextUserBubble(message)
+                    else -> LargeTextAssistantCard(
                         message = message,
                         app = app,
                         ttsActive = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
@@ -389,7 +415,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
                 }
             }
             if (state.sending) {
-                item { ElderStreamingCard(streamState) }
+                item { LargeTextStreamingCard(streamState) }
             }
         }
 
@@ -572,7 +598,7 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
 
     // ---------- 对话历史（全屏大字号列表） ----------
     if (showHistory) {
-        ElderHistoryOverlay(
+        LargeTextHistoryOverlay(
             sessions = sessionList,
             currentId = currentSessionId,
             onPick = { id -> vm.switchSession(id) { showHistory = false } },
@@ -600,11 +626,22 @@ fun ElderScreen(app: TravelApp, onExit: () -> Unit) {
             },
         )
     }
+
+    // ---------- 设置 / 更新（家人帮忙配置时全屏盖在大字模式上） ----------
+    if (showUpdate) {
+        UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
+    } else if (showSettings) {
+        SettingsScreen(
+            onClose = { showSettings = false },
+            onOpenUpdate = { showUpdate = true },
+            app = app,
+        )
+    }
 }
 
 /** 用户消息：右侧大气泡，超大字，长按可选中复制 */
 @Composable
-private fun ElderUserBubble(message: SessionMessage) {
+private fun LargeTextUserBubble(message: SessionMessage) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
@@ -628,7 +665,7 @@ private fun ElderUserBubble(message: SessionMessage) {
 
 /** 助手卡片：超大字回答 + 要点 + 地图卡 + 再读一遍/收藏 */
 @Composable
-private fun ElderAssistantCard(
+private fun LargeTextAssistantCard(
     message: SessionMessage,
     app: TravelApp,
     ttsActive: Boolean,
@@ -652,7 +689,7 @@ private fun ElderAssistantCard(
         }
         message.mapCard?.let { card ->
             Spacer(Modifier.height(8.dp))
-            RouteMapCard(card = card, app = app, elder = true)
+            RouteMapCard(card = card, app = app, largeText = true)
         }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -672,7 +709,7 @@ private fun ElderAssistantCard(
 
 /** 生成中的回答：实时流式正文，超大字，可选中复制 */
 @Composable
-private fun ElderStreamingCard(streamState: ChatViewModel.StreamState?) {
+private fun LargeTextStreamingCard(streamState: ChatViewModel.StreamState?) {
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         androidx.compose.foundation.text.selection.SelectionContainer {
             Column(Modifier.padding(18.dp)) {
@@ -702,7 +739,7 @@ private fun ElderStreamingCard(streamState: ChatViewModel.StreamState?) {
 
 /** 对话历史：全屏列表，大字号，点了就切过去 */
 @Composable
-private fun ElderHistoryOverlay(
+private fun LargeTextHistoryOverlay(
     sessions: List<ChatSession>,
     currentId: String?,
     onPick: (String) -> Unit,

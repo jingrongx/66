@@ -14,22 +14,22 @@ import androidx.compose.ui.unit.sp
 
 /**
  * 全局尺寸令牌：一流界面的关键是全应用只有一套尺寸。
- * - 主按钮（每屏最想让人按的）：高 48dp、字 15sp Bold；长辈模式 56dp / 20sp Bold
- * - 次要按钮/TextButton：默认 40dp、字 14sp；长辈模式 52dp / 17sp
+ * - 主按钮（每屏最想让人按的）：高 48dp、字 15sp Bold；大字模式 56dp / 20sp Bold
+ * - 次要按钮/TextButton：默认 40dp、字 14sp；大字模式 52dp / 17sp
  * - 小图标钮统一 28dp（图标 16dp），不再 24/28/30/32/44 各写各的
  * - 最小辅助字号 12sp（labelSmall 全局抬到 12，不再出现 11sp 小字）
  */
 object AppDim {
     val btnPrimaryH = 48.dp
     val btnPrimaryFont = 15.sp
-    val btnElderH = 56.dp
-    val btnElderFont = 20.sp
-    val btnElderRowH = 52.dp
-    val btnElderRowFont = 17.sp
+    val btnLargeTextH = 56.dp
+    val btnLargeTextFont = 20.sp
+    val btnLargeTextRowH = 52.dp
+    val btnLargeTextRowFont = 17.sp
     val iconBtnSmall = 28.dp
     val iconSmall = 16.dp
     val capMin = 12.sp
-    val chipElderH = 44.dp
+    val chipLargeTextH = 44.dp
 }
 
 /** 字阶：在 M3 默认基础上只动小字档——labelSmall 11→12、labelMedium 12→13、bodySmall 12→13 */

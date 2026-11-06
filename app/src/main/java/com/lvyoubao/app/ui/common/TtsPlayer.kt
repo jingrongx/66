@@ -87,7 +87,7 @@ object TtsPlayer {
         val body = text.trim()
         if (body.isEmpty()) return
         // 同一段文本正在播/正在合成时，重复触发直接忽略。
-        // 两个页面（提问页/长辈模式）同时挂着自动播报、或开关翻转导致重复触发时，
+        // 两个页面（提问页/大字模式）同时挂着自动播报、或开关翻转导致重复触发时，
         // 若各自重启一遍，旧句被拦腰打断、新句从头读，听感就是“话赶话”。
         if ((_state.value is State.Loading || _state.value is State.Speaking) && body == currentText) return
         stop()

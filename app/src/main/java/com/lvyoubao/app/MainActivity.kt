@@ -24,7 +24,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.ui.ask.AskScreen
-import com.lvyoubao.app.ui.elder.ElderScreen
+import com.lvyoubao.app.ui.largetext.LargeTextScreen
 import com.lvyoubao.app.ui.map.MapScreen
 import com.lvyoubao.app.ui.memory.MemoryScreen
 import com.lvyoubao.app.ui.notes.NotesScreen
@@ -52,11 +52,13 @@ class MainActivity : ComponentActivity() {
                 // Surface 统一提供主题背景色和内容色（LocalContentColor）：
                 // 否则未显式指定颜色的标题/图标会用默认黑色，深色主题下不可读
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    if (appSettings.elderMode) {
-                        ElderScreen(app = app, onExit = {})
-                    } else {
-                        AppRoot(app)
-                    }
+                if (appSettings.largeTextMode) {
+                    // 大字模式是启动默认模式：设置里开着就直接进大字模式，关了就是普通模式；
+                    // 退出（按钮/返回键）= 退出应用，不再从这里切回普通模式
+                    LargeTextScreen(app = app, onExitApp = { finishAffinity() })
+                } else {
+                    AppRoot(app)
+                }
                 }
             }
         }
