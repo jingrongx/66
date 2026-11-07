@@ -29,6 +29,16 @@ class NoteStore(context: Context) {
     private val _notes = MutableStateFlow<List<QuickNote>>(emptyList())
     val notes: StateFlow<List<QuickNote>> = _notes.asStateFlow()
 
+    private var lastTs = 0L
+
+    /** 唯一递增时间戳：随手记页用 ts 做 LazyColumn key，同毫秒重复 key 会崩 */
+    private fun nextTs(): Long {
+        var t = System.currentTimeMillis()
+        if (t <= lastTs) t = lastTs + 1
+        lastTs = t
+        return t
+    }
+
     init {
         _notes.value = load()
     }
@@ -45,7 +55,7 @@ class NoteStore(context: Context) {
     suspend fun add(text: String, place: String = ""): QuickNote? {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return null
-        val note = QuickNote(ts = System.currentTimeMillis(), text = trimmed, place = place)
+        val note = QuickNote(ts = nextTs(), text = trimmed, place = place)
         mutex.withLock {
             _notes.value = (_notes.value + note).takeLast(MAX_NOTES)
             runCatching {

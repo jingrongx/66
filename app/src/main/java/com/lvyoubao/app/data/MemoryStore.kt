@@ -43,16 +43,54 @@ class MemoryStore(context: Context) {
     private val _entries = MutableStateFlow<List<MemoryEntry>>(emptyList())
     val entries: StateFlow<List<MemoryEntry>> = _entries.asStateFlow()
 
+    private var lastTs = 0L
+
+    /**
+     * 唯一递增时间戳：同毫秒内连写多条（画像总结一次合并十几条）会拿到相同 ts，
+     * 而我的记忆页用 ts 做 LazyColumn 的 key，重复 key 直接崩溃——必须保证单调唯一。
+     */
+    private fun nextTs(): Long {
+        var t = System.currentTimeMillis()
+        if (t <= lastTs) t = lastTs + 1
+        lastTs = t
+        return t
+    }
+
     init {
-        _entries.value = runCatching {
+        val loaded = runCatching {
             file.readLines().filter { it.isNotBlank() }
                 .mapNotNull { runCatching { json.decodeFromString<MemoryEntry>(it) }.getOrNull() }
         }.getOrDefault(emptyList())
+        // 修复历史数据：此前合并画像写入的条目可能带重复 ts（加载后立即重排并回写一次）
+        val repaired = dedupeTs(loaded)
+        _entries.value = repaired
+        if (repaired != loaded) persist()
+    }
+
+    /** 重复 ts 依序重排（首个保留原值，后续递增补位），返回修复后的列表 */
+    private fun dedupeTs(list: List<MemoryEntry>): List<MemoryEntry> {
+        if (list.size < 2) return list
+        val counts = HashMap<Long, Int>()
+        var max = list.maxOf { it.ts }
+        var changed = false
+        val out = list.map { e ->
+            val c = counts.getOrDefault(e.ts, 0)
+            if (c == 0) {
+                counts[e.ts] = 1
+                e
+            } else {
+                max += 1
+                changed = true
+                e.copy(ts = max)
+            }
+        }
+        lastTs = max
+        return if (changed) out else list
     }
 
     suspend fun add(kind: String, title: String, detail: String, source: String = "") = mutex.withLock {
         val entry = MemoryEntry(
-            ts = System.currentTimeMillis(),
+            ts = nextTs(),
             kind = kind,
             title = title.take(60),
             detail = detail.take(2000),
@@ -178,7 +216,7 @@ class MemoryStore(context: Context) {
         val toAdd = facts.asSequence()
             .filter { f -> keptTitles.none { sameFact(f, it) } }
             .distinct()
-            .map { MemoryEntry(now, MemoryEntry.PROFILE, it.take(60), "", "会话自动总结") }
+            .map { MemoryEntry(nextTs(), MemoryEntry.PROFILE, it.take(60), "", "会话自动总结") }
             .toList()
         if (toAdd.isEmpty() && kept.size == existing.size) return@withLock
         _entries.value = (kept + toAdd + _entries.value.filter { it.kind != MemoryEntry.PROFILE })

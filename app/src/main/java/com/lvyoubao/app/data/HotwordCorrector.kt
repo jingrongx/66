@@ -162,14 +162,28 @@ object HotwordCorrector {
     private var learnedLoaded = false
     private val learnedJson = Json { ignoreUnknownKeys = true }
 
-    /** 首次调用时从本地加载（应用私有目录 JSONL，最多 50 条，新的在前） */
+    /** 首次调用时从本地加载（应用私有目录 JSONL，最多 50 条，新的在前）；重复 ts 加载时修复（管理页用 ts 做 key） */
     fun loadLearnedFixes(context: Context) {
         if (learnedLoaded) return
         learnedLoaded = true
-        learnedFixes = runCatching {
+        val loaded = runCatching {
             File(context.filesDir, LEARNED_FILE).readLines().filter { it.isNotBlank() }
                 .mapNotNull { runCatching { learnedJson.decodeFromString<LearnedFix>(it) }.getOrNull() }
         }.getOrDefault(emptyList())
+        val counts = HashMap<Long, Int>()
+        var max = loaded.maxOfOrNull { it.ts } ?: 0L
+        lastLearnedTs = max
+        learnedFixes = loaded.map { e ->
+            val c = counts.getOrDefault(e.ts, 0)
+            if (c == 0) {
+                counts[e.ts] = 1
+                e
+            } else {
+                max += 1
+                lastLearnedTs = max
+                e.copy(ts = max)
+            }
+        }
     }
 
     /**
@@ -185,9 +199,20 @@ object HotwordCorrector {
         if (r.length > w.length * 2 || w.length > r.length * 2) return
         loadLearnedFixes(context)
         if (learnedFixes.any { it.wrong == w && it.right == r }) return
-        learnedFixes = (listOf(LearnedFix(w, r, System.currentTimeMillis())) + learnedFixes).take(50)
+        learnedFixes = (listOf(LearnedFix(w, r, nextLearnedTs())) + learnedFixes).take(50)
         persistLearnedFixes(context)
     }
+
+    /** 纠正记录页用 ts 做 key：同毫秒两条会重复 key 崩溃，保证唯一递增 */
+    private fun nextLearnedTs(): Long {
+        var t = System.currentTimeMillis()
+        if (t <= lastLearnedTs) t = lastLearnedTs + 1
+        lastLearnedTs = t
+        return t
+    }
+
+    @Volatile
+    private var lastLearnedTs = 0L
 
     /** 注入 AI 纠错提示词的纠正记录块（新的在前，取 8 条） */
     fun learnedFixBlock(limit: Int = 8): String {
