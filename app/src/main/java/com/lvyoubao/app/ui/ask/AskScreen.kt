@@ -104,6 +104,7 @@ import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
+import com.lvyoubao.app.ui.update.UpdateReadyDialog
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -246,6 +247,14 @@ fun AskScreen(
 
     DisposableEffect(Unit) {
         onDispose { recording?.let { SpeechInput.cancelRecording(it) } }
+    }
+
+    // 自动更新就绪弹窗：新版包后台下载完成就弹「安装」，点稍后本轮不再打扰
+    val autoUpdateState by com.lvyoubao.app.data.AutoUpdater.state.collectAsState()
+    if (autoUpdateState.downloadedApk != null && autoUpdateState.release != null &&
+        autoUpdateState.dismissedTag != autoUpdateState.release?.tag_name
+    ) {
+        UpdateReadyDialog(autoUpdateState)
     }
 
     var searchQuery by remember { mutableStateOf("") }

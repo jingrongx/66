@@ -75,6 +75,7 @@ import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
 import com.lvyoubao.app.ui.settings.SettingsScreen
+import com.lvyoubao.app.ui.update.UpdateReadyDialog
 import com.lvyoubao.app.ui.update.UpdateScreen
 import com.lvyoubao.app.ui.update.UpdateViewModel
 import java.text.SimpleDateFormat
@@ -657,6 +658,14 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 showCall = false
             },
         )
+    }
+
+    // 自动更新就绪弹窗：新版包后台下载完成就弹「安装」；更新页打开时不重复弹
+    val autoUpdateState by com.lvyoubao.app.data.AutoUpdater.state.collectAsState()
+    if (!showUpdate && autoUpdateState.downloadedApk != null && autoUpdateState.release != null &&
+        autoUpdateState.dismissedTag != autoUpdateState.release?.tag_name
+    ) {
+        UpdateReadyDialog(autoUpdateState)
     }
 
     // ---------- 设置 / 更新（家人帮忙配置时全屏盖在大字模式上） ----------

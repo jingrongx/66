@@ -1,6 +1,9 @@
 package com.lvyoubao.app.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -11,7 +14,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 应用内更新：检查 GitHub Releases + 下载 APK。
- * 国内网络下代理优先：按 [proxies] 顺序逐个尝试（前缀式加速镜像），末尾空串表示直连。
+ * 国内网络下代理优先，且优先走【最快的】线路：并发探测所有候选的首包延迟，
+ * 可用的按延迟升序排，探测失败的保持原顺序垫底，下载/检查都先打最快的线路（见 [fastFirst]）。
  *
  * 检查策略（两层，都是匿名可读）：
  *  1) API：api.github.com/repos/<repo>/releases/latest
@@ -39,6 +43,44 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    /** 探测专用：短超时，只为了量「哪条线路先应答」 */
+    private val probeClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(6, TimeUnit.SECONDS)
+        .build()
+
+    /**
+     * 国内优先走最快的线路：并发探测目标地址在各候选线路上的应答延迟，
+     * 成功的按延迟升序排前面，失败的按原顺序垫底；探测异常不影响兜底顺序。
+     */
+    private suspend fun fastFirst(target: String, headers: Map<String, String> = emptyMap(), range: Boolean = false): List<String> =
+        coroutineScope {
+            proxies.map { proxy ->
+                async {
+                    val url = if (proxy.isEmpty()) target else "$proxy/$target"
+                    val started = System.currentTimeMillis()
+                    var ok = false
+                    try {
+                        val rb = Request.Builder().url(url).header("User-Agent", "lvyoubao-app")
+                        headers.forEach { (k, v) -> rb.header(k, v) }
+                        if (range) rb.header("Range", "bytes=0-0")
+                        probeClient.newCall(rb.get().build()).execute().use { resp ->
+                            ok = resp.isSuccessful
+                        }
+                    } catch (_: IOException) {
+                        ok = false
+                    }
+                    Probe(proxy, ok, System.currentTimeMillis() - started)
+                }
+            }.awaitAll().let { results ->
+                results.filter { it.ok }.sortedBy { it.ms }.map { it.proxy } +
+                    results.filter { !it.ok }.map { it.proxy }
+            }
+        }
+
+    private data class Probe(val proxy: String, val ok: Boolean, val ms: Long)
+
     suspend fun latestRelease(): Result<ReleaseInfo> = withContext(Dispatchers.IO) {
         guard {
             val viaApi = runCatching { checkViaApi() }.getOrNull()
@@ -49,9 +91,14 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
         }
     }
 
-    private fun checkViaApi(): ReleaseInfo {
+    private suspend fun checkViaApi(): ReleaseInfo {
         var sawReal404 = false
-        for (proxy in proxies) {
+        // 探测 api 目标本身：哪条线路真能应答 API（镜像多数不转发 api.github.com，探测失败自动垫底）
+        val ordered = fastFirst(
+            "https://api.github.com/repos/$repo/releases/latest",
+            headers = mapOf("Accept" to "application/vnd.github+json"),
+        )
+        for (proxy in ordered) {
             val target = "https://api.github.com/repos/$repo/releases/latest"
             val url = if (proxy.isEmpty()) target else "$proxy/$target"
             try {
@@ -80,9 +127,10 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
     }
 
     /** 兜底：atom feed 拿最新 tag，再从 expanded_assets 抓 APK 下载链接 */
-    private fun checkViaAtom(): ReleaseInfo {
+    private suspend fun checkViaAtom(): ReleaseInfo {
         var lastError: Exception? = null
-        for (proxy in proxies) {
+        val ordered = fastFirst("https://github.com/$repo/releases.atom")
+        for (proxy in ordered) {
             try {
                 val feedUrl = "https://github.com/$repo/releases.atom"
                 val feed = fetchText(if (proxy.isEmpty()) feedUrl else "$proxy/$feedUrl")
@@ -93,8 +141,8 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
                     .find(firstEntry)?.groupValues?.get(1)
                     ?: throw ApiException("更新源解析失败")
                 // 资产解析：优先按 tag 走 API（部分镜像可转发 api.github.com），失败再试 expanded_assets
-                val info = runCatching { fetchReleaseByTag(tag) }.getOrNull()
-                    ?: runCatching { fetchAssetsFromExpandedPage(tag) }.getOrNull()
+                val info = runCatching { fetchReleaseByTag(tag, ordered) }.getOrNull()
+                    ?: runCatching { fetchAssetsFromExpandedPage(tag, ordered) }.getOrNull()
                 val notes = Regex("<content[^>]*>(.*?)</content>", RegexOption.DOT_MATCHES_ALL)
                     .find(firstEntry)?.groupValues?.get(1)
                     ?.let { html ->
@@ -117,9 +165,9 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
         throw lastError ?: ApiException("无法连接更新服务")
     }
 
-    private fun fetchReleaseByTag(tag: String): ReleaseInfo {
+    private suspend fun fetchReleaseByTag(tag: String, ordered: List<String>): ReleaseInfo {
         var lastError: Exception? = null
-        for (proxy in proxies) {
+        for (proxy in ordered) {
             try {
                 val target = "https://api.github.com/repos/$repo/releases/tags/$tag"
                 val url = if (proxy.isEmpty()) target else "$proxy/$target"
@@ -132,9 +180,9 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
         throw lastError ?: IOException("无法获取版本详情")
     }
 
-    private fun fetchAssetsFromExpandedPage(tag: String): ReleaseInfo {
+    private suspend fun fetchAssetsFromExpandedPage(tag: String, ordered: List<String>): ReleaseInfo {
         var lastError: Exception? = null
-        for (proxy in proxies) {
+        for (proxy in ordered) {
             try {
                 val assetsUrl = "https://github.com/$repo/expanded_assets/$tag"
                 val html = fetchText(if (proxy.isEmpty()) assetsUrl else "$proxy/$assetsUrl")
@@ -172,7 +220,9 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
         guard {
             destDir.mkdirs()
             val dest = File(destDir, asset.name)
-            for (proxy in proxies) {
+            // 下载前对真实 APK 地址做 Range 探测排序：谁先吐字节谁先下，失败垫底
+            val ordered = fastFirst(asset.browser_download_url, range = true)
+            for (proxy in ordered) {
                 val url = if (proxy.isEmpty()) asset.browser_download_url else "$proxy/${asset.browser_download_url}"
                 try {
                     val request = Request.Builder()
