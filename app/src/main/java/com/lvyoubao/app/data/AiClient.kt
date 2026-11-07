@@ -470,6 +470,12 @@ class AiClient(private val settings: AiSettings) {
         val start = content.indexOf('{')
         val end = content.lastIndexOf('}')
         if (start in 0 until end) {
+            // JSON 信封外面的正文：模型偶尔违规——answer 只写一句总述，把表格/清单/长正文附在
+            // JSON 后面（或前面）。原样捡回来并进回答，绝不静默丢弃——丢掉的恰恰是用户要的正文
+            val outside = listOf(content.substring(0, start), content.substring(end + 1))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .joinToString("\n\n")
             val parsed = runCatching {
                 json.decodeFromString<AssistantReply>(content.substring(start, end + 1))
             }.getOrNull()
@@ -480,7 +486,7 @@ class AiClient(private val settings: AiSettings) {
                 val mapOk = normalizeMapIntent(parsed.map)
                 if (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() }) {
                     return parsed.copy(
-                        answer = stripMarkdown(parsed.answer.trim()),
+                        answer = mergeWithOutside(stripMarkdown(parsed.answer.trim()), outside),
                         steps = parsed.steps.map { stripMarkdown(it.trim()) }.filter { it.isNotEmpty() },
                         action = cleanAction,
                         map = mapOk,
@@ -493,18 +499,20 @@ class AiClient(private val settings: AiSettings) {
                     val where = mapOk?.destination?.ifBlank { mapOk.keyword }.orEmpty()
                     return if (where.isNotBlank()) {
                         AssistantReply(
-                            answer = "帮你把「$where」放到地图上了，下方可以直接看位置和路线。",
+                            answer = mergeWithOutside("帮你把「$where」放到地图上了，下方可以直接看位置和路线。", outside),
                             action = cleanAction,
                             map = mapOk,
                         )
                     } else {
-                        AssistantReply(answer = cleanAction.orEmpty(), action = null, map = mapOk)
+                        AssistantReply(answer = mergeWithOutside(cleanAction.orEmpty(), outside), action = null, map = mapOk)
                     }
                 }
             }
             // 严格解析失败：模型的 JSON 字符串值里常有未转义引号（如 搜"赣运"），
             // 按字段边界把 answer/steps/action/map 抠出来，绝不把整段裸 JSON 当回答摆给用户
-            lenientReply(content.substring(start, end + 1))?.let { return it }
+            lenientReply(content.substring(start, end + 1))?.let {
+                return it.copy(answer = mergeWithOutside(it.answer, outside))
+            }
         }
         // 模型把 map 意图 JSON 单独当回答输出（如 {"type":"place","keyword":"麻姑山"}）：
         // 识别出来转成真正的地图意图，别把裸 JSON 显示给用户
@@ -532,6 +540,14 @@ class AiClient(private val settings: AiSettings) {
         }
         // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答（同样清 Markdown），交给规则校验层标记
         return AssistantReply(answer = stripMarkdown(content.trim()))
+    }
+
+    /** 信封外的正文捡回来并进 answer（表格/长正文不再被静默丢弃） */
+    private fun mergeWithOutside(answer: String, outside: String): String {
+        val merged = stripMarkdown(outside.trim())
+        if (merged.isEmpty()) return answer
+        if (answer.isEmpty()) return merged
+        return "$answer\n\n$merged"
     }
 
     /** map 意图归一：route 要有终点、place 要有关键词，中英写法统一成 place/route */
@@ -655,8 +671,11 @@ class AiClient(private val settings: AiSettings) {
             3. 涉及地点位置（附近吃的/歇脚/厕所/药店/加油站在哪、某地在哪、从A到B怎么走、回家的路）：必须先调用 search_poi / get_route 查真实数据再回答，绝不回答"没法实时确认"，也绝不让用户自己去地图搜；answer 只用 1-2 句给结论（最近的名字+距离/步行时间），steps 留空，并输出 map 字段。绝不要写"打开地图APP→点搜索→筛距离"这类使用教程——界面会直接在回答下方摆出地图卡，用户点「去这里」就开始导航，教程对他们毫无用处。
             4. 不确定的数字绝不编造：优先使用搜索结果或工具返回的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。
             5. 情境里给了「常用地址·家的地址」时，问回家/回家的路怎么走：直接输出 map（type=route，origin 留空=当前位置，destination 填家的地址），answer 一句话报距离和预计时间；绝不要反问"回哪"，也不要联想成歌名/游戏/影视。
+            6. 指代与改写任务（"改成白话文""翻译一下""解释一下上面""把表格里的英文改成中文"这类）：说的就是上文最近一条相关内容（刚给过的诗词/表格/文段），直接对它执行改写/翻译/解释，把完整结果放进 answer；绝不解释术语本身（用户说"改成白话文"是要你改写，不是问"白话文"是什么词），也绝不让用户重发原文。
             以 json 格式输出：{"answer": "一句话总结，不超过2句", "steps": ["要点1", "要点2", ...]，快问快答时为空数组, "action": "一句话的下一步动作建议，没有则为 null"}
             注意：answer 字段必须放在 JSON 最前面（用户边生成边看，answer 先出才有流式体验）
+            注意：回答正文里绝不出现 answer/steps/action/map 这些字段名，也不解释输出格式或回答档位（"steps 留空""按你的简洁档"这类说明）——那些是给机器看的约定，用户看不懂；照常把回答写完整就行。
+            注意：表格、清单、长正文一律放进 answer 字段（answer 不限长度，可以多行多段），整个回复只输出这一个 JSON 信封，绝不在 JSON 前后附加正文、表格或代码块，也绝不输出第二个 JSON。
             另外，当回答涉及具体地点时（某景点/场馆/店铺的位置、怎么去、从A到B、值得一去的去处），加一个 "map" 字段让界面在回答下方配一张地图：
             {"type": "place" 或 "route", "keyword": "地点关键词", "origin": "起点名", "destination": "目的地名"}
             - 讲某个地方在哪/介绍某地：type=place，keyword 填规范地点名（如"汤显祖纪念馆"）
@@ -669,7 +688,8 @@ class AiClient(private val settings: AiSettings) {
 
         /**
          * 清掉模型输出里的 Markdown 痕迹：星号加粗、下划线加粗、反引号代码、三反引号代码块、
-         * 行首井号标题、行首星号和圆点列表符。
+         * 行首井号标题、行首星号和圆点列表符；Markdown 表格转成全角竖线分隔的可读行（分隔行去掉）；
+         * 模型偶尔把格式约定说漏进回答（如"steps 留空（按你的简洁档）。"）也一并摘掉。
          * 界面卡片是纯文本渲染，星号井号原样摆出来只会碍眼；语音播报同样不该读这些符号。
          */
         internal fun stripMarkdown(s: String): String {
@@ -680,6 +700,22 @@ class AiClient(private val settings: AiSettings) {
                 .replace("`", "")
             t = t.replace(Regex("(?m)^#{1,6} +"), "")      // 行首标题井号（# 后必须带空格，#话题标签 不受影响）
             t = t.replace(Regex("(?m)^[ \\t]*[*•][ \\t]+"), "") // 行首圆点/星号列表符
+            t = t.split('\n').joinToString("\n") { raw ->
+                val line = raw.trim()
+                if (line.startsWith("|") && line.endsWith("|") && line.length >= 2) {
+                    val cells = line.trim('|').split('|').map { it.trim() }
+                    // 表头分隔行（全是 ---/: ）整行去掉；数据行 | a | b | → a｜b（全角竖线）
+                    if (cells.all { it.isEmpty() || Regex(":{0,2}-{2,}:{0,2}").matches(it) }) ""
+                    else cells.joinToString("｜").trimEnd('｜')
+                } else raw
+            }
+            t = t.replace(
+                Regex("(?i)\\n?\\s*(?:answer|steps|action|map)\\s*字段?\\s*(?:留空|省略|为空)[（(][^）)]*[)）][。；;]?"),
+                "",
+            ).replace(
+                Regex("(?i)\\n?\\s*(?:answer|steps|action|map)\\s*字段?\\s*(?:留空|省略|为空)[。；;]"),
+                "",
+            )
             return t.trim()
         }
 
@@ -693,7 +729,7 @@ class AiClient(private val settings: AiSettings) {
             val body = when (style) {
                 "medium" -> "中等——快问快答 1-2 句带关键数字；攻略、路线、方案对比类给一句总述 + 3-5 条要点。"
                 "detailed" -> "详尽——攻略、路线、方案对比类给一句总述 + 5-8 条要点，把费用、耗时、班次、注意事项、备选方案讲全；只有纯闲聊才简短。"
-                else -> "简洁（平时问答的默认档）——answer 只用 1-2 句给结论并带上最关键的一两个数字，steps 一律留空；只有用户在提问里明确要求详细（如\"详细说说\"\"给我攻略\"\"一步步讲\"）才按攻略类展开要点。"
+                else -> "简洁（平时问答的默认档）——快问快答只用 1-2 句给结论并带上最关键的一两个数字，不主动给要点列表；但改写/翻译/全文/解释上文这类任务（如把刚给的诗词改成白话文）的产出本身就是回答，按任务需要给足，不受简短限制；用户明确要求详细（如\"详细说说\"\"给我攻略\"\"一步步讲\"）也展开要点。"
             }
             return "【回答详略 · 用户设置】$body 本条优先级最高，与基础提示词里任何长度/条数要求冲突时以本条为准；但地点位置类问题任何时候都是 1-2 句短答，不受本条影响。"
         }

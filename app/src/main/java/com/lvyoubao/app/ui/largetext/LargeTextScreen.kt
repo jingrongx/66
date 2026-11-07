@@ -202,6 +202,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
         scope.launch {
             SpeechInput.stopAndTranscribe(rec, settings.asrKey, settings.dialectMode)
                 .onSuccess { spoken ->
+                    HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                     vm.appendQuestion(HotwordCorrector.correct(spoken))
                     if (autoSend) vm.send(context)
                 }

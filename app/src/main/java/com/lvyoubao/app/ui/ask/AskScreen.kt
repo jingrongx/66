@@ -235,7 +235,10 @@ fun AskScreen(
         listening = true
         scope.launch {
             SpeechInput.stopAndTranscribe(rec, settings.asrKey, settings.dialectMode)
-                .onSuccess { vm.appendQuestion(HotwordCorrector.correct(it)) }
+                .onSuccess {
+                    HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
+                    vm.appendQuestion(HotwordCorrector.correct(it))
+                }
                 .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
             listening = false
         }
