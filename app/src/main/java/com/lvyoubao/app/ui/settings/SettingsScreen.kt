@@ -93,6 +93,11 @@ fun SettingsScreen(
     }
     var themeDialog by remember { mutableStateOf(false) }
     var styleDialog by remember { mutableStateOf(false) }
+    var showVoiceFix by remember { mutableStateOf(false) }
+    // 纠正记录条数：打开/关闭管理页时刷新（页内删除后回来数字要变）
+    val fixCount = remember(showVoiceFix) {
+        com.lvyoubao.app.data.HotwordCorrector.learnedFixList(app.applicationContext).size
+    }
 
     val versionLabel = remember {
         runCatching {
@@ -417,6 +422,24 @@ fun SettingsScreen(
             }
         }
 
+        // ---------- 语音纠错 ----------
+        SectionLabel("语音纠错")
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                SettingRow(
+                    title = "纠正记录",
+                    value = if (fixCount > 0) "$fixCount 条" else "还没有",
+                    onClick = { showVoiceFix = true },
+                )
+            }
+        }
+        Text(
+            "语音识别的稿子你手动改对再发送，就会记下「识别稿 → 发送稿」的差异；AI 智能纠错据此把同类错误越改越准。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+
         // ---------- 关于 ----------
         SectionLabel("关于")
         ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
@@ -496,6 +519,9 @@ fun SettingsScreen(
         )
     }
 
+    if (showVoiceFix) {
+        VoiceFixScreen(app = app, onClose = { showVoiceFix = false })
+    }
     if (themeDialog) {
         AlertDialog(
             onDismissRequest = { themeDialog = false },

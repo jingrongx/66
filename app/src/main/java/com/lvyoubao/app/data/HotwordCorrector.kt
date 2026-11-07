@@ -186,10 +186,7 @@ object HotwordCorrector {
         loadLearnedFixes(context)
         if (learnedFixes.any { it.wrong == w && it.right == r }) return
         learnedFixes = (listOf(LearnedFix(w, r, System.currentTimeMillis())) + learnedFixes).take(50)
-        runCatching {
-            File(context.filesDir, LEARNED_FILE)
-                .writeText(learnedFixes.joinToString("\n") { learnedJson.encodeToString(it) })
-        }
+        persistLearnedFixes(context)
     }
 
     /** 注入 AI 纠错提示词的纠正记录块（新的在前，取 8 条） */
@@ -198,6 +195,34 @@ object HotwordCorrector {
         return buildString {
             appendLine("【用户纠正记录】（此前语音识别错在哪、用户改成了什么；语音稿出现相同或高度相似的错误时，直接照此改正）")
             learnedFixes.take(limit).forEach { appendLine("- 「${it.wrong}」→ 用户实际发送「${it.right}」") }
+        }
+    }
+
+    /** 当前全部纠正记录（新的在前）；未加载时先加载。管理页用 */
+    fun learnedFixList(context: Context): List<LearnedFix> {
+        loadLearnedFixes(context)
+        return learnedFixes
+    }
+
+    /** 删除单条（按时间戳），返回删除后的记录 */
+    fun removeLearnedFix(context: Context, ts: Long): List<LearnedFix> {
+        loadLearnedFixes(context)
+        learnedFixes = learnedFixes.filter { it.ts != ts }
+        persistLearnedFixes(context)
+        return learnedFixes
+    }
+
+    /** 清空全部纠正记录，返回空表 */
+    fun clearLearnedFixes(context: Context): List<LearnedFix> {
+        learnedFixes = emptyList()
+        persistLearnedFixes(context)
+        return learnedFixes
+    }
+
+    private fun persistLearnedFixes(context: Context) {
+        runCatching {
+            File(context.filesDir, LEARNED_FILE)
+                .writeText(learnedFixes.joinToString("\n") { learnedJson.encodeToString(it) })
         }
     }
 
