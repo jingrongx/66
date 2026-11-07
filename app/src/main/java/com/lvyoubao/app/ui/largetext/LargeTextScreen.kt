@@ -69,6 +69,7 @@ import com.lvyoubao.app.data.ChatSession
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.ui.ChatViewModel
+import com.lvyoubao.app.ui.SentImageThumbnails
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.rememberDraftValue
@@ -664,7 +665,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     }
 }
 
-/** 用户消息：右侧大气泡，超大字，长按可选中复制 */
+/** 用户消息：右侧大气泡，超大字，带图时显示缩略图（点击看大图），长按可选中复制 */
 @Composable
 private fun LargeTextUserBubble(message: SessionMessage) {
     Row(
@@ -676,13 +677,22 @@ private fun LargeTextUserBubble(message: SessionMessage) {
                 shape = RoundedCornerShape(22.dp, 6.dp, 22.dp, 22.dp),
                 color = MaterialTheme.colorScheme.primaryContainer,
             ) {
-                Text(
-                    (if (message.hadImage) "🖼 " else "") + message.text,
+                Column(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    fontSize = 22.sp,
-                    lineHeight = 32.sp,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (message.imagePaths.isNotEmpty()) {
+                        SentImageThumbnails(paths = message.imagePaths)
+                    }
+                    if (message.text.isNotBlank()) {
+                        Text(
+                            (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
+                            fontSize = 22.sp,
+                            lineHeight = 32.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
             }
         }
     }
@@ -957,13 +967,22 @@ private fun VoiceCallOverlay(
                                     shape = RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp),
                                     color = MaterialTheme.colorScheme.primaryContainer,
                                 ) {
-                                    Text(
-                                        (if (message.hadImage) "🖼 " else "") + message.text,
+                                    Column(
                                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        fontSize = 22.sp,
-                                        lineHeight = 32.sp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    )
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        if (message.imagePaths.isNotEmpty()) {
+                                            SentImageThumbnails(paths = message.imagePaths, thumbSize = 96.dp)
+                                        }
+                                        if (message.text.isNotBlank()) {
+                                            Text(
+                                                (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
+                                                fontSize = 22.sp,
+                                                lineHeight = 32.sp,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         } else {

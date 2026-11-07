@@ -138,6 +138,7 @@ class AiClient(private val settings: AiSettings) {
         onAnswer: ((String) -> Unit)?,
         onReasoning: ((String) -> Unit)?,
     ): AssistantReply {
+        logOutgoing(messages)
         val useTools = toolExecutor != null && isDeepSeek
         if (!useTools) return generateWithAttempts(messages, thinking, withTools = false, executor = null, onAnswer, onReasoning)
 
@@ -179,6 +180,18 @@ class AiClient(private val settings: AiSettings) {
             convo = JsonArray(convo + listOf(turn.rawAssistant) + results)
             round++
         }
+    }
+
+    /**
+     * 请求观测：把实际发出的消息序列写进 logcat（tag=lvyoubao.ai，每条=角色+字数+图片数）。
+     * 「第二次回答没带上下文」这类反馈，接上 adb 一看便知历史到底带没带、带了什么。
+     */
+    private fun logOutgoing(messages: List<OutMessage>) {
+        val summary = messages.joinToString(" ｜ ") { m ->
+            val img = if (m.images.isEmpty()) "" else "＋图×${m.images.size}"
+            "${m.role}(${m.text.length}字)$img"
+        }
+        android.util.Log.i("lvyoubao.ai", "发出 ${messages.size} 条消息：$summary")
     }
 
     private data class Attempt(val withJson: Boolean, val withThinking: Boolean, val withTools: Boolean)

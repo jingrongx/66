@@ -844,12 +844,21 @@ private fun UserBubble(message: SessionMessage) {
                 shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp),
                 color = MaterialTheme.colorScheme.primaryContainer,
             ) {
-                Text(
-                    (if (message.hadImage) "🖼 " else "") + message.text,
+                Column(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (message.imagePaths.isNotEmpty()) {
+                        com.lvyoubao.app.ui.SentImageThumbnails(paths = message.imagePaths, thumbSize = 104.dp)
+                    }
+                    if (message.text.isNotBlank()) {
+                        Text(
+                            (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
             }
         }
     }

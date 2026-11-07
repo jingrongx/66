@@ -21,6 +21,8 @@ data class SessionMessage(
     val action: String? = null,
     val violations: List<String> = emptyList(),
     val hadImage: Boolean = false,
+    // 发送时压缩落盘的图片文件路径（filesDir/sent_images），供缩略图/看大图与下一轮随历史重发；旧消息为空
+    val imagePaths: List<String> = emptyList(),
     val mapCard: MapCardData? = null,   // 地图卡：问路线/地点时由工具层捕获，会话里直接渲染
     val ts: Long,
 )

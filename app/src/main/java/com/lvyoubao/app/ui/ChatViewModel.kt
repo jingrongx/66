@@ -26,6 +26,7 @@ import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.WeatherClient
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -72,6 +73,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         val name: String,
         val isImage: Boolean,
         val dataUrl: String? = null,
+        // 发送时压缩图落盘的路径：会话里显示缩略图/点击看大图，下一轮随历史重发给模型
+        val localPath: String? = null,
         val textContent: String? = null,
     )
 
@@ -159,9 +162,16 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             val displayText = question.ifBlank {
                 if (hadImage) "（看看这个）" else "（附件）"
             }
+            val sentImagePaths = state.attachments.filter { it.isImage }.mapNotNull { it.localPath }
             sessions.appendMessage(
                 sessionId,
-                SessionMessage(role = "user", text = displayText, hadImage = hadImage, ts = now),
+                SessionMessage(
+                    role = "user",
+                    text = displayText,
+                    hadImage = hadImage,
+                    imagePaths = sentImagePaths,
+                    ts = now,
+                ),
             )
 
             // 组装上下文：位置 + 本地记忆（个人飞轮）
@@ -201,10 +211,26 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 if (hadImage && question.isBlank()) append("（请结合图片回答）")
             }
 
-            val history = (sessions.get(sessionId)?.messages ?: emptyList())
+            // 历史轮次带上下文（最近 12 条）。此前图片只在发送那一轮可见，模型手上没有原图——
+            // 用户接着图片继续追问（如「把表里的缩写改成中文」）时，模型手里只有自己上一轮的转述，
+            // 会答非所问甚至让用户重发表格。现在：最近一轮带图的消息把落盘的压缩图随历史重发
+            // （最多 2 张，控制视觉请求体积）；更早的带图轮次补一句文字标注，免得模型误以为还看得见图
+            val historyMessages = (sessions.get(sessionId)?.messages ?: emptyList())
                 .dropLast(1)
                 .takeLast(12)
-                .map { OutMessage(role = it.role, text = it.text) }
+            val lastImageTurn = historyMessages.lastOrNull { it.role == "user" && it.imagePaths.isNotEmpty() }
+            val history = historyMessages.map { m ->
+                when {
+                    m === lastImageTurn -> OutMessage(
+                        role = m.role,
+                        text = m.text,
+                        images = m.imagePaths.take(2).mapNotNull { imageFileToDataUrl(it) },
+                    )
+                    m.role == "user" && m.imagePaths.isNotEmpty() ->
+                        OutMessage(role = m.role, text = m.text + "\n（该轮用户发过图片，图片内容本轮未携带）")
+                    else -> OutMessage(role = m.role, text = m.text)
+                }
+            }
 
             // 天气类问题强制走专业数据源（Open-Meteo 数值预报），AI 只负责总结，不再依赖联网搜索
             var weatherBlock: String? = null
@@ -488,8 +514,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 mime.startsWith("image/") ||
                 listOf(".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp").any { lowerName.endsWith(it) }
             return if (looksImage) {
-                val dataUrl = imageToDataUrl(resolver, uri)
-                if (dataUrl == null) {
+                val compressed = compressImageForSend(resolver, uri)
+                if (compressed == null) {
                     val heifLike = sniffed == "heif" || mime.contains("heic") || mime.contains("heif") ||
                         lowerName.endsWith(".heic") || lowerName.endsWith(".heif")
                     Pair(
@@ -498,7 +524,16 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                         else "这张图片读取失败（可能是不支持的格式），发送后 AI 可能看不到内容，建议换一张试试",
                     )
                 } else {
-                    Pair(PendingAttachment(uri = uri, name = name, isImage = true, dataUrl = dataUrl), null)
+                    Pair(
+                        PendingAttachment(
+                            uri = uri,
+                            name = name,
+                            isImage = true,
+                            dataUrl = compressed.first,
+                            localPath = saveSentImage(context, compressed.second),
+                        ),
+                        null,
+                    )
                 }
             } else {
                 val text = runCatching {
@@ -564,7 +599,14 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             }
         }.getOrNull()
 
-        private fun imageToDataUrl(resolver: android.content.ContentResolver, uri: Uri): String? = runCatching {
+        /**
+         * 图片统一压缩：长边压到 1280 内转 JPEG（q75），返回 (data URL, JPEG 字节)——
+         * 字节同时用于落盘（气泡缩略图/看大图/下一轮随历史重发）。
+         */
+        private fun compressImageForSend(
+            resolver: android.content.ContentResolver,
+            uri: Uri,
+        ): Pair<String, ByteArray>? = runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             // 注意：inJustDecodeBounds=true 时 decodeStream 恒返回 null，只读 bounds；
             // 这里不能用返回值做判空，否则所有图片都会被误判为"读取失败"
@@ -594,8 +636,24 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             val output = ByteArrayOutputStream()
             bmp.compress(Bitmap.CompressFormat.JPEG, 75, output)
             bmp.recycle()
-            val b64 = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
-            "data:image/jpeg;base64,$b64"
+            val bytes = output.toByteArray()
+            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            "data:image/jpeg;base64,$b64" to bytes
+        }.getOrNull()
+
+        /** 压缩图落盘（filesDir/sent_images）：气泡缩略图、点击看大图、下一轮随历史重发都读这份文件 */
+        private fun saveSentImage(context: Context, bytes: ByteArray): String? = runCatching {
+            val dir = File(context.filesDir, "sent_images").apply { mkdirs() }
+            val file = File(dir, "img_${System.currentTimeMillis()}_${(0..999).random()}.jpg")
+            file.writeBytes(bytes)
+            file.absolutePath
+        }.getOrNull()
+
+        /** 历史轮次重发图片：把落盘的压缩图读回 base64 data URL；文件被清理/不存在返回 null */
+        private fun imageFileToDataUrl(path: String): String? = runCatching {
+            val file = File(path)
+            if (!file.exists() || file.length() <= 0) return null
+            "data:image/jpeg;base64," + Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
         }.getOrNull()
     }
 }
