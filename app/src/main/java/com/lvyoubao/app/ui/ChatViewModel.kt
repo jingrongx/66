@@ -326,11 +326,13 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             // 组装上下文：位置 + 本地记忆（个人飞轮）
             val contextBlock = buildString {
                 appendLine("【当前情境】")
-                appendLine(
-                    "时间：" + SimpleDateFormat("yyyy-MM-dd HH:mm EEEE", Locale.CHINA).format(Date()),
-                )
-                // 历法精确数据：农历/干支时辰/节气（精确到秒）/节日本地推算注入——大模型口算不可靠
-                CalendarContext.block()?.let { appendLine(it) }
+                // 历法精确数据：北京时间/当地时区/农历/节气（到秒）/时辰起止/节日本地推算——大模型口算不可靠
+                val calendarBlock = CalendarContext.block()
+                if (calendarBlock != null) {
+                    appendLine(calendarBlock)
+                } else {
+                    appendLine("时间：" + SimpleDateFormat("yyyy-MM-dd HH:mm EEEE", Locale.CHINA).format(Date()))
+                }
                 if (LocationContext.hasPermission(context)) {
                     LocationContext.current(context)?.let { appendLine("位置：${it.description}") }
                 } else {
