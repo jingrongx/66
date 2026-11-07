@@ -56,6 +56,7 @@ class AiClient(private val settings: AiSettings) {
         toolExecutor: ToolExecutor? = null,
         onAnswer: ((String) -> Unit)? = null,
         onReasoning: ((String) -> Unit)? = null,
+        onRetry: (() -> Unit)? = null,
     ): Result<AssistantReply> = withContext(Dispatchers.IO) {
         guard {
             val effective = if (searchEnabled && isDeepSeek) {
@@ -64,7 +65,7 @@ class AiClient(private val settings: AiSettings) {
             } else {
                 messages
             }
-            generate(effective, thinking, toolExecutor, onAnswer, onReasoning)
+            generate(effective, thinking, toolExecutor, onAnswer, onReasoning, onRetry)
         }
     }
 
@@ -137,6 +138,23 @@ class AiClient(private val settings: AiSettings) {
         toolExecutor: ToolExecutor?,
         onAnswer: ((String) -> Unit)?,
         onReasoning: ((String) -> Unit)?,
+        onRetry: (() -> Unit)? = null,
+    ): AssistantReply {
+        val first = generateOnce(messages, thinking, toolExecutor, onAnswer, onReasoning)
+        // 深度思考下模型偶发退化输出（思考完不写答案、连吐 null，连 answer 都可能退化成空）——
+        // 检测到退化答案就自动原样重试一次（onRetry 让界面把流式卡复位），通常第二次就正常
+        return if (first.answer == DEGENERATE_ANSWER || first.answer.isBlank()) {
+            onRetry?.invoke()
+            generateOnce(messages, thinking, toolExecutor, onAnswer, onReasoning)
+        } else first
+    }
+
+    private fun generateOnce(
+        messages: List<OutMessage>,
+        thinking: Boolean,
+        toolExecutor: ToolExecutor?,
+        onAnswer: ((String) -> Unit)?,
+        onReasoning: ((String) -> Unit)?,
     ): AssistantReply {
         logOutgoing(messages)
         val useTools = toolExecutor != null && isDeepSeek
@@ -161,10 +179,12 @@ class AiClient(private val settings: AiSettings) {
                 throw e
             }
             if (turn.toolCalls.isEmpty() || round >= 3) {
+                // content 为空时只有「不开思考」的服务商才会把答案放 reasoning 里兜底；
+                // 开着思考还空 content 就是退化输出（连排 null），交给上层重试
                 val content = turn.content?.takeIf { it.isNotBlank() }
-                    ?: turn.rawAssistant.let { extractReasoning(it) }?.takeIf { it.isNotBlank() }
+                    ?: (if (!thinking) turn.rawAssistant.let { extractReasoning(it) }?.takeIf { it.isNotBlank() } else null)
                 return content?.let { parseReply(it) }
-                    ?: AssistantReply(answer = "这次没有生成出回答内容，请重试一次或换个问法。")
+                    ?: AssistantReply(answer = DEGENERATE_ANSWER)
             }
             val results = turn.toolCalls.map { call ->
                 val name = call.function?.name.orEmpty()
@@ -259,6 +279,8 @@ class AiClient(private val settings: AiSettings) {
                     ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))
                 }))
             }
+            // 思考模型偶发退化：连吐 null 的重复循环——提前掐断，别让垃圾流满整屏
+            put("stop", buildJsonArray { add("nullnull") })
         }.toString()
         val request = Request.Builder()
             .url("$baseUrl/chat/completions")
@@ -306,6 +328,8 @@ class AiClient(private val settings: AiSettings) {
                     ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))
                 }))
             }
+            // 思考模型偶发退化：连吐 null 的重复循环——提前掐断，别让垃圾流满整屏
+            put("stop", buildJsonArray { add("nullnull") })
         }.toString()
         val request = Request.Builder()
             .url("$baseUrl/chat/completions")
@@ -490,7 +514,7 @@ class AiClient(private val settings: AiSettings) {
                     // 清洗后若整个 answer 退化为空（模型把 answer 写成连排 null 的退化输出），
                     // 绝不把空卡片摆给用户，给一句诚实的重试提示
                     val safeAnswer = stripDegenerateNulls(mergeWithOutside(stripMarkdown(parsed.answer.trim()), outside))
-                        .ifBlank { DEGENERATE_HINT }
+                        .ifBlank { DEGENERATE_ANSWER }
                     return parsed.copy(
                         answer = safeAnswer,
                         steps = parsed.steps.map { stripMarkdown(it.trim()) }.filter { it.isNotEmpty() },
@@ -517,7 +541,7 @@ class AiClient(private val settings: AiSettings) {
             // 严格解析失败：模型的 JSON 字符串值里常有未转义引号（如 搜"赣运"），
             // 按字段边界把 answer/steps/action/map 抠出来，绝不把整段裸 JSON 当回答摆给用户
             lenientReply(content.substring(start, end + 1))?.let {
-                val safe = stripDegenerateNulls(mergeWithOutside(it.answer, outside)).ifBlank { DEGENERATE_HINT }
+                val safe = stripDegenerateNulls(mergeWithOutside(it.answer, outside)).ifBlank { DEGENERATE_ANSWER }
                 return it.copy(answer = safe)
             }
         }
@@ -546,7 +570,7 @@ class AiClient(private val settings: AiSettings) {
             )
         }
         // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答（同样清 Markdown），交给规则校验层标记
-        return AssistantReply(answer = stripDegenerateNulls(stripMarkdown(content.trim())).ifBlank { DEGENERATE_HINT })
+        return AssistantReply(answer = stripDegenerateNulls(stripMarkdown(content.trim())).ifBlank { DEGENERATE_ANSWER })
     }
 
     /** 信封外的正文捡回来并进 answer（表格/长正文不再被静默丢弃） */
@@ -562,11 +586,13 @@ class AiClient(private val settings: AiSettings) {
     }
 
     /** 连排 null 是模型的退化输出（深度思考下常见），从回答正文里整段清掉 */
-    private fun stripDegenerateNulls(s: String): String =
-        s.replace(Regex("(?i)(\\s*null\\s*){3,}"), "\n\n").trim()
+    private fun stripDegenerateNulls(s: String): String {
+        var t = s.replace(Regex("(?i)(\\s*null\\s*){3,}"), "\n\n")
+        // 整个 answer 只剩 null 堆叠（退化输出）→ 清成空，交给上层兜底
+        if (t.matches(Regex("(?is)[\\s,，。]*(null[\\s,，。]*)+"))) t = ""
+        return t.trim()
+    }
 
-    /** answer 被清洗成空时的诚实提示：绝不把空卡片摆给用户 */
-    private val DEGENERATE_HINT = "这句我没答上来，请再问一次或换个问法。"
 
     /** map 意图归一：route 要有终点、place 要有关键词，中英写法统一成 place/route */
     private fun normalizeMapIntent(m: MapIntent?): MapIntent? {
@@ -677,6 +703,9 @@ class AiClient(private val settings: AiSettings) {
     }
 
     companion object {
+        /** answer 被清洗成空时的诚实提示：绝不把空卡片摆给用户（也是自动重试的触发标记） */
+        internal val DEGENERATE_ANSWER = "这句我没答上来，请再问一次或换个问法。"
+
         /**
          * 回答策略：快问快答短而准；攻略类给可执行要点。
          * json_object 模式要求提示词里出现 “json” 一词。

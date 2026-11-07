@@ -491,6 +491,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 },
                 onAnswer = { d -> _stream.update { cur -> val s = cur ?: StreamState(); s.copy(answer = s.answer + d) } },
                 onReasoning = { d -> _stream.update { cur -> val s = cur ?: StreamState(); s.copy(reasoning = s.reasoning + d) } },
+                // 退化输出自动重试时复位流式卡：重试的内容从头累积，不和上一轮的垃圾拼在一起
+                onRetry = { _stream.value = StreamState() },
             ).fold(
                 onSuccess = { reply ->
                     // 地图卡三级来源：工具捕获 > AI 输出的地图意图 > 关键词兜底
@@ -504,7 +506,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                             text = reply.answer,
                             steps = reply.steps,
                             action = reply.action,
-                            violations = RuleValidator.validate(reply),
+                            // 兜底提示语本身不该再被规则校验挑刺（「没带数字」）
+                            violations = if (reply.answer == AiClient.DEGENERATE_ANSWER) emptyList() else RuleValidator.validate(reply),
                             mapCard = mapCard,
                             ts = System.currentTimeMillis(),
                         ),
