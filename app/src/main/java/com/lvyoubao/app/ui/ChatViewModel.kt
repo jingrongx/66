@@ -13,6 +13,7 @@ import com.lvyoubao.app.data.AiClient
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.AmapClient
 import com.lvyoubao.app.data.AppTools
+import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.observation.FatigueEngine
@@ -26,6 +27,7 @@ import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.WeatherClient
+import com.lvyoubao.app.data.presetById
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
@@ -279,6 +281,23 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 return@launch
             }
 
+            // 图片上限按供应商预设：DeepSeek 系纯文本模型直接提示，多模态超限自动截断前 N 张
+            val preset = presetById(settingsValue.presetId)
+            val pickedImages = state.attachments.filter { it.isImage }
+            if (pickedImages.isNotEmpty() && preset.maxImages == 0) {
+                _ui.update {
+                    it.copy(
+                        sending = false,
+                        error = "当前服务商（${preset.label}）的模型不支持看图：去掉图片再发，或在设置里换智谱 GLM / 通义千问等多模态模型",
+                    )
+                }
+                return@launch
+            }
+            val imageAttachments = if (pickedImages.size > preset.maxImages) {
+                _ui.update { it.copy(error = "${preset.label}的模型一次最多 ${preset.maxImages} 张图，已只用前 ${preset.maxImages} 张") }
+                pickedImages.take(preset.maxImages)
+            } else pickedImages
+
             // 确保有当前会话
             var sid = currentSessionId.value
             if (sid == null || sessions.get(sid) == null) {
@@ -287,12 +306,12 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             val sessionId = sid
 
             val now = System.currentTimeMillis()
-            val hadImage = state.attachments.any { it.isImage }
+            val hadImage = imageAttachments.isNotEmpty()
             val textFiles = state.attachments.filter { !it.isImage }
             val displayText = question.ifBlank {
                 if (hadImage) "（看看这个）" else "（附件）"
             }
-            val sentImagePaths = state.attachments.filter { it.isImage }.mapNotNull { it.localPath }
+            val sentImagePaths = imageAttachments.mapNotNull { it.localPath }
             sessions.appendMessage(
                 sessionId,
                 SessionMessage(
@@ -310,6 +329,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 appendLine(
                     "时间：" + SimpleDateFormat("yyyy-MM-dd HH:mm EEEE", Locale.CHINA).format(Date()),
                 )
+                // 历法精确数据：农历/干支时辰/节气（精确到秒）/节日本地推算注入——大模型口算不可靠
+                CalendarContext.block()?.let { appendLine(it) }
                 if (LocationContext.hasPermission(context)) {
                     LocationContext.current(context)?.let { appendLine("位置：${it.description}") }
                 } else {
@@ -410,7 +431,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 OutMessage(
                     role = "user",
                     text = userText,
-                    images = state.attachments.filter { it.isImage }.mapNotNull { it.dataUrl },
+                    images = imageAttachments.mapNotNull { it.dataUrl },
                 ),
             )
 
@@ -684,6 +705,9 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     companion object {
+        /** 相册一次最多选几张（发送时的真正上限由各供应商预设 maxImages 把控） */
+        const val MAX_PICK_IMAGES = 4
+
         /** 天气类问题（强制注入专业气象数据） */
         val WEATHER_INTENT = Regex("天气|下雨|下雪|降雪|降雨|天晴|放晴|转晴|晴不晴|气温|温度|几度|冷不冷|热不热|穿什么|带伞|雨伞|刮风|风力|风速|湿度|降水")
         /** 拼一条消息的可朗读文本（回答 + 要点 + 建议），会话页与大字模式共用 */

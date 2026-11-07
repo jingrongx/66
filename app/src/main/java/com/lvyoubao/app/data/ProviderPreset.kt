@@ -25,6 +25,8 @@ data class ProviderPreset(
     val baseUrl: String,
     val defaultModel: String,
     val supportsThinkingToggle: Boolean = false,
+    /** 一次消息最多带几张图；0 = 该供应商模型不支持看图（DeepSeek 系纯文本） */
+    val maxImages: Int = 4,
 )
 
 val ProviderPresets = listOf(
@@ -34,6 +36,7 @@ val ProviderPresets = listOf(
         baseUrl = "https://api.deepseek.com",
         defaultModel = "deepseek-flash",
         supportsThinkingToggle = true,
+        maxImages = 0,   // DeepSeek 系模型纯文本，不支持视觉输入
     ),
     ProviderPreset(
         id = "zhipu",

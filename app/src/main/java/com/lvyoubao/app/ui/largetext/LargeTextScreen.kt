@@ -263,8 +263,8 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
         if (ok && uri != null) handlePicked(uri)
     }
     val galleryLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia(),
-    ) { uri -> uri?.let { handlePicked(it) } }
+        ActivityResultContracts.PickMultipleVisualMedia(ChatViewModel.MAX_PICK_IMAGES),
+    ) { uris -> uris.forEach { handlePicked(it) } }
 
     // ---------- 自动朗读：新回答一落地就读（通话中不依赖开关，天然要出声） ----------
 

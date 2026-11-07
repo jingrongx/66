@@ -175,8 +175,8 @@ fun AskScreen(
         if (ok && uri != null) handlePicked(uri)
     }
     val galleryLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia(),
-    ) { uri -> uri?.let { handlePicked(it) } }
+        ActivityResultContracts.PickMultipleVisualMedia(ChatViewModel.MAX_PICK_IMAGES),
+    ) { uris -> uris.forEach { handlePicked(it) } }
     val fileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->

@@ -13,8 +13,8 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 54
-        versionName = "0.8.32"
+        versionCode = 55
+        versionName = "0.8.33"
     }
 
     signingConfigs {
@@ -84,6 +84,8 @@ dependencies {
     // 在 AGP 消费端不可靠（依赖图可见但字节码不可见），改为 vendor jar 保证确定性
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
     implementation("com.caverock:androidsvg:1.4")
+    // 农历/干支生肖/节气（精确到秒）/节日本地推算：大模型口算农历节气不可靠，注入本地精确数据
+    implementation("com.github.6tail:lunar-java:1.7.8")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
