@@ -215,6 +215,10 @@ internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double
         .flatMap { MapRegions.guessProvinces(it.second, it.first) }
         .filter { it !in downloaded }
         .distinct()
+    android.util.Log.i(
+        "lvyoubao.ai",
+        "地图选图：files=${covering.joinToString { it.name }} 未覆盖关键点=${uncovered.size} 缺失省份=$missing",
+    )
     return MapSelection(covering, uncovered, missing, fellBack = covering.size == 1 && covering[0] == maps.last() && maps.size > 1)
 }
 
@@ -251,7 +255,11 @@ internal fun buildOfflineMapView(
 /**
  * 多张底图叠加的地图视图：跨省路线（江西→上海）全程都有底图。
  * 每张 .map 一个 TileRendererLayer，互不重叠（省界框相交才入选），叠几层就渲染几省。
+ * 叠放顺序关键：瓦片是不透明的——上层在自己包围盒内的空白瓦片会把下层的真实内容盖掉。
+ * 把「包含视场中心的省」放在最上层（用户所在/要去的省优先显示），交界空白带被挤到邻省一侧；
  * 各层独立 TileCache（id 带下标防共享冲突），装饰（路线、标记）由调用方按需叠加。
+ * 打不开的文件不再静默跳过，写日志（tag=lvyoubao.ai）——设备同步来的半截文件此前无声消失，
+ * 症状恰是「该省区域一片空白」。
  */
 internal fun buildOfflineMapViewMulti(
     context: Context,
@@ -263,7 +271,17 @@ internal fun buildOfflineMapViewMulti(
     ensureGraphicFactory(context)
     val mapView = org.mapsforge.map.android.view.MapView(context)
     mapView.isClickable = true
-    mapFiles.forEachIndexed { i, file ->
+    val ordered = mapFiles.sortedBy { file ->
+        runCatching {
+            val mf = org.mapsforge.map.reader.MapFile(file)
+            try {
+                mf.mapFileInfo.boundingBox.contains(centerLat, centerLon)
+            } finally {
+                runCatching { mf.close() }
+            }
+        }.getOrDefault(false)
+    }
+    ordered.forEachIndexed { i, file ->
         val tileCache = org.mapsforge.map.android.util.AndroidUtil.createTileCache(
             context,
             "lvyoubao-map-$i",
@@ -271,7 +289,17 @@ internal fun buildOfflineMapViewMulti(
             1.0f,
             1.5,
         )
-        val mapDataStore = runCatching { org.mapsforge.map.reader.MapFile(file) }.getOrNull() ?: return@forEachIndexed
+        val mapDataStore = runCatching {
+            val mf = org.mapsforge.map.reader.MapFile(file)
+            android.util.Log.i(
+                "lvyoubao.ai",
+                "底图层$i=${file.name} bbox=${mf.mapFileInfo.boundingBox}",
+            )
+            mf
+        }.getOrNull() ?: run {
+            android.util.Log.i("lvyoubao.ai", "底图层$i=${file.name} 打不开（损坏或不完整），已跳过")
+            return@forEachIndexed
+        }
         val rendererLayer = org.mapsforge.map.layer.renderer.TileRendererLayer(
             tileCache,
             mapDataStore,
