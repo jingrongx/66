@@ -412,7 +412,9 @@ class AiClient(private val settings: AiSettings) {
          * 押着一个不发（前缀稳定，已发出的文字不会被改写）。行首 # 等交给终稿统一清理。
          */
         private fun stripStreamMarkdown(s: String): String {
-            var t = s.replace("**", "").replace("`", "")
+            // 连排 null 是模型的退化输出（深度思考下常见），流式阶段就整段清掉，别让它滚上屏
+            var t = s.replace(Regex("(?i)(\\s*null\\s*){3,}"), "\n\n")
+                .replace("**", "").replace("`", "")
             if (t.endsWith("*")) t = t.dropLast(1)
             return t
         }
@@ -486,7 +488,7 @@ class AiClient(private val settings: AiSettings) {
                 val mapOk = normalizeMapIntent(parsed.map)
                 if (parsed.answer.isNotBlank() || parsed.steps.any { it.isNotBlank() }) {
                     return parsed.copy(
-                        answer = mergeWithOutside(stripMarkdown(parsed.answer.trim()), outside),
+                        answer = stripDegenerateNulls(mergeWithOutside(stripMarkdown(parsed.answer.trim()), outside)),
                         steps = parsed.steps.map { stripMarkdown(it.trim()) }.filter { it.isNotEmpty() },
                         action = cleanAction,
                         map = mapOk,
@@ -511,7 +513,7 @@ class AiClient(private val settings: AiSettings) {
             // 严格解析失败：模型的 JSON 字符串值里常有未转义引号（如 搜"赣运"），
             // 按字段边界把 answer/steps/action/map 抠出来，绝不把整段裸 JSON 当回答摆给用户
             lenientReply(content.substring(start, end + 1))?.let {
-                return it.copy(answer = mergeWithOutside(it.answer, outside))
+                return it.copy(answer = stripDegenerateNulls(mergeWithOutside(it.answer, outside)))
             }
         }
         // 模型把 map 意图 JSON 单独当回答输出（如 {"type":"place","keyword":"麻姑山"}）：
@@ -539,16 +541,24 @@ class AiClient(private val settings: AiSettings) {
             )
         }
         // 模型没按 JSON 输出（或 JSON 里没有实际内容）时兜底：整段当回答（同样清 Markdown），交给规则校验层标记
-        return AssistantReply(answer = stripMarkdown(content.trim()))
+        return AssistantReply(answer = stripDegenerateNulls(stripMarkdown(content.trim())))
     }
 
     /** 信封外的正文捡回来并进 answer（表格/长正文不再被静默丢弃） */
     private fun mergeWithOutside(answer: String, outside: String): String {
-        val merged = stripMarkdown(outside.trim())
+        // 模型在深度思考下偶尔在信封输出完后继续退化吐一串 null——
+        // 先把 null 串清掉再看有没有真正文，别把垃圾当正文合并（此前必现的「nullnullnull…」来源）
+        val cleaned = outside.replace(Regex("(?i)null"), "").trim()
+        if (cleaned.isEmpty()) return answer
+        val merged = stripMarkdown(cleaned)
         if (merged.isEmpty()) return answer
         if (answer.isEmpty()) return merged
         return "$answer\n\n$merged"
     }
+
+    /** 连排 null 是模型的退化输出（深度思考下常见），从回答正文里整段清掉 */
+    private fun stripDegenerateNulls(s: String): String =
+        s.replace(Regex("(?i)(\\s*null\\s*){3,}"), "\n\n").trim()
 
     /** map 意图归一：route 要有终点、place 要有关键词，中英写法统一成 place/route */
     private fun normalizeMapIntent(m: MapIntent?): MapIntent? {
