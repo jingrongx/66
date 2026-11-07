@@ -77,9 +77,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     data class PendingAttachment(
-        val uri: Uri,
-        val name: String,
-        val isImage: Boolean,
+        // 从已发送消息恢复的附件没有原始 uri（编辑重发用），发送只依赖 dataUrl/localPath
+        val uri: Uri = Uri.EMPTY,
+        val name: String = "附件",
+        val isImage: Boolean = false,
         val dataUrl: String? = null,
         // 发送时压缩图落盘的路径：会话里显示缩略图/点击看大图，下一轮随历史重发给模型
         val localPath: String? = null,
@@ -236,6 +237,46 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     fun clearQuestion() {
         lastVoiceText = null
         _ui.update { it.copy(question = "") }
+    }
+
+    // ---------- 用户消息的编辑/重发 ----------
+    // 编辑：撤回这条及其后的所有消息，文本与图片回到输入框，改完再发；
+    // 重发：撤回后原样再问一遍（对坏答案/空卡片最直接的补救）。
+
+    /** 把已发送消息恢复成草稿：文本回输入框，带过的图从落盘文件恢复成附件 */
+    private fun restoreToDraft(message: SessionMessage) {
+        val restored = message.imagePaths.mapNotNull { path ->
+            val dataUrl = imageFileToDataUrl(path) ?: return@mapNotNull null
+            PendingAttachment(
+                name = File(path).name,
+                isImage = true,
+                dataUrl = dataUrl,
+                localPath = path,
+            )
+        }
+        lastVoiceText = null
+        _ui.update { it.copy(question = message.text, attachments = restored, error = null) }
+    }
+
+    fun editMessage(message: SessionMessage) {
+        val state = _ui.value
+        if (state.sending || state.polishing) return
+        val sid = currentSessionId.value ?: return
+        viewModelScope.launch {
+            sessions.truncateFrom(sid, message.ts)
+            restoreToDraft(message)
+        }
+    }
+
+    fun resendMessage(context: Context, message: SessionMessage) {
+        val state = _ui.value
+        if (state.sending || state.polishing) return
+        val sid = currentSessionId.value ?: return
+        viewModelScope.launch {
+            sessions.truncateFrom(sid, message.ts)
+            restoreToDraft(message)
+            send(context)
+        }
     }
 
     /** 语音识别不支持等瞬时提示，走统一 error 条展示 */

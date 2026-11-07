@@ -407,7 +407,11 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
             }
             items(messages) { message ->
                 when (message.role) {
-                    "user" -> LargeTextUserBubble(message)
+                    "user" -> LargeTextUserBubble(
+                        message,
+                        onEdit = { vm.editMessage(message) },
+                        onResend = { vm.resendMessage(context, message) },
+                    )
                     else -> LargeTextAssistantCard(
                         message = message,
                         app = app,
@@ -686,35 +690,56 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     }
 }
 
-/** 用户消息：右侧大气泡，超大字，带图时显示缩略图（点击看大图），长按可选中复制 */
+/** 用户消息：右侧大气泡，超大字，带图时显示缩略图（点击看大图），长按可选中复制，下方可编辑/重发 */
 @Composable
-private fun LargeTextUserBubble(message: SessionMessage) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End,
-    ) {
-        androidx.compose.foundation.text.selection.SelectionContainer {
-            Surface(
-                shape = RoundedCornerShape(22.dp, 6.dp, 22.dp, 22.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+private fun LargeTextUserBubble(message: SessionMessage, onEdit: () -> Unit, onResend: () -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Surface(
+                    shape = RoundedCornerShape(22.dp, 6.dp, 22.dp, 22.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
                 ) {
-                    if (message.imagePaths.isNotEmpty()) {
-                        SentImageThumbnails(paths = message.imagePaths)
-                    }
-                    if (message.text.isNotBlank()) {
-                        Text(
-                            (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
-                            fontSize = 22.sp,
-                            lineHeight = 32.sp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
+                    Column(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (message.imagePaths.isNotEmpty()) {
+                            SentImageThumbnails(paths = message.imagePaths)
+                        }
+                        if (message.text.isNotBlank()) {
+                            Text(
+                                (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
+                                fontSize = 22.sp,
+                                lineHeight = 32.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
                     }
                 }
             }
+        }
+        // 编辑/重发：撤回这条及其后的消息——文本图片回输入框改完再发，或原样再问一遍
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Button(
+                onClick = onEdit,
+                modifier = Modifier.height(44.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
+            ) { Text("✏️ 编辑", fontSize = 17.sp) }
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = onResend,
+                modifier = Modifier.height(44.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
+            ) { Text("🔁 重发", fontSize = 17.sp) }
         }
     }
 }

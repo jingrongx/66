@@ -101,6 +101,22 @@ class SessionStore(private val context: Context, private val repo: SettingsRepos
         }
     }
 
+    /**
+     * 撤回：删除某条消息「及其后」的所有消息（用户消息卡片的编辑/重发用），
+     * 按时间戳定位该条，保留它之前的部分。找不到该条时不动会话。
+     */
+    suspend fun truncateFrom(sessionId: String, ts: Long) = mutex.withLock {
+        _sessions.value = _sessions.value.map { s ->
+            if (s.id != sessionId) s
+            else {
+                val idx = s.messages.indexOfFirst { it.ts == ts }
+                if (idx < 0) s
+                else s.copy(messages = s.messages.take(idx), updatedAt = System.currentTimeMillis())
+            }
+        }.sortedByDescending { it.updatedAt }
+        persist()
+    }
+
     fun get(id: String?): ChatSession? = _sessions.value.firstOrNull { it.id == id }
 
     private fun persist() {

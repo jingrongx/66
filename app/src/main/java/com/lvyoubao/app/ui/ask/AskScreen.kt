@@ -534,7 +534,11 @@ fun AskScreen(
                 }
                 items(messages) { message ->
                     when (message.role) {
-                        "user" -> UserBubble(message)
+                        "user" -> UserBubble(
+                            message,
+                            onEdit = { vm.editMessage(message) },
+                            onResend = { vm.resendMessage(context, message) },
+                        )
                         else -> AssistantCard(
                             message = message,
                             onSaveMemory = { vm.saveToMemory(message) },
@@ -854,31 +858,45 @@ private fun SessionDrawerRow(
 }
 
 @Composable
-private fun UserBubble(message: SessionMessage) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End,
-    ) {
-        androidx.compose.foundation.text.selection.SelectionContainer {
-            Surface(
-                shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+private fun UserBubble(message: SessionMessage, onEdit: () -> Unit, onResend: () -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Surface(
+                    shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
                 ) {
-                    if (message.imagePaths.isNotEmpty()) {
-                        com.lvyoubao.app.ui.SentImageThumbnails(paths = message.imagePaths, thumbSize = 104.dp)
-                    }
-                    if (message.text.isNotBlank()) {
-                        Text(
-                            (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
+                    Column(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (message.imagePaths.isNotEmpty()) {
+                            com.lvyoubao.app.ui.SentImageThumbnails(paths = message.imagePaths, thumbSize = 104.dp)
+                        }
+                        if (message.text.isNotBlank()) {
+                            Text(
+                                (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
                     }
                 }
+            }
+        }
+        // 编辑/重发：撤回这条及其后的消息——文本图片回输入框改完再发，或原样再问一遍
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(onClick = onEdit, modifier = Modifier.height(30.dp)) {
+                Text("✏️ 编辑", style = MaterialTheme.typography.labelMedium)
+            }
+            TextButton(onClick = onResend, modifier = Modifier.height(30.dp)) {
+                Text("🔁 重发", style = MaterialTheme.typography.labelMedium)
             }
         }
     }
