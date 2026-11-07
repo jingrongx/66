@@ -95,42 +95,7 @@ fun UpdateScreen(onClose: () -> Unit, vm: UpdateViewModel) {
                 Text("正在检查更新…", style = MaterialTheme.typography.bodyMedium)
             }
 
-            state.error != null -> Column {
-                ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
-                    Column(Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.Warning,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text("检查失败", style = MaterialTheme.typography.titleSmall)
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            state.error ?: "",
-                            style = MaterialTheme.typography.bodySmall,
-                            // 错误正文用 error 色，与"检查失败"标题呼应（此前用中性色，错误不像错误）
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-                TextButton(onClick = { vm.manualCheck() }, modifier = Modifier.padding(top = 4.dp)) { Text("重试") }
-            }
-
-            state.upToDate -> Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.CheckCircle,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("已是最新版本", style = MaterialTheme.typography.bodyLarge)
-            }
-
+            // 有新版本：卡片永远显示，下载失败也不藏卡（失败原因+重试下载并列其下）
             state.release != null -> {
                 val release = state.release
                 val asset = release?.apkAsset
@@ -184,16 +149,62 @@ fun UpdateScreen(onClose: () -> Unit, vm: UpdateViewModel) {
                         ) { Text("安装", fontWeight = FontWeight.Bold) }
                     }
 
-                    asset != null -> {
+                    else -> Column {
                         Button(
                             onClick = { vm.download() },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(48.dp),
                             shape = MaterialTheme.shapes.medium,
-                        ) { Text("下载更新（${formatSize(asset.size)}）", fontWeight = FontWeight.Bold) }
+                        ) { Text("下载更新（${formatSize(asset?.size ?: 0)}）", fontWeight = FontWeight.Bold) }
+                        // 下载失败：原因 + 重试（断点续传接着传，不从头来）
+                        state.error?.let { err ->
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                err,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            TextButton(onClick = { vm.download() }) { Text("重试下载") }
+                        }
                     }
                 }
+            }
+
+            state.upToDate -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("已是最新版本", style = MaterialTheme.typography.bodyLarge)
+            }
+
+            state.error != null -> Column {
+                ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("检查失败", style = MaterialTheme.typography.titleSmall)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            state.error ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            // 错误正文用 error 色，与"检查失败"标题呼应（此前用中性色，错误不像错误）
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+                TextButton(onClick = { vm.manualCheck() }, modifier = Modifier.padding(top = 4.dp)) { Text("重试") }
             }
         }
 

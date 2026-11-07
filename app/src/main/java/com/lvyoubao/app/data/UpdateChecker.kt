@@ -27,9 +27,12 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    // 线路表按 2026-11 实测（对真实 APK 的 256KB Range 探测）筛选：ghfast/gh-proxy ~60-80KB/s 可用，
+    // ghproxy.net 慢但通，llkk/ghproxy.cc/ghfile.top 已死，直连国内基本不通垫底
     private val proxies = listOf(
-        "https://gh-proxy.com",
         "https://ghfast.top",
+        "https://gh-proxy.com",
+        "https://ghproxy.net",
         "",
     )
 
@@ -220,24 +223,34 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
         guard {
             destDir.mkdirs()
             val dest = File(destDir, asset.name)
-            // 下载前对真实 APK 地址做 Range 探测排序：谁先吐字节谁先下，失败垫底
+            val part = File(destDir, asset.name + ".part")
+            // 断点续传：.part 保留已下字节，换线路时带 Range 接着传（镜像实测都支持 206）；
+            // 每条线路给两次机会（全量+续传），全部失败才放弃并保留断点
+            var resumedFrom = if (part.exists() && part.length() > 0) part.length() else 0L
             val ordered = fastFirst(asset.browser_download_url, range = true)
-            for (proxy in ordered) {
+            val attempts = (ordered + ordered).distinct()
+            var lastError: IOException? = null
+            for (proxy in attempts) {
                 val url = if (proxy.isEmpty()) asset.browser_download_url else "$proxy/${asset.browser_download_url}"
                 try {
-                    val request = Request.Builder()
+                    val rb = Request.Builder()
                         .url(url)
                         .header("User-Agent", "lvyoubao-app")
-                        .get()
-                        .build()
-                    downloadClient.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) return@use
-                        val body = response.body ?: return@use
-                        val total = body.contentLength()
-                        var done = 0L
+                    if (resumedFrom > 0) rb.header("Range", "bytes=$resumedFrom-")
+                    downloadClient.newCall(rb.get().build()).execute().use { response ->
+                        // 200 = 这条线路不支持续传，丢弃断点从头下
+                        if (response.code == 200 && resumedFrom > 0) {
+                            resumedFrom = 0
+                            part.delete()
+                        }
+                        if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                        val body = response.body ?: throw IOException("空响应体")
+                        val appending = response.code == 206 && resumedFrom > 0
+                        val total = body.contentLength() + if (appending) resumedFrom else 0
+                        var done = if (appending) resumedFrom else 0L
                         var lastPct = -1
                         body.byteStream().use { input ->
-                            dest.outputStream().use { output ->
+                            java.io.FileOutputStream(part, appending).use { output ->
                                 val buffer = ByteArray(64 * 1024)
                                 while (true) {
                                     val read = input.read(buffer)
@@ -245,7 +258,7 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
                                     output.write(buffer, 0, read)
                                     done += read
                                     if (total > 0) {
-                                        val pct = (done * 100 / total).toInt()
+                                        val pct = (done * 100 / total).toInt().coerceIn(0, 100)
                                         if (pct != lastPct) {
                                             lastPct = pct
                                             onProgress(pct)
@@ -254,13 +267,21 @@ class UpdateChecker(private val repo: String = "jingrongx/66") {
                                 }
                             }
                         }
+                        // 下完了：part 转正
+                        dest.delete()
+                        if (!part.renameTo(dest)) throw IOException("地图保存失败")
+                        resumedFrom = 0
                         return@withContext Result.success(dest)
                     }
                 } catch (e: IOException) {
-                    dest.delete()
+                    lastError = e
+                    // 保留 .part 断点，换下一条线路接着传
                 }
             }
-            throw ApiException("下载失败（代理与直连均失败），请稍后重试")
+            throw ApiException(
+                "下载失败（所有线路均失败），已保留进度，稍后重试会接着传" +
+                    (lastError?.message?.let { "：$it" } ?: ""),
+            )
         }
     }
 
