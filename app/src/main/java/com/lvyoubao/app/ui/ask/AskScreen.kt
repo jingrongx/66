@@ -217,7 +217,7 @@ fun AskScreen(
             scope.launch {
                 HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                 SpeechInput.listen(context, "说出来，我帮你问")
-                    .onSuccess { vm.appendQuestion(HotwordCorrector.correct(it)) }
+                    .onSuccess { vm.appendVoiceTranscript(it) }
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
                 listening = false
             }
@@ -237,7 +237,7 @@ fun AskScreen(
             SpeechInput.stopAndTranscribe(rec, settings.asrKey, settings.dialectMode)
                 .onSuccess {
                     HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
-                    vm.appendQuestion(HotwordCorrector.correct(it))
+                    vm.appendVoiceTranscript(it)
                 }
                 .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
             listening = false
@@ -609,6 +609,14 @@ fun AskScreen(
                     }
                     // 光标交给 TextFieldValue 托管：语音从外面追加文字时把光标放到末尾，
                     // 不然识别结果停在原光标处，看着像「跑到最前面」
+                    if (state.polishing) {
+                        Text(
+                            "⏳ 正在智能纠错（结合上下文修识别错字），改完才能发送…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
+                        )
+                    }
                     val draftValue = rememberDraftValue(state.question)
                     OutlinedTextField(
                         value = draftValue.value,
@@ -731,7 +739,7 @@ fun AskScreen(
                                     keyboard?.hide()
                                     vm.send(context)
                                 },
-                                enabled = !state.sending,
+                                enabled = !state.sending && !state.polishing,
                             ) {
                                 Icon(
                                     Icons.Default.Send,

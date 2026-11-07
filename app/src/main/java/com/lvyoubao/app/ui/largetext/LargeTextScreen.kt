@@ -185,7 +185,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 TtsPlayer.stop()
                 HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                 SpeechInput.listen(context, "请说话")
-                    .onSuccess { vm.appendQuestion(HotwordCorrector.correct(it)) }
+                    .onSuccess { vm.appendVoiceTranscript(it) }
                     .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
                 listening = false
             }
@@ -203,7 +203,8 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
             SpeechInput.stopAndTranscribe(rec, settings.asrKey, settings.dialectMode)
                 .onSuccess { spoken ->
                     HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
-                    vm.appendQuestion(HotwordCorrector.correct(spoken))
+                    // 通话模式松手即发：不等 AI 纠错（模型看得到上下文，理解不受影响），只做本地热词
+                    vm.appendVoiceTranscript(spoken, polish = !autoSend)
                     if (autoSend) vm.send(context)
                 }
                 .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
@@ -289,7 +290,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
         }
     }
 
-    val canSend = (state.question.isNotBlank() || state.attachments.isNotEmpty()) && !state.sending
+    val canSend = (state.question.isNotBlank() || state.attachments.isNotEmpty()) && !state.sending && !state.polishing
 
     Column(
         modifier = Modifier
@@ -475,6 +476,16 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                         }
                     }
                     Spacer(Modifier.height(6.dp))
+                }
+                // AI 智能纠错进行中：发送被禁用，改完自动回填输入框（8 秒超时放行）
+                if (state.polishing) {
+                    Text(
+                        "⏳ 正在智能纠错（结合上下文修识别错字），改完才能发送…",
+                        fontSize = 16.sp,
+                        lineHeight = 22.sp,
+                        color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+                    )
                 }
                 // 草稿输入框：语音按段累积进这里，也可以直接打字。
                 // 光标交给 TextFieldValue 托管：语音从外面追加文字时把光标放到末尾，

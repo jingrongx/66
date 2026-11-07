@@ -13,6 +13,7 @@ import com.lvyoubao.app.data.AiClient
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.AmapClient
 import com.lvyoubao.app.data.AppTools
+import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.observation.FatigueEngine
 import com.lvyoubao.app.data.MapCardData
@@ -82,6 +83,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         val question: String = "",
         val attachments: List<PendingAttachment> = emptyList(),
         val sending: Boolean = false,
+        // 语音稿 AI 智能纠错进行中：发送禁用，改完自动回填（8 秒超时放行）
+        val polishing: Boolean = false,
         val error: String? = null,
     )
 
@@ -112,6 +115,106 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /**
+     * 语音稿两段式纠错：先本地热词（拼音同音替换，零延迟、离线可用），再交给 AI 结合
+     * 最近对话与记忆画像做一次「识别纠错」——本地拼音法只能修纯汉字的同音词，修不了
+     * 「90酸伐尼克兰→酒石酸伐尼克兰」这种数字混写。AI 修完回填输入框；用户已手动改动
+     * 或已发送则不覆盖，绝不抢用户的编辑。
+     */
+    fun appendVoiceTranscript(text: String, polish: Boolean = true) {
+        appendQuestion(HotwordCorrector.correct(text))
+        if (polish) polishDraftWithAi()
+    }
+
+    private val polishInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * AI 智能纠错：结合最近对话与记忆画像修语音稿的识别错误（同音字、数字混写、断句粘连）。
+     * 约束极其严格，宁可不改、不可改错：
+     * - 只在语音入口触发（手动输入永不触碰）；纠错期间 UiState.polishing=true，发送被禁用，
+     *   改完自动回填输入框，杜绝「发出去的还是错的」；
+     * - 8 秒超时兜底（网络差就保留本地热词结果，放行发送）；
+     * - 机械护栏：纠正稿长度必须与原稿基本一致、原文的词基本都还在——防 AI 把问题改写成回答
+     *   或夹带无关内容；用户已手动改动/已发送则不覆盖。
+     */
+    private fun polishDraftWithAi() {
+        viewModelScope.launch {
+            if (!polishInFlight.compareAndSet(false, true)) return@launch
+            try {
+                val settingsValue = repo.settings.firstOrNull() ?: return@launch
+                if (settingsValue.apiKey.isBlank()) return@launch
+                val draft = _ui.value.question
+                if (draft.length < 4) return@launch
+                _ui.update { it.copy(polishing = true) }
+                val recent = currentSessionId.value
+                    ?.let { sessions.get(it) }
+                    ?.messages
+                    ?.takeLast(6)
+                    ?.joinToString("\n") { m ->
+                        (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(80)
+                    }
+                    .orEmpty()
+                val facts = memory.profileFacts().take(8).joinToString("；")
+                val prompt = buildString {
+                    appendLine("【最近对话】（专有名词写法的参考来源）")
+                    appendLine(recent.ifBlank { "（无）" })
+                    if (facts.isNotBlank()) appendLine("【用户常用词】$facts")
+                    appendLine()
+                    appendLine("【刚识别出的语音稿】$draft")
+                    append(
+                        "任务：语音识别纠错。只把语音稿里明显的识别错误改掉：同音错字、数字混写" +
+                            "（如「酒石」被识别成「90」）、粘连断句、多余标点；专有名词（地名/药名/人名/景点）" +
+                            "优先采用最近对话里出现过的写法。\n" +
+                            "铁律：1.只输出纠正后的语音稿原文，一个字都不能多、一个字都不能少；" +
+                            "2.绝不回答问题、绝不补充任何内容、绝不解释；" +
+                            "3.拿不准的一律保持原样（宁可不改，不可改错）；" +
+                            "4.改动幅度必须很小（只动个别字词），长度基本不变。",
+                    )
+                }
+                val reply = try {
+                    kotlinx.coroutines.withTimeout(8_000) {
+                        AiClient(settingsValue).chatPlain(
+                            listOf(
+                                OutMessage(
+                                    "system",
+                                    "你是语音识别纠错器，唯一的职责是把语音稿里的识别错字改对。" +
+                                        "只输出纠正后的语音稿原文本身；绝不回答问题、绝不解释、绝不加引号或任何多余文字。" +
+                                        "你不是助手，是纠错过滤器。",
+                                ),
+                                OutMessage("user", prompt),
+                            ),
+                            thinking = false,
+                        ).getOrNull()
+                    }
+                } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                    null   // 超时放行：保留本地热词结果，不拦着用户发送
+                }
+                val polished = reply?.trim()?.trimMatching('「', '」', '“', '”', '"') ?: return@launch
+                if (polished.isEmpty() || polished == draft) return@launch
+                // 机械护栏：改动必须是"小修"——长度基本一致、原文的词基本都还在
+                val lengthOk = polished.length >= draft.length * 0.6 && polished.length <= draft.length * 1.4
+                val grams = draft.windowed(2).toSet()
+                val keptRatio = if (grams.isEmpty()) 1f else grams.count { polished.contains(it) } * 1f / grams.size
+                if (!lengthOk || keptRatio < 0.5) return@launch
+                // 用户没动过输入框、也还没发送才回填；动过就尊重用户的版本
+                if (_ui.value.question == draft && !_ui.value.sending) {
+                    _ui.update { it.copy(question = polished) }
+                }
+            } finally {
+                polishInFlight.set(false)
+                _ui.update { it.copy(polishing = false) }
+            }
+        }
+    }
+
+    private fun String.trimMatching(vararg quotes: Char): String {
+        var t = trim()
+        for (q in quotes) {
+            if (t.length >= 2 && t.first() == q && t.last() == q) t = t.substring(1, t.length - 1).trim()
+        }
+        return t
+    }
+
     /** 清空草稿（语音/拍照重新开始） */
     fun clearQuestion() = _ui.update { it.copy(question = "") }
 
@@ -138,7 +241,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     fun send(context: Context) {
         val state = _ui.value
         val question = state.question.trim()
-        if ((question.isBlank() && state.attachments.isEmpty()) || state.sending) return
+        // 纠错中禁发：发出去的就是没改对的稿子；等改完回填或 8 秒超时放行
+        if ((question.isBlank() && state.attachments.isEmpty()) || state.sending || state.polishing) return
 
         viewModelScope.launch {
             _ui.update { it.copy(sending = true, error = null) }
