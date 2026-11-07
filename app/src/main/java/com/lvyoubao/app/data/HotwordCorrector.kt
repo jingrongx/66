@@ -22,7 +22,10 @@ object HotwordCorrector {
     @Volatile
     private var builtAt = 0L
 
-    /** 每 5 分钟重建一次词库；语料=会话消息·含AI回答（权重1）+ 随手记（权重2）+ 记忆事实（权重5）+ 地点名称（权重6） */
+    /**
+     * 每 5 分钟重建一次词库；语料=会话消息·含AI回答 + 随手记（权重2）+ 记忆事实（权重5）+ 地点名称（权重6）。
+     * 最近一个会话的消息权重 ×3：刚聊过的词最可能马上再说——第一次说的专有名词下一句就能纠。
+     */
     suspend fun buildIfNeeded(
         sessions: List<ChatSession>,
         notes: List<QuickNote>,
@@ -32,6 +35,10 @@ object HotwordCorrector {
         if (lexicon.isNotEmpty() && now - builtAt < 5 * 60_000L) return
         builtAt = now
         lexicon = withContext(Dispatchers.Default) { buildLexicon(sessions, notes, memoryFacts) }
+        android.util.Log.i(
+            "lvyoubao.ai",
+            "热词词库重建：${lexicon.size} 条，样例 ${lexicon.entries.take(8).joinToString { "${it.key}→${it.value}" }}",
+        )
     }
 
     private fun buildLexicon(
@@ -54,7 +61,7 @@ object HotwordCorrector {
         }
         sessions.asSequence()
             .flatMap { it.messages.asSequence() }
-            // 用户消息与 AI 回答都喂：AI 回答里的地名/人名是核对过的规范写法，
+            // 用户消息与 AI 回答都喂：AI 回答里的地名/人名/药名是核对过的规范写法，
             // 用户消息里恰恰常带着识别错误的同音字，只喂后者会越纠越错
             .forEach { feed(it.text, 1) }
         notes.forEach { feed(it.text, 2) }
@@ -67,20 +74,34 @@ object HotwordCorrector {
                     card.pois.forEach { feed(it.name, 6) }
                 }
             }
+        // 最近会话加权：把刚才聊过的词重新按 ×3 记一次（刚说过的专有名词最可能马上再说）
+        sessions.maxByOrNull { it.updatedAt }?.messages?.forEach { feed(it.text, 2) }
 
         val stop = setOf(
             "这个", "那个", "什么", "怎么", "哪里", "还有", "可以", "我们", "你们", "他们",
             "现在", "时候", "应该", "可能", "就是", "但是", "然后", "如果", "因为", "所以",
             "附近", "大概", "多少", "一个", "一下", "不了", "没有", "是不是", "怎么样",
         )
-        // 拼音 → 中文热词：按出现次数从高到低占坑，同一拼音取计数最高的写法；
-        // 门槛 2 次（3 次会漏掉刚在本次会话里出现两回的地名），替换只在整段拼音完全一致时发生，噪音可控
+        // 拼音 → 中文热词。按「计数 × 长度²」打分占坑：高频大路词（我们/什么）计数虽高，
+        // 但纯按计数取前 400 会把出现次数少的专有名词（药名/地名）挤出词库——
+        // 长词几乎必然是有意义的术语，长度平方给它们加权；同拼音取分数最高的写法。
+        // 门槛按长度分层：≥5字出现1次就进（首次说的专有名词下一句就能纠）、4字≥2次、≤3字≥4次。
+        data class Cand(val word: String, val score: Int)
+        val cands = counts.mapNotNull { (word, count) ->
+            val len = word.length
+            val need = when {
+                len >= 5 -> 1
+                len == 4 -> 2
+                else -> 4
+            }
+            if (count < need || word in stop) return@mapNotNull null
+            Cand(word, count * len * len)
+        }.sortedWith(compareByDescending<Cand> { it.score }.thenByDescending { it.word.length })
         val lex = LinkedHashMap<String, String>()
-        for (e in counts.entries.sortedByDescending { it.value }) {
+        for (c in cands) {
             if (lex.size >= 400) break
-            if (e.value < 2 || e.key in stop) continue
-            val py = pinyinOf(e.key) ?: continue
-            lex.putIfAbsent(py, e.key)
+            val py = pinyinOf(c.word) ?: continue
+            lex.putIfAbsent(py, c.word)
         }
         return lex
     }
@@ -106,6 +127,7 @@ object HotwordCorrector {
                     val py = pinyinOf(sub)
                     val hit = py?.let { lexicon[it] }
                     if (hit != null && hit != sub) {
+                        android.util.Log.i("lvyoubao.ai", "热词纠正：$sub → $hit")
                         sb.replace(i, i + len, hit)
                         i += hit.length
                         continue@loop
