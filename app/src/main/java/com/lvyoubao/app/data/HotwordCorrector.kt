@@ -1,11 +1,15 @@
 package com.lvyoubao.app.data
 
+import android.content.Context
 import net.sourceforge.pinyin4j.PinyinHelper
 import net.sourceforge.pinyin4j.format.HanyuPinyinOutputFormat
 import net.sourceforge.pinyin4j.format.HanyuPinyinCaseType
 import net.sourceforge.pinyin4j.format.HanyuPinyinToneType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.io.File
 
 /**
  * 语音输入热词纠正：从用户自己的聊天记录（含 AI 回答）、随手记、记忆画像、地图卡里挖词建词库，
@@ -21,6 +25,8 @@ object HotwordCorrector {
     private var lexicon: Map<String, String> = emptyMap()
     @Volatile
     private var builtAt = 0L
+
+    private const val LEARNED_FILE = "learned_asr_fixes.jsonl"
 
     /**
      * 每 5 分钟重建一次词库；语料=会话消息·含AI回答 + 随手记（权重2）+ 记忆事实（权重5）+ 地点名称（权重6）。
@@ -143,6 +149,56 @@ object HotwordCorrector {
     private val pinyinFormat = HanyuPinyinOutputFormat().apply {
         caseType = HanyuPinyinCaseType.LOWERCASE
         toneType = HanyuPinyinToneType.WITHOUT_TONE
+    }
+
+    // ---------- 用户纠正记录（纠错飞轮） ----------
+
+    /** 语音稿原文 vs 用户实际发送的成对记录：识别错在哪一目了然，下次纠错（尤其 AI 段）直接照此改正 */
+    @kotlinx.serialization.Serializable
+    data class LearnedFix(val wrong: String, val right: String, val ts: Long)
+
+    @Volatile
+    private var learnedFixes: List<LearnedFix> = emptyList()
+    private var learnedLoaded = false
+    private val learnedJson = Json { ignoreUnknownKeys = true }
+
+    /** 首次调用时从本地加载（应用私有目录 JSONL，最多 50 条，新的在前） */
+    fun loadLearnedFixes(context: Context) {
+        if (learnedLoaded) return
+        learnedLoaded = true
+        learnedFixes = runCatching {
+            File(context.filesDir, LEARNED_FILE).readLines().filter { it.isNotBlank() }
+                .mapNotNull { runCatching { learnedJson.decodeFromString<LearnedFix>(it) }.getOrNull() }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * 记一条纠正对：用户改完点发送 = 认可了发送稿，语音稿与它的差异就是识别错在哪。
+     * 护栏：长度差超过一倍的是「重写」不是「纠错」（如清空重打），不记——防污染；
+     * 重复对不重复记。旧的盲替换不做：碎片规则（如 就是→酒石）会误伤正常句子，
+     * 纠正记录只喂给 AI 纠错段做上下文相关的改正。
+     */
+    fun learnFix(context: Context, wrong: String, right: String) {
+        val w = wrong.trim().take(120)
+        val r = right.trim().take(120)
+        if (w.isBlank() || r.isBlank() || w == r) return
+        if (r.length > w.length * 2 || w.length > r.length * 2) return
+        loadLearnedFixes(context)
+        if (learnedFixes.any { it.wrong == w && it.right == r }) return
+        learnedFixes = (listOf(LearnedFix(w, r, System.currentTimeMillis())) + learnedFixes).take(50)
+        runCatching {
+            File(context.filesDir, LEARNED_FILE)
+                .writeText(learnedFixes.joinToString("\n") { learnedJson.encodeToString(it) })
+        }
+    }
+
+    /** 注入 AI 纠错提示词的纠正记录块（新的在前，取 8 条） */
+    fun learnedFixBlock(limit: Int = 8): String {
+        if (learnedFixes.isEmpty()) return ""
+        return buildString {
+            appendLine("【用户纠正记录】（此前语音识别错在哪、用户改成了什么；语音稿出现相同或高度相似的错误时，直接照此改正）")
+            learnedFixes.take(limit).forEach { appendLine("- 「${it.wrong}」→ 用户实际发送「${it.right}」") }
+        }
     }
 
     private fun pinyinOf(s: String): String? {

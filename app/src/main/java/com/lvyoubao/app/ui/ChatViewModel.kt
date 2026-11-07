@@ -52,6 +52,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     private val memory = app.memoryStore
     private val noteStore = app.noteStore
 
+    init {
+        // 纠错飞轮：加载用户纠正记录（语音稿 vs 用户实际发送的差异对），AI 纠错时注入提示词
+        HotwordCorrector.loadLearnedFixes(app.applicationContext)
+    }
+
     val settings = repo.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings())
     val sessionList = sessions.sessions
@@ -123,10 +128,15 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
      */
     fun appendVoiceTranscript(text: String, polish: Boolean = true) {
         appendQuestion(HotwordCorrector.correct(text))
+        // 记下「语音稿版本」：用户发送前若手动改过，发送稿与它的差异就是识别错在哪（纠错飞轮）
+        lastVoiceText = _ui.value.question
         if (polish) polishDraftWithAi()
     }
 
     private val polishInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 语音稿版本（本地热词纠完、AI 未动时的整段草稿）：发送时与用户认可稿对比，喂纠错飞轮 */
+    private var lastVoiceText: String? = null
 
     /**
      * AI 智能纠错：结合最近对话与记忆画像修语音稿的识别错误（同音字、数字混写、断句粘连）。
@@ -159,6 +169,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     appendLine("【最近对话】（专有名词写法的参考来源）")
                     appendLine(recent.ifBlank { "（无）" })
                     if (facts.isNotBlank()) appendLine("【用户常用词】$facts")
+                    val learned = HotwordCorrector.learnedFixBlock()
+                    if (learned.isNotBlank()) {
+                        appendLine()
+                        append(learned)
+                    }
                     appendLine()
                     appendLine("【刚识别出的语音稿】$draft")
                     append(
@@ -216,7 +231,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     /** 清空草稿（语音/拍照重新开始） */
-    fun clearQuestion() = _ui.update { it.copy(question = "") }
+    fun clearQuestion() {
+        lastVoiceText = null
+        _ui.update { it.copy(question = "") }
+    }
 
     /** 语音识别不支持等瞬时提示，走统一 error 条展示 */
     fun setTransientError(message: String) = _ui.update { it.copy(error = message) }
@@ -243,6 +261,14 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         val question = state.question.trim()
         // 纠错中禁发：发出去的就是没改对的稿子；等改完回填或 8 秒超时放行
         if ((question.isBlank() && state.attachments.isEmpty()) || state.sending || state.polishing) return
+
+        // 纠错飞轮：语音稿版本 vs 用户认可发送稿——差异就是识别错在哪，成对记下来，
+        // 下次 AI 纠错时注入提示词直接照改；用户没改（语音稿=发送稿）不记
+        val voiceVersion = lastVoiceText
+        lastVoiceText = null
+        if (voiceVersion != null && question.isNotBlank() && voiceVersion.trim() != question) {
+            runCatching { HotwordCorrector.learnFix(context, voiceVersion, question) }
+        }
 
         viewModelScope.launch {
             _ui.update { it.copy(sending = true, error = null) }
