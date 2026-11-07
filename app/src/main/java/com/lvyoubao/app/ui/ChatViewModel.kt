@@ -345,9 +345,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             // 用户接着图片继续追问（如「把表里的缩写改成中文」）时，模型手里只有自己上一轮的转述，
             // 会答非所问甚至让用户重发表格。现在：最近一轮带图的消息把落盘的压缩图随历史重发
             // （最多 2 张，控制视觉请求体积）；更早的带图轮次补一句文字标注，免得模型误以为还看得见图
-            val historyMessages = (sessions.get(sessionId)?.messages ?: emptyList())
-                .dropLast(1)
-                .takeLast(12)
+            val allMsgs = sessions.get(sessionId)?.messages ?: emptyList()
+            val historyMessages = allMsgs.dropLast(1).takeLast(12)
             val lastImageTurn = historyMessages.lastOrNull { it.role == "user" && it.imagePaths.isNotEmpty() }
             val history = historyMessages.map { m ->
                 when {
@@ -361,6 +360,21 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     else -> OutMessage(role = m.role, text = m.text)
                 }
             }
+            // 长会话滚动摘要：12 条窗口截掉的部分，由 AI 在上一轮回答后提前浓缩好注入——
+            // 没有它，会话超过 6 轮后最早的对话会被静默截掉，「前几轮有上下文、后面跑偏」就是它
+            val droppedCount = (allMsgs.size - 1 - historyMessages.size).coerceAtLeast(0)
+            val summaryBlock = sessionSummaries[sessionId]
+                ?.takeIf { it.first == droppedCount }
+                ?.second
+                ?.let {
+                    listOf(
+                        OutMessage(
+                            "system",
+                            "【本会话更早内容的摘要】（这段发生在最近 12 条消息之前，用于延续话题）\n$it",
+                        ),
+                    )
+                }
+                ?: emptyList()
 
             // 天气类问题强制走专业数据源（Open-Meteo 数值预报），AI 只负责总结，不再依赖联网搜索
             var weatherBlock: String? = null
@@ -392,7 +406,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 // 回答详略档（设置页：简洁/中等/详尽），优先级高于基础提示词里的长度要求
                 OutMessage("system", AiClient.answerStyleRule(settingsValue.answerStyle)),
                 OutMessage("system", contextBlock),
-            ) + (weatherBlock?.let { listOf(OutMessage("system", it)) } ?: emptyList()) + history + listOf(
+            ) + (weatherBlock?.let { listOf(OutMessage("system", it)) } ?: emptyList()) + summaryBlock + history + listOf(
                 OutMessage(
                     role = "user",
                     text = userText,
@@ -434,6 +448,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     _stream.value = null
                     _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
                     maybeSummarizeSession(sessionId, settingsValue)
+                    refreshSessionSummary(sessionId, settingsValue)
                 },
                 onFailure = { e ->
                     _stream.value = null
@@ -461,7 +476,56 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     fun deleteSession(id: String) {
+        sessionSummaries.remove(id)
         viewModelScope.launch { sessions.delete(id) }
+    }
+
+    // ---------- 长会话滚动摘要（补 12 条窗口外的上下文） ----------
+    // 借鉴 Anthropic 公开的记忆架构思路：交互间隙做「离线巩固」——每轮回答完在后台把
+    // 窗口外被截掉的对话浓缩成摘要缓存，等下一轮用户提问时直接取现成的注入，不阻塞发送。
+    // 生成失败静默降级为不带摘要；会话删除时清缓存。
+    private val sessionSummaries = HashMap<String, Pair<Int, String>>()   // sessionId → (已覆盖条数, 摘要)
+    private val summaryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 每轮回答完成后后台刷新摘要：截掉的条数变了才重新生成（一次小请求，越聊越长的会话每轮一次） */
+    private fun refreshSessionSummary(sessionId: String, settings: AiSettings) {
+        if (settings.apiKey.isBlank()) return
+        val msgs = sessions.get(sessionId)?.messages ?: return
+        val dropped = (msgs.size - 1 - 12).coerceAtLeast(0)
+        if (dropped < 2) return                                  // 没截掉东西不用摘要
+        if (sessionSummaries[sessionId]?.first == dropped) return // 已覆盖当前窗口
+        if (!summaryInFlight.compareAndSet(false, true)) return  // 上一条还在生成，下一轮再补
+        viewModelScope.launch {
+            try {
+                // 语料：会话开头 2 条（怎么起的话头）+ 截掉段落里最近的 30 条，逐条截断控预算
+                val corpus = (msgs.take(2) + msgs.take(dropped).takeLast(30))
+                    .distinctBy { it.ts }
+                val transcript = corpus.joinToString("\n") { m ->
+                    (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(if (m.role == "user") 120 else 60)
+                }.take(4000)
+                val prompt = buildString {
+                    appendLine("【较早对话】")
+                    appendLine(transcript)
+                    append(
+                        "任务：把上面这段较早的对话浓缩成一段摘要（不超过 200 字），必须保留：讨论过的主题、" +
+                            "提到的专有名词与关键数字（地名/药名/人名/金额/时间）、已达成的结论、用户表达的偏好。" +
+                            "只输出摘要本身，不回答问题、不解释。",
+                    )
+                }
+                val reply = AiClient(settings).chatPlain(
+                    listOf(
+                        OutMessage("system", "你是会话摘要器：只输出摘要本身，绝不回答问题、绝不解释。"),
+                        OutMessage("user", prompt),
+                    ),
+                    thinking = false,
+                ).getOrNull()?.trim() ?: return@launch
+                if (reply.length in 20..800) {
+                    sessionSummaries[sessionId] = dropped to reply
+                }
+            } finally {
+                summaryInFlight.set(false)
+            }
+        }
     }
 
     /** 个人飞轮：把一条有价值的回答收藏为证据 */
