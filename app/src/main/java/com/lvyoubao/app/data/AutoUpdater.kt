@@ -20,8 +20,9 @@ import kotlinx.coroutines.launch
 
 /**
  * 应用内自动更新流水线（应用级单例，检查页/弹窗共用一条流水线，绝不双下载）：
- * - 启动即查 + 每 30 分钟静默复查一轮；
- * - 发现新版本【自动在后台下载】（国内优先走最快的加速线路，见 UpdateChecker.fastFirst）；
+ * - 启动即查 + 每 30 分钟静默复查一轮（检查在循环内 await，绝不让下一句读到旧状态）；
+ * - 发现新版本【自动在后台下载】（国内优先走最快的加速线路，见 UpdateChecker.fastFirst），
+ *   手动检查发现的新版同样自动下载；
  * - 下载完成后置 ready，界面弹「点击安装」——用户点一下就装，全程不用盯进度条；
  * - 失败静默，下个周期自动重试；手动检查入口（更新页）走同一条流水线。
  */
@@ -46,7 +47,6 @@ object AutoUpdater {
     private val checker = UpdateChecker()
     private lateinit var appContext: Context
     private var started = false
-    private var downloadJob: Job? = null
 
     /** 静默复查间隔：30 分钟 */
     private const val INTERVAL_MS = 30 * 60_000L
@@ -62,37 +62,50 @@ object AutoUpdater {
         _state.update { it.copy(currentVersion = versionName ?: "?") }
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
             while (true) {
-                checkNow(manual = false)
-                // 有新版本就自动后台下载（没下完才下；失败静默等下个周期）
-                val s = _state.value
-                if (s.release != null && s.downloadedApk == null && !s.downloading) downloadNow()
+                // 检查在循环内同步等待：拿到结果立刻决定是否自动下载（v0.8.35 的竞态修复：
+                // 旧版 checkNow 发射后不管，循环读到的是检查前的旧状态，自动下载永远不触发）
+                val release = doCheck(manual = false)
+                if (release != null) downloadNow()
                 delay(INTERVAL_MS)
             }
         }
     }
 
-    /** 更新页手动检查：结果与错误都展示 */
+    /** 更新页手动检查：结果与错误都展示；发现新版同样接自动下载 */
     fun checkNow(manual: Boolean) {
         val cur = _state.value
         if (cur.checking || cur.downloading) return
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
-            _state.update { it.copy(checking = true, error = null, upToDate = false) }
-            checker.latestRelease().fold(
-                onSuccess = { release ->
-                    val newer = Versions.isNewer(release.tag_name, _state.value.currentVersion)
-                    _state.update {
-                        it.copy(checking = false, release = if (newer) release else null, upToDate = !newer)
-                    }
-                },
-                onFailure = { e ->
-                    _state.update {
-                        if (manual) it.copy(checking = false, error = e.message ?: "检查更新失败")
-                        else it.copy(checking = false)   // 静默：失败不打扰，下个周期再试
-                    }
-                },
-            )
+            if (doCheck(manual) != null) downloadNow()
         }
     }
+
+    /**
+     * 执行一轮检查（挂起，完成后状态已落地）：
+     * 发现新版本返回 ReleaseInfo（顺带触发自动下载），否则返回 null。
+     */
+    private suspend fun doCheck(manual: Boolean): ReleaseInfo? {
+        _state.update { it.copy(checking = true, error = null, upToDate = false) }
+        return checker.latestRelease().fold(
+            onSuccess = { release ->
+                val newer = Versions.isNewer(release.tag_name, _state.value.currentVersion)
+                val cleaned = if (newer) release.copy(body = release.body?.let { AiClient.stripMarkdown(it) }) else release
+                _state.update {
+                    it.copy(checking = false, release = if (newer) cleaned else null, upToDate = !newer)
+                }
+                if (newer) cleaned else null
+            },
+            onFailure = { e ->
+                _state.update {
+                    if (manual) it.copy(checking = false, error = e.message ?: "检查更新失败")
+                    else it.copy(checking = false)   // 静默：失败不打扰，下个周期再试
+                }
+                null
+            },
+        )
+    }
+
+    private var downloadJob: Job? = null
 
     /** 后台下载（自动触发与手动触发共用；下载走最快线路优先） */
     fun downloadNow() {
@@ -119,7 +132,7 @@ object AutoUpdater {
         _state.update { it.copy(downloading = false) }
     }
 
-    /** 弹窗点「稍后」：本轮进程内不再自动弹这个版本（更新页仍可见、仍可安装） */
+    /** 弹窗点「稍后」：本轮进程内不再自动弹这个版本（更新页里仍可见、仍可安装） */
     fun dismissUpdate() {
         _state.update { it.copy(dismissedTag = it.release?.tag_name) }
     }
