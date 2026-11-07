@@ -148,20 +148,41 @@ internal fun pickMapFile(context: Context, points: List<Pair<Double, Double>>): 
     pickMapFiles(context, points).lastOrNull()
 
 /**
- * 挑出所有与关键点范围相交的离线地图，按省名排序返回。
+ * 选图结果：相交的地图文件 + 关键点里没有被任何底图盖住的（含猜出的缺失省份）。
+ * 用户站在省界上（如三清山服务区，江西侧）而只下载了邻省时，底图就是一半空白——
+ * 把"哪片没图、缺哪个省"显式交回给界面，提示一键补下载，而不是静默留白让用户以为是 bug。
+ */
+internal data class MapSelection(
+    val files: List<File>,
+    /** 没有任何已下载地图覆盖的关键点 (经度, 纬度) */
+    val uncoveredPoints: List<Pair<Double, Double>>,
+    /** 缺失的省份（中文，已排除已下载的，按点位邻近度排序） */
+    val missingProvinces: List<String>,
+    /** 一张都不相交退回了「最新一张」兜底（显示的省份与点位无关） */
+    val fellBack: Boolean,
+)
+
+/**
+ * 挑出所有与关键点范围相交的离线地图，并报告底图缺口。
  * 跨省路线（如江西→上海）没有一张图能覆盖全程，此前只挑一张就退回
  * 「文件名排序的最后一张」，显示的根本不是路线所在区域——用户"已下载该省地图却不显示"的根因。
  * 改为返回全部相交省份，渲染层逐张叠 TileRendererLayer，路线全程都有底图。
- * points 传 (经度, 纬度) 对；一张都不相交时退回最新一张（与离线地图页默认一致）。
+ * points 传 (经度, 纬度) 对；一张都不相交时退回最新一张（与离线地图页默认一致）并标记 fellBack。
  */
-internal fun pickMapFiles(context: Context, points: List<Pair<Double, Double>>): List<File> {
+internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double>>): MapSelection {
     val maps = File(context.filesDir, "maps")
         .listFiles { f -> f.name.endsWith(".map") }
         ?.sortedBy { it.name }
         .orEmpty()
-    if (maps.isEmpty()) return emptyList()
     val targets = points.filter { it.first != 0.0 || it.second != 0.0 }
-    if (targets.isEmpty()) return listOf(maps.last())
+    if (maps.isEmpty() || targets.isEmpty()) {
+        return MapSelection(
+            files = if (maps.isEmpty()) emptyList() else listOf(maps.last()),
+            uncoveredPoints = targets,
+            missingProvinces = targets.flatMap { MapRegions.guessProvinces(it.second, it.first) }.distinct(),
+            fellBack = maps.isNotEmpty(),
+        )
+    }
     // 用路线包络框和每张图的省界框做相交判断：几千个折线点逐点 contains 太慢，也漏掉途经省
     val envelope = org.mapsforge.core.model.BoundingBox(
         targets.minOf { it.second }, targets.minOf { it.first },
@@ -176,9 +197,29 @@ internal fun pickMapFiles(context: Context, points: List<Pair<Double, Double>>):
                 runCatching { mf.close() }
             }
         }.getOrDefault(false)
-    }
-    return covering.ifEmpty { listOf(maps.last()) }
+    }.ifEmpty { listOf(maps.last()) }
+    // 逐点查覆盖：只对少数关键点（起终点）做精确 bbox 判断，途经点不查（路线穿省已由相交覆盖）
+    val boxes = covering.map { f ->
+        runCatching {
+            val mf = org.mapsforge.map.reader.MapFile(f)
+            try {
+                f to mf.mapFileInfo.boundingBox
+            } finally {
+                runCatching { mf.close() }
+            }
+        }.getOrNull()
+    }.filterNotNull()
+    val uncovered = targets.filter { p -> boxes.none { (_, b) -> b.contains(p.second, p.first) } }
+    val downloaded = boxes.map { (f, _) -> MapRegions.displayName(f.name) }.toSet()
+    val missing = uncovered
+        .flatMap { MapRegions.guessProvinces(it.second, it.first) }
+        .filter { it !in downloaded }
+        .distinct()
+    return MapSelection(covering, uncovered, missing, fellBack = covering.size == 1 && covering[0] == maps.last() && maps.size > 1)
 }
+
+internal fun pickMapFiles(context: Context, points: List<Pair<Double, Double>>): List<File> =
+    pickMapSelection(context, points).files
 
 /** 找一个能把所有点装下的缩放级别（留 18% 边距） */
 internal fun fitZoomLevel(widthPx: Int, heightPx: Int, points: List<LatLong>): Byte {

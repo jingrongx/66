@@ -50,6 +50,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -127,12 +128,40 @@ fun RouteMapCard(
     val scope = rememberCoroutineScope()
     val settings by app.settingsRepository.settings.collectAsState(initial = AiSettings())
 
-    val mapFiles = remember(card) {
-        pickMapFiles(
+    // 底图选图（带缺口报告）：key 进 mapVersion——就地补下载完一个省后 version+1，
+    // 选图重算、地图视图整体重建，刚下载的省份立刻出现在底图里
+    var mapVersion by remember(card) { mutableStateOf(0) }
+    val selection = remember(card, mapVersion) {
+        pickMapSelection(
             context,
             listOf(card.fromLon to card.fromLat, card.toLon to card.toLat) +
                 card.points.map { p -> (p.getOrNull(0) ?: 0.0) to (p.getOrNull(1) ?: 0.0) },
         )
+    }
+    val mapFiles = selection.files
+
+    // 缺省就地补下载：哪个省在下/进度/失败原因；成功后 mapVersion+1 触发选图与底图重建
+    var quickDlProvince by remember { mutableStateOf<String?>(null) }
+    var quickDlPercent by remember { mutableStateOf(0) }
+    var quickDlError by remember { mutableStateOf<String?>(null) }
+    fun startQuickDownload(province: String) {
+        if (quickDlProvince != null) return
+        quickDlProvince = province
+        quickDlError = null
+        quickDlPercent = 0
+        scope.launch {
+            runCatching {
+                MapQuickDownload.downloadProvince(context, province, settings.mapMirrorUrl) { done, total ->
+                    if (total > 0) quickDlPercent = ((done * 100) / total).toInt().coerceIn(0, 100)
+                }
+            }.onSuccess {
+                quickDlProvince = null
+                mapVersion++
+            }.onFailure { e ->
+                quickDlError = e.message ?: "下载失败，请检查网络"
+                quickDlProvince = null
+            }
+        }
     }
 
     // ---- 目的地（地点卡可换选）与路线方案 ----
@@ -375,27 +404,30 @@ fun RouteMapCard(
     // ---- 地图视图（内嵌与全屏共用；重建时自动重画所有图层） ----
     @Composable
     fun CardMap(modifier: Modifier) {
-        if (mapFiles.isEmpty()) {
-            Box(
-                modifier = modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(20.dp)) {
-                    Text("这一片还没下载离线地图", style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "到侧边栏「离线地图与路线」下载所在省份即可看图（摘要与跳高德不受影响）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        Box(modifier) {
+            if (mapFiles.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(20.dp)) {
+                        Text("这一片还没下载离线地图", style = MaterialTheme.typography.bodyMedium)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "点上方「下载」就地补图（摘要与跳高德不受影响）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
-            }
-            return
-        }
-        AndroidView(
-            modifier = modifier
+            } else {
+                key(mapVersion) {
+                    AndroidView(
+            modifier = Modifier
+                .fillMaxSize()
                 .clip(RoundedCornerShape(if (expanded) 0.dp else 14.dp))
                 // 手势锁：从 Compose 层消费全部触摸事件，会话列表（LazyColumn）不再抢走拖动/双指缩放
                 // （原生 requestDisallowInterceptTouchEvent 对 Compose 滚动容器无效，这是此前
@@ -520,7 +552,23 @@ fun RouteMapCard(
                     }
                 }
             },
-        )
+            )
+            }
+            }
+            // 底图缺口提示条：盖在地图上方，一键补下载（下载中显示进度，失败显示原因可重试）
+            if (selection.missingProvinces.isNotEmpty()) {
+                MissingMapHint(
+                    provinces = selection.missingProvinces,
+                    downloading = quickDlProvince,
+                    percent = quickDlPercent,
+                    error = quickDlError,
+                    onDownload = { startQuickDownload(selection.missingProvinces.first()) },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp),
+                )
+            }
+        }
     }
 
     // ---- 圆形小按钮 ----
@@ -1109,5 +1157,48 @@ private fun openInAmapApp(
         )
     }.onFailure {
         android.widget.Toast.makeText(context, "没有找到高德地图，网页版也打不开", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** 底图缺口提示条：哪省没下载 + 一键补下载（下载中显示进度，失败显示原因可重试） */
+@Composable
+private fun MissingMapHint(
+    provinces: List<String>,
+    downloading: String?,
+    percent: Int,
+    error: String?,
+    onDownload: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+        tonalElevation = 4.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val label = when {
+                downloading != null -> "「$downloading」地图下载中 $percent%"
+                error != null -> "$error，点「下载」重试"
+                else -> "「${provinces.first()}」这一片没有离线底图，显示空白"
+            }
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Button(
+                onClick = onDownload,
+                enabled = downloading == null,
+                modifier = Modifier.height(32.dp),
+            ) {
+                Text(if (downloading != null) "下载中…" else "下载", fontSize = 13.sp)
+            }
+        }
     }
 }
