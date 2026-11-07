@@ -63,6 +63,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
@@ -426,21 +427,35 @@ fun RouteMapCard(
             } else {
                 key(mapVersion) {
                     AndroidView(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(RoundedCornerShape(if (expanded) 0.dp else 14.dp))
-                // 手势锁：从 Compose 层消费全部触摸事件，会话列表（LazyColumn）不再抢走拖动/双指缩放
-                // （原生 requestDisallowInterceptTouchEvent 对 Compose 滚动容器无效，这是此前
-                // 卡片地图拖不动、缩不了而离线地图页正常的根因；地图自身手势见 MapView.onTouchEvent）
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                        do {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            event.changes.forEach { it.consume() }
-                        } while (event.changes.any { it.pressed })
-                    }
-                },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(if (expanded) 0.dp else 14.dp))
+                            // 手势锁只给会话列表里的内嵌小图：AndroidView 互操作层不把「已被消费」的
+                            // 事件喂给地图 View，此前全屏也套同一把锁导致地图完全拖不动/缩不了。
+                            // 全屏是独立 Dialog 没有列表竞争，直接放开——mapsforge 原生的单指拖动、
+                            // 双指缩放、双击放大全部生效；内嵌小图用定向锁：横向拖动与双指捏合放行
+                            // 给地图平移/缩放，纵向拖动消费掉保护会话列表不误滚
+                            .then(
+                                if (expanded) {
+                                    Modifier
+                                } else {
+                                    Modifier.pointerInput(Unit) {
+                                        awaitEachGesture {
+                                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                            do {
+                                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                                val drag = event.changes.firstOrNull()
+                                                val horizontal = drag != null &&
+                                                    kotlin.math.abs(drag.positionChange().x) >=
+                                                    kotlin.math.abs(drag.positionChange().y)
+                                                if (!horizontal && event.changes.size == 1) {
+                                                    event.changes.forEach { it.consume() }
+                                                }
+                                            } while (event.changes.any { it.pressed })
+                                        }
+                                    }
+                                },
+                            ),
             factory = { ctx ->
                 val centerLat = if (card.hasOrigin) (card.fromLat + dest.second) / 2 else dest.second
                 val centerLon = if (card.hasOrigin) (card.fromLon + dest.first) / 2 else dest.first
