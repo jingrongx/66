@@ -151,6 +151,11 @@ fun AskScreen(
     val locationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> locationGranted = granted || LocationContext.hasPermission(context) }
+    // 进会话页/刚拿到定位权限就后台预热一次定位：用户提问时位置已是新的，
+    // 发送不用等在主动定位上（缓存 2 分钟内有效，重复进页面不会反复定位）
+    LaunchedEffect(locationGranted) {
+        if (locationGranted) LocationContext.prewarm(context)
+    }
 
     fun handlePicked(uri: android.net.Uri) {
         scope.launch {

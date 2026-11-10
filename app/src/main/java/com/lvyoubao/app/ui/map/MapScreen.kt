@@ -686,10 +686,8 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                                 scope.launch {
                                                     NavigationTracker.start(context)
                                                     val f = NavigationTracker.fix.value
-                                                        ?: withContext(Dispatchers.IO) {
-                                                            LocationContext.current(context)?.let {
-                                                                NavigationTracker.Fix(it.lat, it.lon)
-                                                            }
+                                                        ?: LocationContext.fresh(context)?.let {
+                                                            NavigationTracker.Fix(it.lat, it.lon)
                                                         }
                                                     mapViewRef?.let { mv ->
                                                         f?.let {

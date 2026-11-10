@@ -219,8 +219,8 @@ fun RouteMapCard(
     // ---- 路线查询 ----
     suspend fun resolveFrom(): Pair<Double, Double> {
         NavigationTracker.fix.value?.let { return it.lon to it.lat }
-        val place = withContext(Dispatchers.IO) { LocationContext.current(context) }
-            ?: throw ApiException("没有位置信息，请授权定位")
+        // fresh：缓存过期就主动定位，起点别拿旧位置
+        val place = LocationContext.fresh(context) ?: throw ApiException("没有位置信息，请授权定位")
         return place.lon to place.lat
     }
 
@@ -603,9 +603,8 @@ fun RouteMapCard(
 
     fun locateMe() {
         scope.launch {
-            val f = NavigationTracker.fix.value ?: withContext(Dispatchers.IO) {
-                LocationContext.current(context)?.let { NavigationTracker.Fix(it.lat, it.lon) }
-            }
+            val f = NavigationTracker.fix.value
+                ?: LocationContext.fresh(context)?.let { NavigationTracker.Fix(it.lat, it.lon) }
             if (f != null) {
                 userDragging = false   // 点"我的位置"恢复自动跟图
                 NavigationTracker.start(context)

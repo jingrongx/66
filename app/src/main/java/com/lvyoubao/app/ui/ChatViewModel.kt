@@ -375,7 +375,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     appendLine("时间：" + SimpleDateFormat("yyyy-MM-dd HH:mm EEEE", Locale.CHINA).format(Date()))
                 }
                 if (LocationContext.hasPermission(context)) {
-                    LocationContext.current(context)?.let { appendLine("位置：${it.description}") }
+                    // fresh：缓存过期就主动定位一次，别拿几小时前的旧位置答「附近」
+                    LocationContext.fresh(context)?.let { appendLine("位置：${it.description}") }
                 } else {
                     appendLine("位置：未授权定位（不要假设用户位置，答不了就问）")
                 }
@@ -444,9 +445,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             var weatherBlock: String? = null
             if (WEATHER_INTENT.containsMatchIn(question) && LocationContext.hasPermission(context)) {
                 runCatching {
-                    val here = withContext(Dispatchers.IO) {
-                        LocationContext.current(context)
-                    }
+                    val here = LocationContext.fresh(context)
                     if (here != null) {
                         val fc = withContext(Dispatchers.IO) {
                             WeatherClient.forecast(here.lon, here.lat)
@@ -648,7 +647,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
                 val amap = AmapClient(settings.amapKey)
-                val here = LocationContext.current(context)
+                val here = LocationContext.fresh(context)
                 val city = here?.let { amap.regeocodeCity(it.lon, it.lat) }
                 if (intent.type == "route" && intent.destination.isNotBlank()) {
                     val home = settings.homeAddress.trim()
@@ -721,7 +720,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         if (settings.amapKey.isBlank()) return null
         return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
-                val place = LocationContext.current(context) ?: return@withContext null
+                val place = LocationContext.fresh(context) ?: return@withContext null
                 val pois = AmapClient(settings.amapKey).poiSearch(keyword, place.lon, place.lat)
                 if (pois.isEmpty()) return@withContext null
                 MapCardData(

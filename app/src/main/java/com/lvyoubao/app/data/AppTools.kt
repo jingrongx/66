@@ -54,7 +54,8 @@ object AppTools {
             json.parseToJsonElement(argumentsJson.ifBlank { "{}" }).jsonObject
         }.getOrNull()
         val arg = { key: String -> args?.get(key)?.let { runCatching { it.jsonPrimitive.content }.getOrNull() } }
-        val place = LocationContext.current(context)
+        // 工具回调在 IO 线程（允许阻塞）：走 freshBlocking 主动定位，搜「附近」不用旧位置
+        val place = LocationContext.freshBlocking(context)
         return try {
             when (name) {
                 POI -> {
@@ -106,7 +107,7 @@ object AppTools {
         destination: String,
         onMapCard: (MapCardData) -> Unit = {},
     ): String {
-        val place = LocationContext.current(context) ?: throw ApiException("没有位置信息")
+        val place = LocationContext.freshBlocking(context) ?: throw ApiException("没有位置信息")
         if (settings.amapKey.isNotBlank()) {
             val amap = AmapClient(settings.amapKey)
             // 目的地是「回家」类词时直接用设置的家庭地址：AI 偶尔只传一个"家"字，

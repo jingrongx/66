@@ -551,7 +551,7 @@ class MapViewModel(
             val settings = repo.settings.firstOrNull() ?: return@launch
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val place = LocationContext.current(context) ?: throw ApiException("没有位置信息，请授权定位")
+                    val place = LocationContext.fresh(context) ?: throw ApiException("没有位置信息，请授权定位")
                     if (settings.amapKey.isBlank() && !BRouterClient.isInstalled(context)) {
                         throw ApiException("查路线需要高德 Key（设置里填写）或安装 BRouter 应用")
                     }
