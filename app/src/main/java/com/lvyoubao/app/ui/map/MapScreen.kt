@@ -105,11 +105,22 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
 
     BackHandler { onClose() }
 
-    // 选中最新的地图文件
+    // 选中地图：默认选「当前位置所在的省」；不在任何已下载省里就退回文件名最后一张。
+    // 此前一律取最后一张（按文件名排序恰好常是浙江），人在上海打开页面看到的却是浙江底图
     androidx.compose.runtime.LaunchedEffect(state.maps) {
-        if (selectedMap == null) selectedMap = state.maps.lastOrNull()
+        suspend fun defaultMap(): File? {
+            val here = withContext(Dispatchers.IO) {
+                if (LocationContext.hasPermission(context)) LocationContext.current(context) else null
+            } ?: return state.maps.lastOrNull()
+            return state.maps.lastOrNull { m ->
+                runCatching {
+                    org.mapsforge.map.reader.MapFile(m).mapFileInfo.boundingBox.contains(here.lat, here.lon)
+                }.getOrDefault(false)
+            } ?: state.maps.lastOrNull()
+        }
+        if (selectedMap == null) selectedMap = defaultMap()
         if (selectedMap != null && state.maps.none { it.path == selectedMap?.path }) {
-            selectedMap = state.maps.lastOrNull()
+            selectedMap = defaultMap()
         }
         if (state.maps.isEmpty()) tab = "download"
     }
@@ -533,14 +544,18 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     Spacer(Modifier.weight(1f))
                 }
                 else -> {
-                    var routeOverlay by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
-                    var drawnPoints by remember(map.absolutePath) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
-                    var trackOverlay by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
-                    var drawnTrack by remember(map.absolutePath) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
-                    var mapViewRef by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.android.view.MapView?>(null) }
-                    var meMarker by remember(map.absolutePath) { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
-                    var lastMeDrawn by remember(map.absolutePath) { mutableStateOf<NavigationTracker.Fix?>(null) }
-                    key(map.absolutePath) {
+                    // 底图 = 全部已下载地图的叠加；省份 chips 只负责把视野带到该省。
+                    // 下载列表变化（新下了一个省）才整体重建地图视图
+                    val mapsHash = state.maps.joinToString("|") { it.name }
+                    var routeOverlay by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
+                    var drawnPoints by remember(mapsHash) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
+                    var trackOverlay by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
+                    var drawnTrack by remember(mapsHash) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
+                    var mapViewRef by remember(mapsHash) { mutableStateOf<org.mapsforge.map.android.view.MapView?>(null) }
+                    var meMarker by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
+                    var meAccuracyCircle by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Circle?>(null) }
+                    var lastMeDrawn by remember(mapsHash) { mutableStateOf<NavigationTracker.Fix?>(null) }
+                    key(mapsHash) {
                         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                             AndroidView<org.mapsforge.map.android.view.MapView>(
                                 modifier = Modifier
@@ -548,7 +563,7 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                     .clip(RoundedCornerShape(16.dp)),
                                 factory = { ctx ->
                                     val center = LocationContext.current(ctx)
-                                    // 没有定位时默认落在地图文件的中心，别瞎飘
+                                    // 没有定位时默认落在选中省份的中心，别瞎飘
                                     val bb = runCatching {
                                         val mf = org.mapsforge.map.reader.MapFile(map)
                                         try {
@@ -563,8 +578,10 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                     val centerLon = center?.lon
                                         ?: bb?.let { b -> (b.minLongitude + b.maxLongitude) / 2 }
                                         ?: 116.0
-                                    buildOfflineMapView(ctx, map, centerLat, centerLon, 16.toByte())
-                                        .also { mapViewRef = it }
+                                    buildOfflineMapViewMulti(
+                                        ctx, allValidMaps(ctx), centerLat, centerLon,
+                                        if (center != null) 16.toByte() else 11.toByte(),
+                                    ).also { mapViewRef = it }
                                 },
                                 onReset = { _ -> },
                                 onRelease = { mapView: org.mapsforge.map.android.view.MapView ->
@@ -572,8 +589,8 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                     runCatching { mapView.destroyAll() }
                                 },
                                 update = { mapView: org.mapsforge.map.android.view.MapView ->
-                                    // 切换省份：Compose 会复用旧 MapView（factory 不会重跑），
-                                    // 这里必须原地换底图，否则显示的还是上一个省
+                                    // 切换省份：底图永远是全量叠加，这里只需把视野带到该省
+                                    // （有定位就优先看我自己的位置），不再整体换底图
                                     if (mapView.tag != map.absolutePath) {
                                         mapView.tag = map.absolutePath
                                         val bb = runCatching {
@@ -587,15 +604,24 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                         val meNow = me
                                         val cLat = meNow?.lat ?: bb?.let { b -> (b.minLatitude + b.maxLatitude) / 2 } ?: 28.0
                                         val cLon = meNow?.lon ?: bb?.let { b -> (b.minLongitude + b.maxLongitude) / 2 } ?: 116.0
-                                        swapBaseMap(mapView, map, cLat, cLon, if (meNow != null) 16.toByte() else 11.toByte())
+                                        mapView.model.mapViewPosition.setCenter(
+                                            org.mapsforge.core.model.LatLong(cLat, cLon),
+                                        )
+                                        mapView.model.mapViewPosition.setZoomLevel((if (meNow != null) 16 else 11).toByte())
                                     }
-                                    // 实时位置点（有定位就画，切图后自动补上）
+                                    // 实时位置点（有定位就画，切图后自动补上）+ 精度圈
                                     val f = me
                                     if (f != null && f != lastMeDrawn) {
                                         lastMeDrawn = f
-                                        removeLayer(mapView.layerManager.layers, meMarker)
+                                        val layers = mapView.layerManager.layers
+                                        removeLayer(layers, meAccuracyCircle)
+                                        removeLayer(layers, meMarker)
+                                        if (f.accuracyM > 0f) {
+                                            meAccuracyCircle = accuracyCircle(f.lat, f.lon, f.accuracyM)
+                                                ?.also { layers.add(it) }
+                                        }
                                         meMarker = dotMarker(context, f.lat, f.lon, ME_ARGB, 15)
-                                            ?.also { mapView.layerManager.layers.add(it) }
+                                            ?.also { layers.add(it) }
                                     }
                                     if (state.trackPoints != drawnTrack) {
                                         trackOverlay?.let { overlay ->

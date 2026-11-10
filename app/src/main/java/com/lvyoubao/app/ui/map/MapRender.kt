@@ -109,48 +109,42 @@ internal fun arrowMarker(context: Context, lat: Double, lon: Double, argb: Int, 
 }.getOrNull()
 
 /**
- * 原地换底图：移除旧渲染层（先 onDestroy 关闭旧 MapFile 防句柄泄漏），换上新地图。
- * 用于同一 MapView 切换省份——Compose AndroidView 会复用旧视图，factory 不再执行，
- * 必须在 update 阶段自己换底图，否则切省后显示的还是上一次的地图。
+ * 定位精度圈：当前位置周围一圈半透明蓝，半径 = 定位误差半径（米），专业地图的标配——
+ * 用户一眼看出这个点有多可信，误差大时不会误以为手机飘了。
  */
-internal fun swapBaseMap(
-    mv: org.mapsforge.map.android.view.MapView,
-    mapFile: File,
-    centerLat: Double,
-    centerLon: Double,
-    zoom: Byte,
-) {
-    ensureGraphicFactory(mv.context)
-    val layers = mv.layerManager.layers
-    layers.filterIsInstance<org.mapsforge.map.layer.renderer.TileRendererLayer>().firstOrNull()?.let { old ->
-        runCatching { old.onDestroy() }
-        runCatching { layers.remove(old) }
-    }
-    val tileCache = org.mapsforge.map.android.util.AndroidUtil.createTileCache(
-        mv.context, "lvyoubao-map", mv.model.displayModel.tileSize, 1.0f, 1.5,
-    )
-    val mapDataStore = org.mapsforge.map.reader.MapFile(mapFile)
-    val layer = org.mapsforge.map.layer.renderer.TileRendererLayer(
-        tileCache, mapDataStore, mv.model.mapViewPosition, false, true, false,
-        AndroidGraphicFactory.INSTANCE,
-    )
-    runCatching { layer.setXmlRenderTheme(org.mapsforge.map.rendertheme.InternalRenderTheme.DEFAULT) }
-    layers.add(0, layer)
-    mv.model.mapViewPosition.setCenter(LatLong(centerLat, centerLon))
-    mv.model.mapViewPosition.setZoomLevel(zoom)
+internal fun accuracyCircle(lat: Double, lon: Double, accuracyM: Float): org.mapsforge.map.layer.overlay.Circle? {
+    val radius = accuracyM.coerceIn(15f, 3000f)
+    return runCatching {
+        val fill = AndroidGraphicFactory.INSTANCE.createPaint().apply {
+            setColor(android.graphics.Color.argb(40, 13, 115, 133))
+            setStyle(org.mapsforge.core.graphics.Style.FILL)
+        }
+        val stroke = AndroidGraphicFactory.INSTANCE.createPaint().apply {
+            setColor(android.graphics.Color.argb(90, 13, 115, 133))
+            setStrokeWidth(2f)
+            setStyle(org.mapsforge.core.graphics.Style.STROKE)
+        }
+        org.mapsforge.map.layer.overlay.Circle(LatLong(lat, lon), radius, fill, stroke)
+    }.getOrNull()
 }
 
 /**
- * 挑一张覆盖所有关键点的离线地图；都不覆盖就退回最新一张（和离线地图页的默认选择一致）。
- * points 传 (经度, 纬度) 对。
+ * 全部已下载且可打开的离线地图：底图渲染永远用全量叠加，
+ * 「同一时间只显示一个省」的问题（路线在 A 省却渲染了 B 省的文件）从根上消失。
  */
-internal fun pickMapFile(context: Context, points: List<Pair<Double, Double>>): File? =
-    pickMapFiles(context, points).lastOrNull()
+internal fun allValidMaps(context: Context): List<File> =
+    File(context.filesDir, "maps")
+        .listFiles { f -> f.name.endsWith(".map") }
+        ?.sortedBy { it.name }
+        .orEmpty()
+        .filter { f ->
+            runCatching { org.mapsforge.map.reader.MapFile(f).close() }.isSuccess
+        }
 
 /**
- * 选图结果：相交的地图文件 + 关键点里没有被任何底图盖住的（含猜出的缺失省份）。
- * 用户站在省界上（如三清山服务区，江西侧）而只下载了邻省时，底图就是一半空白——
- * 把"哪片没图、缺哪个省"显式交回给界面，提示一键补下载，而不是静默留白让用户以为是 bug。
+ * 选图结果：全部可渲染的地图文件 + 关键点里没有被任何底图盖住的（含猜出的缺失省份）。
+ * files 现在就是「全部已下载」——底图不再按路线挑省份，下载了哪省就显示哪省，
+ * 缺口报告（uncovered/missingProvinces）只用来提示就地补下载。
  */
 internal data class MapSelection(
     val files: List<File>,
@@ -158,48 +152,17 @@ internal data class MapSelection(
     val uncoveredPoints: List<Pair<Double, Double>>,
     /** 缺失的省份（中文，已排除已下载的，按点位邻近度排序） */
     val missingProvinces: List<String>,
-    /** 一张都不相交退回了「最新一张」兜底（显示的省份与点位无关） */
-    val fellBack: Boolean,
 )
 
 /**
- * 挑出所有与关键点范围相交的离线地图，并报告底图缺口。
- * 跨省路线（如江西→上海）没有一张图能覆盖全程，此前只挑一张就退回
- * 「文件名排序的最后一张」，显示的根本不是路线所在区域——用户"已下载该省地图却不显示"的根因。
- * 改为返回全部相交省份，渲染层逐张叠 TileRendererLayer，路线全程都有底图。
- * points 传 (经度, 纬度) 对；一张都不相交时退回最新一张（与离线地图页默认一致）并标记 fellBack。
+ * 全量底图 + 缺口报告：关键点（起终点）落在任何一张已下载地图的省界框外时，
+ * 把"哪片没图、缺哪个省"显式交回给界面，提示一键补下载，而不是静默留白让用户以为是 bug。
+ * points 传 (经度, 纬度) 对。
  */
 internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double>>): MapSelection {
-    val maps = File(context.filesDir, "maps")
-        .listFiles { f -> f.name.endsWith(".map") }
-        ?.sortedBy { it.name }
-        .orEmpty()
+    val maps = allValidMaps(context)
     val targets = points.filter { it.first != 0.0 || it.second != 0.0 }
-    if (maps.isEmpty() || targets.isEmpty()) {
-        return MapSelection(
-            files = if (maps.isEmpty()) emptyList() else listOf(maps.last()),
-            uncoveredPoints = targets,
-            missingProvinces = targets.flatMap { MapRegions.guessProvinces(it.second, it.first) }.distinct(),
-            fellBack = maps.isNotEmpty(),
-        )
-    }
-    // 用路线包络框和每张图的省界框做相交判断：几千个折线点逐点 contains 太慢，也漏掉途经省
-    val envelope = org.mapsforge.core.model.BoundingBox(
-        targets.minOf { it.second }, targets.minOf { it.first },
-        targets.maxOf { it.second }, targets.maxOf { it.first },
-    )
-    val covering = maps.filter { m ->
-        runCatching {
-            val mf = org.mapsforge.map.reader.MapFile(m)
-            try {
-                mf.mapFileInfo.boundingBox.intersects(envelope)
-            } finally {
-                runCatching { mf.close() }
-            }
-        }.getOrDefault(false)
-    }.ifEmpty { listOf(maps.last()) }
-    // 逐点查覆盖：只对少数关键点（起终点）做精确 bbox 判断，途经点不查（路线穿省已由相交覆盖）
-    val boxes = covering.map { f ->
+    val boxes = maps.mapNotNull { f ->
         runCatching {
             val mf = org.mapsforge.map.reader.MapFile(f)
             try {
@@ -208,7 +171,7 @@ internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double
                 runCatching { mf.close() }
             }
         }.getOrNull()
-    }.filterNotNull()
+    }
     val uncovered = targets.filter { p -> boxes.none { (_, b) -> b.contains(p.second, p.first) } }
     val downloaded = boxes.map { (f, _) -> MapRegions.displayName(f.name) }.toSet()
     val missing = uncovered
@@ -217,13 +180,10 @@ internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double
         .distinct()
     android.util.Log.i(
         "lvyoubao.ai",
-        "地图选图：files=${covering.joinToString { it.name }} 未覆盖关键点=${uncovered.size} 缺失省份=$missing",
+        "底图全量叠加：${maps.size} 张 ${maps.joinToString { it.name }} 未覆盖关键点=${uncovered.size} 缺失省份=$missing",
     )
-    return MapSelection(covering, uncovered, missing, fellBack = covering.size == 1 && covering[0] == maps.last() && maps.size > 1)
+    return MapSelection(maps, uncovered, missing)
 }
-
-internal fun pickMapFiles(context: Context, points: List<Pair<Double, Double>>): List<File> =
-    pickMapSelection(context, points).files
 
 /** 找一个能把所有点装下的缩放级别（留 18% 边距） */
 internal fun fitZoomLevel(widthPx: Int, heightPx: Int, points: List<LatLong>): Byte {
@@ -314,6 +274,16 @@ internal fun buildOfflineMapViewMulti(
     }
     // 内置缩放按钮位置固定在右下，会挡住自绘的「我的位置/全屏」等操作，统一关掉、由界面层自己画
     runCatching { mapView.setBuiltInZoomControls(false) }
+    // 比例尺只留公制：mapsforge 默认画两行（km + mi），中国人看英里反而添乱
+    runCatching {
+        val sb = mapView.mapScaleBar
+        if (sb is org.mapsforge.map.scalebar.DefaultMapScaleBar) {
+            sb.setScaleBarMode(org.mapsforge.map.scalebar.DefaultMapScaleBar.ScaleBarMode.SINGLE)
+            sb.setDistanceUnitAdapter(org.mapsforge.map.scalebar.MetricUnitAdapter.INSTANCE)
+            sb.setSecondaryDistanceUnitAdapter(org.mapsforge.map.scalebar.MetricUnitAdapter.INSTANCE)
+        }
+        sb.isVisible = true
+    }
     mapView.model.mapViewPosition.setCenter(LatLong(centerLat, centerLon))
     mapView.model.mapViewPosition.setZoomLevel(zoom)
     return mapView

@@ -210,6 +210,7 @@ fun RouteMapCard(
     var originMarker by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
     var destMarker by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
     var meMarker by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
+    var meAccuracyCircle by remember { mutableStateOf<org.mapsforge.map.layer.overlay.Circle?>(null) }
     var lastDrawKey by remember { mutableStateOf("") }
     var lastMeDrawn by remember { mutableStateOf<NavigationTracker.Fix?>(null) }
     var followZoomed by remember { mutableStateOf(false) }
@@ -477,7 +478,7 @@ fun RouteMapCard(
                 runCatching { mv.destroyAll() }
                 if (mapViewRef === mv) mapViewRef = null
                 routeLayer = null; routeCasingLayer = null
-                originMarker = null; destMarker = null; meMarker = null
+                originMarker = null; destMarker = null; meMarker = null; meAccuracyCircle = null
                 lastDrawKey = ""
             },
             update = { mv ->
@@ -534,7 +535,12 @@ fun RouteMapCard(
                 if (f != null && f != lastMeDrawn) {
                     lastMeDrawn = f
                     val layers = mv.layerManager.layers
+                    removeLayer(layers, meAccuracyCircle)
                     removeLayer(layers, meMarker)
+                    // 精度圈垫在蓝点下面：误差多大一眼可见（专业地图标配）；0=未知不画
+                    if (f.accuracyM > 0f) {
+                        meAccuracyCircle = accuracyCircle(f.lat, f.lon, f.accuracyM)?.also { layers.add(it) }
+                    }
                     // 导航中：朝向箭头（Google 步行导航样式，箭头指向运动方向）；平时蓝点
                     meMarker = if (navigating && plan != null && plan.points.size >= 2) {
                         val idx = NavigationTracker.nearestIndex(f.lat, f.lon, plan.points)
