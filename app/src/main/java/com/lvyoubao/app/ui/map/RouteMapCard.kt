@@ -6,10 +6,12 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.view.MotionEvent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,7 +35,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -594,7 +595,7 @@ fun RouteMapCard(
 
     // ---- 圆形小按钮 ----
     @Composable
-    fun RoundMapButton(label: String, sizeDp: Int = 44, desc: String = label, onClick: () -> Unit) {
+    fun RoundMapButton(label: String, sizeDp: Int = 48, desc: String = label, onClick: () -> Unit) {
         Surface(
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surface,
@@ -751,26 +752,45 @@ fun RouteMapCard(
                 }
             }
 
-            // 多方案切换
+            // 多方案切换：横向方案卡（标签 + 时长 + 距离），收起态也显示——
+            // 这是选路的依据，学高德「距离短 7分钟 2.4公里」那种卡片，不再挤成小 chip
             val planList = plans[mode]
-            if (!compact && planList != null && planList.size > 1) {
+            if (planList != null && planList.size > 1) {
                 Spacer(Modifier.height(6.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
                 ) {
                     planList.forEachIndexed { i, p ->
-                        AssistChip(
+                        val selected = i == planIndex
+                        Surface(
                             onClick = { planIndex = i },
-                            modifier = if (big) Modifier.height(44.dp) else Modifier,
-                            label = {
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (selected) MaterialTheme.colorScheme.primaryContainer
+                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            border = if (selected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                        ) {
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
                                 Text(
                                     p.tag.ifBlank { "方案${i + 1}" },
-                                    fontSize = if (big) 18.sp else 13.sp,
-                                    fontWeight = if (i == planIndex) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = if (big) 15.sp else 11.sp,
+                                    color = if (selected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
-                            },
-                        )
+                                Text(
+                                    MapCardData.durationText(p.durationMin),
+                                    fontSize = if (big) 20.sp else 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    MapCardData.distanceText(p.distanceM),
+                                    fontSize = if (big) 15.sp else 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -802,7 +822,7 @@ fun RouteMapCard(
                 Text(it, color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall)
             }
 
-            // 操作区
+            // 操作区：开始导航占满剩余宽度（像高德的大蓝按钮），跳高德作为次选
             Spacer(Modifier.height(8.dp))
             if (!navigating) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -810,7 +830,7 @@ fun RouteMapCard(
                         onClick = { startNavigation() },
                         enabled = currentPlan != null || card.kind == "place",
                         // 同排按钮统一 48dp（大字模式 56dp）、同一字号，主按钮加粗
-                        modifier = Modifier.height(if (big) 56.dp else 48.dp),
+                        modifier = Modifier.weight(1f).height(if (big) 56.dp else 48.dp),
                         shape = RoundedCornerShape(14.dp),
                     ) { Text("开始导航", fontSize = if (big) 20.sp else 15.sp, fontWeight = FontWeight.Bold) }
                     OutlinedButton(
@@ -1004,7 +1024,7 @@ fun RouteMapCard(
                         }
                         // 罗盘：指示设备朝向（本地地图库暂不支持底图旋转，用指北箭头代替）
                         Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
-                            Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
                                 Text(
                                     "▲",
                                     fontSize = 20.sp,
@@ -1036,18 +1056,24 @@ fun RouteMapCard(
                                 .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth(),
+                            // 面板头部：拖拽把手 + 展开/收起提示，整行可点（专业地图底部面板的标配样式）
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { panelFull = !panelFull }
+                                    .padding(bottom = 4.dp),
                             ) {
+                                Surface(
+                                    shape = RoundedCornerShape(3.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    modifier = Modifier.size(width = 42.dp, height = 4.dp),
+                                ) {}
                                 Text(
-                                    if (panelFull) "⌄ 收起面板" else "⌃ 展开面板（候选点/方案/分步指引）",
-                                    fontSize = if (big) 16.sp else 13.sp,
+                                    if (panelFull) "收起面板" else "展开候选点 / 分步指引",
+                                    fontSize = if (big) 15.sp else 12.sp,
                                     color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .clickable { panelFull = !panelFull }
-                                        .padding(vertical = 4.dp),
+                                    modifier = Modifier.padding(top = 5.dp),
                                 )
                             }
                             InfoPanel(Modifier.fillMaxWidth(), compact = !panelFull)
