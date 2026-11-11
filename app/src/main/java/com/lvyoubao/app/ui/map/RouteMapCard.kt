@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -38,7 +39,6 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -131,21 +131,26 @@ fun RouteMapCard(
     val settings by app.settingsRepository.settings.collectAsState(initial = AiSettings())
 
     // 底图选图（带缺口报告）：key 进 mapVersion——就地补下载完一个省后 version+1，
-    // 选图重算、地图视图整体重建，刚下载的省份立刻出现在底图里
+    // 选图重算、地图视图整体重建，刚下载的省份立刻出现在底图里。
+    // 探瓦片数据要读文件，挂到 IO 线程异步做，结果回来前底图区先显示「检查中」
     var mapVersion by remember(card) { mutableStateOf(0) }
-    val selection = remember(card, mapVersion) {
-        pickMapSelection(
-            context,
-            listOf(card.fromLon to card.fromLat, card.toLon to card.toLat) +
-                card.points.map { p -> (p.getOrNull(0) ?: 0.0) to (p.getOrNull(1) ?: 0.0) },
-        )
+    var selection by remember(card) { mutableStateOf<MapSelection?>(null) }
+    LaunchedEffect(card, mapVersion) {
+        selection = withContext(Dispatchers.IO) {
+            pickMapSelection(
+                context,
+                listOf(card.fromLon to card.fromLat, card.toLon to card.toLat) +
+                    card.points.map { p -> (p.getOrNull(0) ?: 0.0) to (p.getOrNull(1) ?: 0.0) },
+            )
+        }
     }
-    val mapFiles = selection.files
+    val mapFiles = selection?.files.orEmpty()
 
-    // 缺省就地补下载：哪个省在下/进度/失败原因；成功后 mapVersion+1 触发选图与底图重建
-    var quickDlProvince by remember { mutableStateOf<String?>(null) }
-    var quickDlPercent by remember { mutableStateOf(0) }
-    var quickDlError by remember { mutableStateOf<String?>(null) }
+    // 缺省就地补下载：哪个省在下/进度/失败原因；成功后 mapVersion+1 触发选图与底图重建。
+    // 省文件存在但关键点探不到数据（残缺/只盖到邻省一角）时强制重下，正好治坏文件
+    var quickDlProvince by remember(card) { mutableStateOf<String?>(null) }
+    var quickDlPercent by remember(card) { mutableStateOf(0) }
+    var quickDlError by remember(card) { mutableStateOf<String?>(null) }
     fun startQuickDownload(province: String) {
         if (quickDlProvince != null) return
         quickDlProvince = province
@@ -153,7 +158,10 @@ fun RouteMapCard(
         quickDlPercent = 0
         scope.launch {
             runCatching {
-                MapQuickDownload.downloadProvince(context, province, settings.mapMirrorUrl) { done, total ->
+                val slug = MapRegions.slugOf(province)
+                val fileExists = slug != null &&
+                    java.io.File(java.io.File(context.filesDir, "maps"), "$slug.map").exists()
+                MapQuickDownload.downloadProvince(context, province, settings.mapMirrorUrl, force = fileExists) { done, total ->
                     if (total > 0) quickDlPercent = ((done * 100) / total).toInt().coerceIn(0, 100)
                 }
             }.onSuccess {
@@ -164,6 +172,13 @@ fun RouteMapCard(
                 quickDlProvince = null
             }
         }
+    }
+
+    // 缺口自动补下载（零决策）：检测到关键点没有底图就直接开下，不再等用户发现空白再找按钮；
+    // 失败后停手，提示条保留「下载」按钮人工重试，避免死循环耗流量
+    LaunchedEffect(selection) {
+        val miss = selection?.missingProvinces?.firstOrNull()
+        if (miss != null && quickDlProvince == null && quickDlError == null) startQuickDownload(miss)
     }
 
     // ---- 目的地（地点卡可换选）与路线方案 ----
@@ -408,7 +423,17 @@ fun RouteMapCard(
     @Composable
     fun CardMap(modifier: Modifier) {
         Box(modifier) {
-            if (mapFiles.isEmpty()) {
+            if (selection == null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(if (expanded) 0.dp else 14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("底图检查中…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else if (mapFiles.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -577,15 +602,15 @@ fun RouteMapCard(
             )
             }
             }
-            // 底图缺口提示条：盖在地图上方，一键补下载（下载中显示进度，失败显示原因可重试）
-            if (selection.missingProvinces.isNotEmpty()) {
+            // 底图缺口提示条：盖在地图上方，自动补下载中显示进度（失败可手动重试）
+            val sel = selection
+            if (sel != null && sel.missingProvinces.isNotEmpty()) {
                 MissingMapHint(
-                    provinces = selection.missingProvinces,
+                    provinces = sel.missingProvinces,
                     downloading = quickDlProvince,
                     percent = quickDlPercent,
                     error = quickDlError,
-                    onDownload = { startQuickDownload(selection.missingProvinces.first()) },
-                    modifier = Modifier
+                    onDownload = { startQuickDownload(sel.missingProvinces.first()) },                    modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 8.dp),
                 )
@@ -593,19 +618,34 @@ fun RouteMapCard(
         }
     }
 
-    // ---- 圆形小按钮 ----
+    // ---- 胶囊控制列（花瓣地图风格：白胶囊 + 细分隔线 + 48dp 命中区）里的图标按钮 ----
     @Composable
-    fun RoundMapButton(label: String, sizeDp: Int = 48, desc: String = label, onClick: () -> Unit) {
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surface,
-            shadowElevation = 2.dp,
-            modifier = Modifier.semantics { contentDescription = desc }.size(sizeDp.dp),
+    fun MapControlIcon(label: String, desc: String, onClick: () -> Unit) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(48.dp)
+                .semantics { contentDescription = desc }
+                .clickable(onClick = onClick),
         ) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.clickable { onClick() }) {
-                Text(label, fontSize = if (label.length == 1) 20.sp else 14.sp, fontWeight = FontWeight.Bold)
-            }
+            Text(
+                label,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
         }
+    }
+
+    @Composable
+    fun ControlDivider() {
+        Box(
+            Modifier
+                .padding(horizontal = 10.dp)
+                .fillMaxWidth(0.62f)
+                .height(1.dp)
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        )
     }
 
     fun locateMe() {
@@ -731,20 +771,37 @@ fun RouteMapCard(
                 }
             }
 
-            // 出行方式（FlowRow 挤不下自动换行，不再竖排）
+            // 出行方式：专业地图的胶囊样式（选中=主色填充+白字加粗），FlowRow 挤不下自动换行
             Spacer(Modifier.height(8.dp))
             FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 RouteMode.entries.forEach { m ->
-                    FilterChip(
-                        selected = mode == m,
+                    val selected = mode == m
+                    Surface(
                         onClick = { switchMode(m) },
-                        // 大字模式大字不再挤默认 32dp 高的 chip
-                        modifier = if (big) Modifier.height(44.dp) else Modifier,
-                        label = { Text("${MODE_EMOJI[m]}${m.label}", fontSize = if (big) 18.sp else 14.sp) },
-                    )
+                        shape = RoundedCornerShape(50),
+                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .heightIn(min = if (big) 44.dp else 38.dp)
+                                .padding(horizontal = 13.dp, vertical = 6.dp),
+                        ) {
+                            Text(
+                                "${MODE_EMOJI[m]} ${m.label}",
+                                fontSize = if (big) 17.sp else 14.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
                 }
                 if (loading) {
                     Spacer(Modifier.width(6.dp))
@@ -753,9 +810,10 @@ fun RouteMapCard(
             }
 
             // 多方案切换：横向方案卡（标签 + 时长 + 距离），收起态也显示——
-            // 这是选路的依据，学高德「距离短 7分钟 2.4公里」那种卡片，不再挤成小 chip
+            // 这是选路的依据，学高德「距离短 7分钟 2.4公里」那种卡片。
+            // 只有一个方案也显示（专业地图始终给一张「智能路线」卡，用户知道当前走的是哪条）
             val planList = plans[mode]
-            if (planList != null && planList.size > 1) {
+            if (planList != null && planList.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1004,27 +1062,33 @@ fun RouteMapCard(
                     }
 
                     // 右侧竖排控制列：放大 / 缩小 / 罗盘 / 我的位置
-                    // 底部悬浮面板会盖住屏幕下半段，控制列在整屏垂直居中的基础上
-                    // 上移面板高的一半，正好落在可见地图区域的中间（列表展开也不挡）
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    // 专业地图的样式：四个控制收进一个白色胶囊（圆角 26dp），控制之间细线分隔，
+                    // 不再是四颗散落的圆球；胶囊整体仍避让底部面板（上移面板高的一半）
+                    Surface(
+                        shape = RoundedCornerShape(26.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                        shadowElevation = 4.dp,
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
                             .padding(end = 12.dp)
                             .graphicsLayer { translationY = -panelHeightPx / 2f },
                     ) {
-                        RoundMapButton("＋") {
-                            val mv = mapViewRef
-                            if (mv != null) mv.model.mapViewPosition.zoomIn()
-                        }
-                        RoundMapButton("－") {
-                            val mv = mapViewRef
-                            if (mv != null) mv.model.mapViewPosition.zoomOut()
-                        }
-                        // 罗盘：指示设备朝向（本地地图库暂不支持底图旋转，用指北箭头代替）
-                        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
-                            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            MapControlIcon("＋", "放大地图") {
+                                val mv = mapViewRef
+                                if (mv != null) mv.model.mapViewPosition.zoomIn()
+                            }
+                            ControlDivider()
+                            MapControlIcon("－", "缩小地图") {
+                                val mv = mapViewRef
+                                if (mv != null) mv.model.mapViewPosition.zoomOut()
+                            }
+                            ControlDivider()
+                            // 罗盘：指示设备朝向（本地地图库暂不支持底图旋转，用指北箭头代替）
+                            Box(
+                                Modifier.size(48.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
                                 Text(
                                     "▲",
                                     fontSize = 20.sp,
@@ -1032,17 +1096,19 @@ fun RouteMapCard(
                                     modifier = Modifier.graphicsLayer { rotationZ = azimuth },
                                 )
                             }
-                        }
-                        RoundMapButton("◎") {
-                            locateMe()
+                            ControlDivider()
+                            MapControlIcon("◎", "回到我的位置") {
+                                locateMe()
+                            }
                         }
                     }
 
                     // 底部悬浮面板（高度变化实时回传给控制列做避让）
-                    // 默认收起：只留标题/摘要/方式/操作，点「展开面板」才显示候选点与分步指引
+                    // 默认收起：只留标题/摘要/方式/操作，点「展开面板」才显示候选点与分步指引；
+                    // 内容再包一层导航栏 insets——三键虚拟导航会盖住面板底行，「开始导航/高德地图」只露一半就是这么来的
                     Surface(
                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
                         shadowElevation = 8.dp,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -1052,9 +1118,10 @@ fun RouteMapCard(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = if (panelFull) (if (big) 430.dp else 340.dp) else Dp.Unspecified)
+                                .heightIn(max = if (panelFull) (if (big) 470.dp else 380.dp) else Dp.Unspecified)
                                 .verticalScroll(rememberScrollState())
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                .navigationBarsPadding()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
                         ) {
                             // 面板头部：拖拽把手 + 展开/收起提示，整行可点（专业地图底部面板的标配样式）
                             Column(
@@ -1067,13 +1134,13 @@ fun RouteMapCard(
                                 Surface(
                                     shape = RoundedCornerShape(3.dp),
                                     color = MaterialTheme.colorScheme.outlineVariant,
-                                    modifier = Modifier.size(width = 42.dp, height = 4.dp),
+                                    modifier = Modifier.size(width = 52.dp, height = 5.dp),
                                 ) {}
                                 Text(
                                     if (panelFull) "收起面板" else "展开候选点 / 分步指引",
                                     fontSize = if (big) 15.sp else 12.sp,
                                     color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(top = 5.dp),
+                                    modifier = Modifier.padding(top = 6.dp),
                                 )
                             }
                             InfoPanel(Modifier.fillMaxWidth(), compact = !panelFull)

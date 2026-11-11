@@ -9,18 +9,22 @@ internal object MapQuickDownload {
 
     /**
      * 下载一个省的离线地图（provinceZh 传中文名，如「江西」），成功返回地图文件。
-     * 本地已有完好文件就直接返回不重复下。失败抛异常，由调用方展示；断点保留可重试。
+     * 本地已有完好文件就直接返回不重复下；force=true 跳过这个检查强制重下——
+     * 文件存在但关键点探不到数据时（残缺/只盖到邻省一角），只有重下才能治好。
+     * 失败抛异常，由调用方展示；断点保留可重试。
      */
     suspend fun downloadProvince(
         context: android.content.Context,
         provinceZh: String,
         mirrorUrl: String,
+        force: Boolean = false,
         onProgress: (done: Long, total: Long) -> Unit,
     ): java.io.File {
         val slug = MapRegions.slugOf(provinceZh)
             ?: throw com.lvyoubao.app.data.ApiException("没找到「$provinceZh」对应的地图下载项")
         val dir = java.io.File(context.filesDir, "maps").apply { mkdirs() }
         val dest = java.io.File(dir, "$slug.map")
+        if (force) dest.delete()
         if (dest.exists() && dest.length() > 0) {
             val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 runCatching { org.mapsforge.map.reader.MapFile(dest).close(); true }.getOrDefault(false)

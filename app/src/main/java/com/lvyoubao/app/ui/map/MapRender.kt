@@ -129,6 +129,30 @@ internal fun accuracyCircle(lat: Double, lon: Double, accuracyM: Float): org.map
 }
 
 /**
+ * 某张 .map 在点位附近是否「真有瓦片数据」：
+ * bbox 包含 ≠ 有数据——省界框会盖到邻省一角（浙江的框北缘就压着浦东），
+ * 只下了邻省时点位照样落进邻省的框里，表现却是该区域一片空白（用户实锤「在上海看到的是浙江的框、灰的图」）；
+ * 残缺文件（同步半截）文件头能过校验，瓦片区却是空的。所以真探一次瓦片：
+ * z12 一片约 10 公里见方，城市/乡镇必有道路，退一级 z10（~40 公里）兜底荒野；
+ * 有 POI 或道路才算「有图」。失败一律按没数据处理。
+ */
+internal fun mapHasDataAt(file: File, lat: Double, lon: Double): Boolean = runCatching {
+    val mf = org.mapsforge.map.reader.MapFile(file)
+    try {
+        if (!mf.mapFileInfo.boundingBox.contains(lat, lon)) return@runCatching false
+        for (z in 12 downTo 10) {
+            val tx = MercatorProjection.longitudeToTileX(lon, z.toByte()).toInt()
+            val ty = MercatorProjection.latitudeToTileY(lat, z.toByte()).toInt()
+            val data = mf.readMapData(org.mapsforge.core.model.Tile(tx, ty, z.toByte(), 256))
+            if (data.pointOfInterests.isNotEmpty() || data.ways.isNotEmpty()) return@runCatching true
+        }
+        false
+    } finally {
+        runCatching { mf.close() }
+    }
+}.getOrDefault(false)
+
+/**
  * 全部已下载且可打开的离线地图：底图渲染永远用全量叠加，
  * 「同一时间只显示一个省」的问题（路线在 A 省却渲染了 B 省的文件）从根上消失。
  */
@@ -155,32 +179,30 @@ internal data class MapSelection(
 )
 
 /**
- * 全量底图 + 缺口报告：关键点（起终点）落在任何一张已下载地图的省界框外时，
- * 把"哪片没图、缺哪个省"显式交回给界面，提示一键补下载，而不是静默留白让用户以为是 bug。
+ * 全量底图 + 缺口报告：关键点（起终点）探不到任何已下载地图的瓦片数据时，
+ * 把"哪片没图、缺哪个省"显式交回给界面，自动就地补下载，而不是静默留白让用户以为是 bug。
+ * 覆盖判定用「真有瓦片数据」（mapHasDataAt）而不是省框包含——bbox 会盖到邻省一角、
+ * 残缺文件能过文件头校验，两者的表现都是空白但按 bbox 判"有图"。
  * points 传 (经度, 纬度) 对。
  */
 internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double>>): MapSelection {
     val maps = allValidMaps(context)
     val targets = points.filter { it.first != 0.0 || it.second != 0.0 }
-    val boxes = maps.mapNotNull { f ->
-        runCatching {
-            val mf = org.mapsforge.map.reader.MapFile(f)
-            try {
-                f to mf.mapFileInfo.boundingBox
-            } finally {
-                runCatching { mf.close() }
-            }
-        }.getOrNull()
-    }
-    val uncovered = targets.filter { p -> boxes.none { (_, b) -> b.contains(p.second, p.first) } }
-    val downloaded = boxes.map { (f, _) -> MapRegions.displayName(f.name) }.toSet()
+    // 每张图对关键点探数据（有数据即短路）；探得到数据的省才是真覆盖
+    val provincesWithData = maps
+        .filter { f -> targets.any { mapHasDataAt(f, it.second, it.first) } }
+        .map { MapRegions.displayName(it.name) }
+        .toSet()
+    val uncovered = targets.filter { p -> maps.none { mapHasDataAt(it, p.second, p.first) } }
     val missing = uncovered
         .flatMap { MapRegions.guessProvinces(it.second, it.first) }
-        .filter { it !in downloaded }
+        // 排除「探得到数据」的省；有文件但探不到数据的省（残缺/只盖到邻省一角）保留——
+        // 缺省补下载会强制重下该省，正好把坏文件治好
+        .filter { it !in provincesWithData }
         .distinct()
     android.util.Log.i(
         "lvyoubao.ai",
-        "底图全量叠加：${maps.size} 张 ${maps.joinToString { it.name }} 未覆盖关键点=${uncovered.size} 缺失省份=$missing",
+        "底图${maps.size}张 真有数据省=$provincesWithData 未覆盖关键点=${uncovered.size} 缺失省份=$missing",
     )
     return MapSelection(maps, uncovered, missing)
 }
