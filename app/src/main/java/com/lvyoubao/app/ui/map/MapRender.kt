@@ -153,8 +153,11 @@ internal fun mapHasDataAt(file: File, lat: Double, lon: Double): Boolean = runCa
 }.getOrDefault(false)
 
 /**
- * 全部已下载且可打开的离线地图：底图渲染永远用全量叠加，
+ * 全部已下载、头校验通过且「文件完整」的离线地图：底图渲染永远用全量叠加，
  * 「同一时间只显示一个省」的问题（路线在 A 省却渲染了 B 省的文件）从根上消失。
+ * 完整性校验是关键：.map 文件头里记着声称的 fileSize——同步半截/中断落盘的残缺文件
+ * 实际长度对不上（头能过打开校验、前段还有数据），一进渲染层对应区域就是灰板，
+ * 瓦片探针还会被残存的前段数据骗成「有图」——这里直接剔除，让缺口报告把它当缺失省强制重下。
  */
 internal fun allValidMaps(context: Context): List<File> =
     File(context.filesDir, "maps")
@@ -162,7 +165,14 @@ internal fun allValidMaps(context: Context): List<File> =
         ?.sortedBy { it.name }
         .orEmpty()
         .filter { f ->
-            runCatching { org.mapsforge.map.reader.MapFile(f).close() }.isSuccess
+            runCatching {
+                val mf = org.mapsforge.map.reader.MapFile(f)
+                try {
+                    f.length() == mf.mapFileInfo.fileSize
+                } finally {
+                    runCatching { mf.close() }
+                }
+            }.getOrDefault(false)
         }
 
 /**
@@ -207,9 +217,10 @@ internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double
     return MapSelection(maps, uncovered, missing)
 }
 
-/** 找一个能把所有点装下的缩放级别（留 18% 边距） */
+/** 找一个能把所有点装下的缩放级别（留 18% 边距）；单点（地点卡「附近」）直接给街级 16 */
 internal fun fitZoomLevel(widthPx: Int, heightPx: Int, points: List<LatLong>): Byte {
     if (widthPx <= 0 || heightPx <= 0 || points.isEmpty()) return 14
+    if (points.size == 1) return 16
     var zoom = 12
     while (zoom < 20) {
         val xs = points.map { MercatorProjection.longitudeToPixelX(it.longitude, zoom.toByte(), 256) }

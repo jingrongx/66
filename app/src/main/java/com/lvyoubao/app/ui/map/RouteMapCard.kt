@@ -22,8 +22,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -67,6 +68,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -175,10 +177,15 @@ fun RouteMapCard(
     }
 
     // 缺口自动补下载（零决策）：检测到关键点没有底图就直接开下，不再等用户发现空白再找按钮；
-    // 失败后停手，提示条保留「下载」按钮人工重试，避免死循环耗流量
+    // 失败后停手，提示条保留「下载」按钮人工重试；同一省自动强重只做一次——
+    // 万一下载源本身就是坏数据，重下完仍探不到会导致「下→查→缺→再下」死循环，第二趟起只提示不自动
+    var autoRedownloaded by remember(card) { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(selection) {
         val miss = selection?.missingProvinces?.firstOrNull()
-        if (miss != null && quickDlProvince == null && quickDlError == null) startQuickDownload(miss)
+        if (miss != null && miss !in autoRedownloaded && quickDlProvince == null && quickDlError == null) {
+            autoRedownloaded = autoRedownloaded + miss
+            startQuickDownload(miss)
+        }
     }
 
     // ---- 目的地（地点卡可换选）与路线方案 ----
@@ -484,8 +491,11 @@ fun RouteMapCard(
                                 },
                             ),
             factory = { ctx ->
-                val centerLat = if (card.hasOrigin) (card.fromLat + dest.second) / 2 else dest.second
-                val centerLon = if (card.hasOrigin) (card.fromLon + dest.first) / 2 else dest.first
+                // place 卡是「目的地附近」，不拿 from 取景——from 可能是生成卡片那天的旧位置
+                //（人在上海、卡还框着江西），整个视野被拖到千里外；route 卡才用起终点中点
+                val useFrom = card.hasOrigin && card.kind == "route"
+                val centerLat = if (useFrom) (card.fromLat + dest.second) / 2 else dest.second
+                val centerLon = if (useFrom) (card.fromLon + dest.first) / 2 else dest.first
                 buildOfflineMapViewMulti(ctx, mapFiles, centerLat, centerLon, 14.toByte())
                     .also { mv ->
                         mapViewRef = mv
@@ -542,7 +552,8 @@ fun RouteMapCard(
                     mv.post {
                         val pts = plan?.points?.map { org.mapsforge.core.model.LatLong(it.second, it.first) }
                             ?: listOf(org.mapsforge.core.model.LatLong(dest.second, dest.first))
-                        val all = if (card.hasOrigin) {
+                        // place 卡视野只框目的地（及候选点），不框 from（生成卡片时的旧位置会把视野拖去千里外）
+                        val all = if (card.hasOrigin && card.kind == "route") {
                             pts + org.mapsforge.core.model.LatLong(card.fromLat, card.fromLon)
                         } else pts
                         if (all.isNotEmpty()) {
@@ -639,10 +650,10 @@ fun RouteMapCard(
 
     @Composable
     fun ControlDivider() {
+        // 固定宽：在 wrap 宽度的胶囊里用 fillMaxWidth 会跟父级互相撑（实机撑成半屏大白卡）
         Box(
             Modifier
-                .padding(horizontal = 10.dp)
-                .fillMaxWidth(0.62f)
+                .width(28.dp)
                 .height(1.dp)
                 .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
         )
@@ -1000,6 +1011,11 @@ fun RouteMapCard(
     // ---- 全屏地图（像高德一样整屏操作） ----
     if (expanded) {
         val azimuth by CompassSensor.azimuth
+        // 全屏 Dialog 是独立 window，部分系统 insets 派发不给力（实机三键导航栏盖住面板底行，
+        // 「开始导航/高德地图」只露上半）——在 activity 侧读一次导航栏高度，Dialog 内手动垫
+        val navBarBottomDp = with(LocalDensity.current) {
+            WindowInsets.navigationBars.getBottom(this).toDp()
+        }
         DisposableEffect(Unit) {
             CompassSensor.start(context)
             onDispose { CompassSensor.stop(context) }
@@ -1105,7 +1121,7 @@ fun RouteMapCard(
 
                     // 底部悬浮面板（高度变化实时回传给控制列做避让）
                     // 默认收起：只留标题/摘要/方式/操作，点「展开面板」才显示候选点与分步指引；
-                    // 内容再包一层导航栏 insets——三键虚拟导航会盖住面板底行，「开始导航/高德地图」只露一半就是这么来的
+                    // 底部垫上 activity 侧读到的导航栏高度——三键虚拟导航不再盖住「开始导航/高德地图」
                     Surface(
                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
                         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
@@ -1120,7 +1136,7 @@ fun RouteMapCard(
                                 .fillMaxWidth()
                                 .heightIn(max = if (panelFull) (if (big) 470.dp else 380.dp) else Dp.Unspecified)
                                 .verticalScroll(rememberScrollState())
-                                .navigationBarsPadding()
+                                .padding(bottom = navBarBottomDp)
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                         ) {
                             // 面板头部：拖拽把手 + 展开/收起提示，整行可点（专业地图底部面板的标配样式）
