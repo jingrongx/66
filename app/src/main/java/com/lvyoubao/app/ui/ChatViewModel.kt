@@ -16,6 +16,7 @@ import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.RichBlocks
 import com.lvyoubao.app.data.observation.FatigueEngine
 import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.MapIntent
@@ -757,7 +758,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         val WEATHER_INTENT = Regex("天气|下雨|下雪|降雪|降雨|天晴|放晴|转晴|晴不晴|气温|温度|几度|冷不冷|热不热|穿什么|带伞|雨伞|刮风|风力|风速|湿度|降水")
         /** 拼一条消息的可朗读文本（回答 + 要点 + 建议），会话页与大字模式共用 */
         fun speakableText(message: SessionMessage): String = buildString {
-            append(message.text)
+            // v0.8.48：正文里的表格读成「列头…第1行…」、图表跳过（读代码没意义），其余文本原样
+            append(RichBlocks.speakableText(message.text))
             message.steps.forEachIndexed { i, s -> append("。第${i + 1}条，$s") }
             message.action?.let { append("。建议：$it") }
         }

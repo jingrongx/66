@@ -719,6 +719,7 @@ class AiClient(private val settings: AiSettings) {
             4. 不确定的数字绝不编造：优先使用搜索结果或工具返回的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。
             5. 情境里给了「常用地址·家的地址」时，问回家/回家的路怎么走：直接输出 map（type=route，origin 留空=当前位置，destination 填家的地址），answer 一句话报距离和预计时间；绝不要反问"回哪"，也不要联想成歌名/游戏/影视。
             6. 指代与改写任务（"改成白话文""翻译一下""解释一下上面""把表格里的英文改成中文"这类）：说的就是上文最近一条相关内容（刚给过的诗词/表格/文段），直接对它执行改写/翻译/解释，把完整结果放进 answer；绝不解释术语本身（用户说"改成白话文"是要你改写，不是问"白话文"是什么词），也绝不让用户重发原文。
+            7. 对比/价格/时刻/清单类信息适合表格时，answer 里写 Markdown 表格（| 列头 | 列头 | 两行以上，第二行必须是 |---|---| 分隔行）；流程、因果关系、组织结构、思维导图类信息 answer 里写 ```mermaid 代码块（图型用 flowchart TD、mindmap、sequenceDiagram 等，节点文字用简短中文）——界面会把表格和图表渲染成可点开全屏的卡片，保存表格时绝不要用图片描述代替表格本身。
             以 json 格式输出：{"answer": "一句话总结，不超过2句", "steps": ["要点1", "要点2", ...]，快问快答时为空数组, "action": "一句话的下一步动作建议，没有则为 null"}
             注意：answer 字段必须放在 JSON 最前面（用户边生成边看，answer 先出才有流式体验）
             注意：回答正文里绝不出现 answer/steps/action/map 这些字段名，也不解释输出格式或回答档位（"steps 留空""按你的简洁档"这类说明）——那些是给机器看的约定，用户看不懂；照常把回答写完整就行。
@@ -734,28 +735,58 @@ class AiClient(private val settings: AiSettings) {
         """.trimIndent()
 
         /**
-         * 清掉模型输出里的 Markdown 痕迹：星号加粗、下划线加粗、反引号代码、三反引号代码块、
-         * 行首井号标题、行首星号和圆点列表符；Markdown 表格转成全角竖线分隔的可读行（分隔行去掉）；
+         * 清掉模型输出里的 Markdown 痕迹，但**保留结构**（v0.8.48 起表格/图表卡要靠结构渲染）：
+         * - 图表围栏块（```mermaid / ```flowchart / ```mindmap 等）整块原样保留，含围栏行——渲染层靠它生成图表卡；
+         * - Markdown 表格整组保留（含 |---| 分隔行），只清单元格内的加粗/反引号——渲染层靠它生成表格卡；
+         * - 普通代码块只去掉围栏标记行，内容照常清内联标记；
+         * - 其余：星号加粗、行首井号标题、行首星号列表符、孤立的竖线行照旧压平；
          * 模型偶尔把格式约定说漏进回答（如"steps 留空（按你的简洁档）。"）也一并摘掉。
-         * 界面卡片是纯文本渲染，星号井号原样摆出来只会碍眼；语音播报同样不该读这些符号。
          */
         internal fun stripMarkdown(s: String): String {
-            var t = s
-                .replace("```", "")
-                .replace("**", "")
-                .replace("__", "")
-                .replace("`", "")
-            t = t.replace(Regex("(?m)^#{1,6} +"), "")      // 行首标题井号（# 后必须带空格，#话题标签 不受影响）
-            t = t.replace(Regex("(?m)^[ \\t]*[*•][ \\t]+"), "") // 行首圆点/星号列表符
-            t = t.split('\n').joinToString("\n") { raw ->
-                val line = raw.trim()
-                if (line.startsWith("|") && line.endsWith("|") && line.length >= 2) {
-                    val cells = line.trim('|').split('|').map { it.trim() }
-                    // 表头分隔行（全是 ---/: ）整行去掉；数据行 | a | b | → a｜b（全角竖线）
-                    if (cells.all { it.isEmpty() || Regex(":{0,2}-{2,}:{0,2}").matches(it) }) ""
-                    else cells.joinToString("｜").trimEnd('｜')
-                } else raw
+            val lines = s.split('\n')
+            val out = StringBuilder()
+            var inFence = false
+            var fenceDiagram = false
+            var i = 0
+            while (i < lines.size) {
+                val raw = lines[i]
+                val trimmed = raw.trim()
+                if (trimmed.startsWith("```")) {
+                    if (!inFence) {
+                        inFence = true
+                        fenceDiagram = RichBlocks.isDiagramFence(trimmed)
+                        if (fenceDiagram) out.appendLine(raw)   // 图表块连围栏一起留
+                    } else {
+                        if (fenceDiagram) out.appendLine(raw)   // 图表块收尾围栏也留
+                        inFence = false
+                        fenceDiagram = false
+                    }
+                    i++
+                    continue
+                }
+                if (inFence && fenceDiagram) {
+                    out.appendLine(raw)                          // 图表内容一字不动
+                    i++
+                    continue
+                }
+                if (inFence) {
+                    out.appendLine(raw.replace("**", "").replace("__", "").replace("`", ""))
+                    i++
+                    continue
+                }
+                // 表格组（本行是表格行且后面跟着 |---| 分隔行）：整组保留结构
+                if (RichBlocks.isTableLine(trimmed) && tableGroupHasSeparator(lines, i)) {
+                    while (i < lines.size && RichBlocks.isTableLine(lines[i].trim())) {
+                        out.appendLine(lines[i].replace("**", "").replace("`", ""))
+                        i++
+                    }
+                    continue
+                }
+                out.appendLine(cleanPlainLine(raw))
+                i++
             }
+            var t = out.toString()
+                .replace(Regex("(?m)^#{1,6} +"), "")             // 行首标题井号（# 后必须带空格，#话题标签 不受影响）
             t = t.replace(
                 Regex("(?i)\\n?\\s*(?:answer|steps|action|map)\\s*字段?\\s*(?:留空|省略|为空)[（(][^）)]*[)）][。；;]?"),
                 "",
@@ -764,6 +795,29 @@ class AiClient(private val settings: AiSettings) {
                 "",
             )
             return t.trim()
+        }
+
+        /** 从第 i 行起的连续表格行里是否存在分隔行（有分隔行才是真表格，孤立的竖线行照旧压平） */
+        private fun tableGroupHasSeparator(lines: List<String>, start: Int): Boolean {
+            var j = start
+            while (j < lines.size && RichBlocks.isTableLine(lines[j].trim())) {
+                if (RichBlocks.isTableSeparatorLine(lines[j].trim())) return true
+                j++
+            }
+            return false
+        }
+
+        /** 围栏外普通行的清洗：加粗/反引号去掉；行首列表符去掉；孤立竖线行压平成全角竖线（无分隔行的假表格） */
+        private fun cleanPlainLine(raw: String): String {
+            val line = raw.replace("**", "").replace("__", "").replace("`", "").trim()
+            if (line.startsWith("|") && line.endsWith("|") && line.length >= 2) {
+                val cells = line.trim('|').split('|').map { it.trim() }
+                if (cells.all { it.isEmpty() || Regex(":{0,2}-{2,}:{0,2}").matches(it) }) return ""
+                return cells.joinToString("｜").trimEnd('｜')
+            }
+            // 行首列表符（* • - 后必须带空格：-5℃、--- 分隔线不受影响）
+            val listMarker = Regex("^[ \\t]*[*•\\-][ \\t]+").find(raw)?.value.orEmpty()
+            return raw.removePrefix(listMarker).replace("**", "").replace("__", "").replace("`", "")
         }
 
         /**

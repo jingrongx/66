@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- 缩放范围放开到 0.4~4 倍：全屏卡里双指缩放看细节 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.4, maximum-scale=4, user-scalable=yes">
+<style>
+  html,body{margin:0;padding:0;background:#ffffff;}
+  #box{padding:10px;}
+  #box svg{max-width:100% !important;height:auto;}
+  #err{color:#c62828;font:15px/1.5 sans-serif;padding:12px;white-space:pre-wrap;word-break:break-all;}
+</style>
+<script src="mermaid.min.js"></script>
+</head>
+<body>
+<div id="box"></div>
+<div id="err"></div>
+<script>
+mermaid.initialize({
+  startOnLoad:false,
+  theme:'default',
+  securityLevel:'loose',
+  fontFamily:'sans-serif'
+});
+function showErr(e){
+  document.getElementById('err').textContent = '图表渲染失败：' + (e && e.message ? e.message : String(e));
+}
+/* 渲染一张图；渲染错误直接显示在页面里（全屏卡里也能看到原因） */
+function renderDiagram(code){
+  try {
+    mermaid.render('g1', code).then(function(r){
+      document.getElementById('box').innerHTML = r.svg;
+      document.getElementById('err').textContent = '';
+    }).catch(function(e){ showErr(e); });
+  } catch(e) { showErr(e); }
+}
+window.renderDiagram = renderDiagram;
+</script>
+</body>
+</html>

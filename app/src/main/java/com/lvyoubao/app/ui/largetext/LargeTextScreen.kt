@@ -757,7 +757,14 @@ private fun LargeTextAssistantCard(
         // 文字整体可长按选中、自由复制（按钮不受影响）
         androidx.compose.foundation.text.selection.SelectionContainer {
             Column(Modifier.padding(18.dp)) {
-                Text(message.text, fontSize = 25.sp, lineHeight = 37.sp, fontWeight = FontWeight.Bold)
+                // 富内容：表格/图表自动渲染成可全屏的卡片（字号随大字模式放大）
+                com.lvyoubao.app.ui.common.RichContent(
+                    text = message.text,
+                    fontSize = 25.sp,
+                    lineHeight = 37.sp,
+                    fontWeight = FontWeight.Bold,
+                    largeText = true,
+                )
                 message.steps.forEachIndexed { index, step ->
                     Spacer(Modifier.height(10.dp))
                     Text("${index + 1}. $step", fontSize = 22.sp, lineHeight = 32.sp)
@@ -809,11 +816,12 @@ private fun LargeTextStreamingCard(streamState: ChatViewModel.StreamState?) {
                         Text("正在想…", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (streamState.answer.isNotBlank()) {
-                        Text(
-                            streamState.answer,
+                        com.lvyoubao.app.ui.common.RichContent(
+                            text = streamState.answer,
                             fontSize = 25.sp,
                             lineHeight = 37.sp,
                             fontWeight = FontWeight.Bold,
+                            largeText = true,
                         )
                     }
                 }

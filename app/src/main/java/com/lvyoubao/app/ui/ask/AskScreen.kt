@@ -101,6 +101,7 @@ import com.lvyoubao.app.data.observation.FatigueBand
 import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.common.SpeechInput
+import com.lvyoubao.app.ui.common.RichContent
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
@@ -948,8 +949,9 @@ private fun StreamingCard(st: ChatViewModel.StreamState) {
                     if (hasAnswer) Spacer(Modifier.height(10.dp))
                 }
                 if (hasAnswer) {
-                    Text(
-                        st.answer,
+                    // 流式中也走富内容解析：围栏闭合后自动变成图表卡、表格出齐变表格卡
+                    RichContent(
+                        text = st.answer,
                         fontSize = 20.sp,
                         lineHeight = 30.sp,
                         fontWeight = FontWeight.Medium,
@@ -976,8 +978,9 @@ private fun AssistantCard(
             // 文字整体可长按选中、自由复制（地图卡和按钮不受影响）
             androidx.compose.foundation.text.selection.SelectionContainer {
                 Column {
-                    Text(
-                        message.text,
+                    // 富内容：表格/图表自动渲染成可全屏的卡片（RichContent 内文本块保持原样式）
+                    RichContent(
+                        text = message.text,
                         fontSize = 20.sp,
                         lineHeight = 30.sp,
                         fontWeight = FontWeight.Medium,
