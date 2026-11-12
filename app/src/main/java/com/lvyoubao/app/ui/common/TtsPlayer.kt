@@ -96,6 +96,61 @@ object TtsPlayer {
         }
     }
 
+    /**
+     * 朗读链路诊断：逐级实测三级引擎并返回可读报告（设置页「朗读链路诊断」按钮用）。
+     * 不依赖播报流程，点一下就知道哪一级通、哪一级挂、挂的原因——一张截图即可定位问题。
+     */
+    suspend fun diagnose(context: Context, cloudKey: String?): String = withContext(Dispatchers.IO) {
+        val lines = mutableListOf<String>()
+        val testText = "你好，这是旅游宝朗读链路诊断测试。"
+        val dir = File(context.cacheDir, "tts")
+
+        // ① 微软流式（秒播主链路）
+        val t0 = System.currentTimeMillis()
+        var streamBytes = 0L
+        val streamOk = runCatching {
+            EdgeTts.streamSynthesize(testText) { streamBytes += it.size }
+        }.getOrDefault(false)
+        lines += if (streamOk) {
+            "① 微软流式（秒播）：✅ 正常（收 $streamBytes 字节，耗时 ${System.currentTimeMillis() - t0} 毫秒）"
+        } else {
+            "① 微软流式（秒播）：❌ ${EdgeTts.lastFailure ?: "失败"}"
+        }
+
+        // ② 微软整段文件（兜底第一级）
+        val t1 = System.currentTimeMillis()
+        val file = runCatching { EdgeTts.synthesize(testText, dir) }.getOrNull()
+        lines += if (file != null && file.length() > 0) {
+            runCatching { file.delete() }
+            "② 微软整段（兜底）：✅ 正常（${file.length()} 字节，耗时 ${System.currentTimeMillis() - t1} 毫秒）"
+        } else {
+            "② 微软整段（兜底）：❌ ${EdgeTts.lastFailure ?: "失败"}"
+        }
+
+        // ③ CosyVoice2 云端兜底（配 Key 才测）
+        if (cloudKey.isNullOrBlank()) {
+            lines += "③ 云端兜底 CosyVoice：— 未配置语音识别 Key，已跳过（设置里填 Key 可启用）"
+        } else {
+            val t2 = System.currentTimeMillis()
+            val cfile = runCatching { CloudTts.synthesize(testText, dir, cloudKey) }.getOrNull()
+            lines += if (cfile != null && cfile.length() > 0) {
+                runCatching { cfile.delete() }
+                "③ 云端兜底 CosyVoice：✅ 正常（${cfile.length()} 字节，耗时 ${System.currentTimeMillis() - t2} 毫秒）"
+            } else {
+                "③ 云端兜底 CosyVoice：❌ ${CloudTts.lastFailure ?: "失败"}"
+            }
+        }
+
+        // ④ 系统语音引擎
+        val sysOk = runCatching { systemTtsAvailable(context) }.getOrDefault(false)
+        lines += if (sysOk) "④ 系统语音引擎：✅ 可用" else "④ 系统语音引擎：❌ 不可用（这台手机没装语音引擎）"
+
+        lines.joinToString("\n")
+    }
+
+    /** 系统 TTS 引擎是否可用（初始化一次并缓存） */
+    suspend fun systemTtsAvailable(context: Context): Boolean = ensureSystemTts(context) != null
+
     fun speak(context: Context, text: String) {
         val body = text.trim()
         if (body.isEmpty()) return

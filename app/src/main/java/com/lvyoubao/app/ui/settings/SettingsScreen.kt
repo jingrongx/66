@@ -46,6 +46,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,14 +56,17 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.ProviderPresets
 import com.lvyoubao.app.ui.SettingsViewModel
+import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.sync.QrCodeImage
 import com.lvyoubao.app.ui.sync.QrScanScreen
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -330,6 +334,36 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+                Spacer(Modifier.height(10.dp))
+                // 朗读链路诊断：逐级实测三级引擎，哪级通哪级挂、挂的原因一目了然（截图即可求助）
+                val scope = rememberCoroutineScope()
+                var diagRunning by remember { mutableStateOf(false) }
+                var diagReport by remember { mutableStateOf<String?>(null) }
+                Button(
+                    onClick = {
+                        if (diagRunning) return@Button
+                        diagRunning = true
+                        diagReport = null
+                        scope.launch {
+                            diagReport = TtsPlayer.diagnose(context, state.draft.asrKey.ifBlank { null })
+                            diagRunning = false
+                        }
+                    },
+                    enabled = !diagRunning,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (diagRunning) "诊断中…（约 10 秒）" else "🔍 朗读链路诊断（读不出声时点这个）")
+                }
+                diagReport?.let { report ->
+                    Text(
+                        report,
+                        style = MaterialTheme.typography.labelMedium,
+                        lineHeight = 20.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
