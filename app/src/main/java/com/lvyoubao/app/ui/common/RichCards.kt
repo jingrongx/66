@@ -8,8 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.text.StaticLayout
 import android.text.TextPaint
-import android.text.TextUtils
 import android.view.View
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -124,7 +124,7 @@ fun TableCard(table: RichBlocks.Block.Table, largeText: Boolean) {
             }
             Spacer(Modifier.height(8.dp))
             val hScroll = rememberScrollState()
-            val previewWidths = remember(table, cellFont) { tableColWidths(table, cellFont, fullscreen = false) }
+            val previewWidths = remember(table, cellFont) { tableColWidths(table, cellFont, maxChars = 10) }
             Column(
                 Modifier
                     .heightIn(max = 220.dp)
@@ -188,15 +188,28 @@ fun TableCard(table: RichBlocks.Block.Table, largeText: Boolean) {
     if (fullscreen) TableFullscreenDialog(table = table, largeText = largeText) { fullscreen = false }
 }
 
-/** 列宽组：按整列最长文本估算（同列等宽对齐），CJK 一字 ≈ 字号宽；预览窄（10 字封顶）、全屏宽（14 字封顶） */
-private fun tableColWidths(table: RichBlocks.Block.Table, fontSize: TextUnit, fullscreen: Boolean): List<androidx.compose.ui.unit.Dp> {
-    val maxChars = if (fullscreen) 14 else 10
+/**
+ * 列宽组：按整列最长文本估算（同列等宽对齐），CJK 一字 ≈ 字号宽。
+ * 预览窄（10 字封顶）；全屏 26 字封顶，且给 [fillWidth] 时列总宽不足就按比例放大铺满可用宽度
+ * ——横屏大屏上不再右边一大片空白，长文本靠单元格内换行消化。
+ */
+private fun tableColWidths(
+    table: RichBlocks.Block.Table,
+    fontSize: TextUnit,
+    maxChars: Int,
+    fillWidth: androidx.compose.ui.unit.Dp? = null,
+): List<androidx.compose.ui.unit.Dp> {
     val colCount = table.header.size.coerceAtLeast(1)
     val maxLens = IntArray(colCount) { 2 }
     (listOf(table.header) + table.rows).forEach { row ->
         row.forEachIndexed { c, cell -> if (c < colCount) maxLens[c] = maxLens[c].coerceAtLeast(cell.length) }
     }
-    return maxLens.map { len -> (len.coerceAtMost(maxChars) * fontSize.value + 20).dp }
+    val widths = maxLens.map { len -> (len.coerceAtMost(maxChars) * fontSize.value + 20).dp }
+    val fill = fillWidth ?: return widths
+    val sum = widths.fold(0.dp) { acc, w -> acc + w }
+    if (sum >= fill || sum.value <= 0f) return widths
+    val k = fill.value / sum.value
+    return widths.map { (it.value * k).dp }
 }
 
 private fun colWidthAt(widths: List<androidx.compose.ui.unit.Dp>, index: Int): androidx.compose.ui.unit.Dp =
@@ -220,7 +233,6 @@ private fun TableFullscreenDialog(table: RichBlocks.Block.Table, largeText: Bool
 
     val cellFont = if (largeText) 19.sp else 16.sp
     val hScroll = rememberScrollState()
-    val colWidths = remember(table, cellFont) { tableColWidths(table, cellFont, fullscreen = true) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -232,7 +244,13 @@ private fun TableFullscreenDialog(table: RichBlocks.Block.Table, largeText: Bool
                 .safeDrawingPadding(),
             color = MaterialTheme.colorScheme.surface,
         ) {
-            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
+            // 列宽按可用宽度铺满（横屏/平板不再右边一大片空白），列内长文本自动换行
+            androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+                val fillWidth = maxWidth - 24.dp
+                val colWidths = remember(table, cellFont, fillWidth) {
+                    tableColWidths(table, cellFont, maxChars = 26, fillWidth = fillWidth)
+                }
+                Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     Text(
                         "📋 表格 · ${table.rows.size}行 × ${table.header.size}列",
@@ -262,7 +280,10 @@ private fun TableFullscreenDialog(table: RichBlocks.Block.Table, largeText: Bool
                         scope.launch {
                             val tip = withContext(Dispatchers.IO) {
                                 runCatching {
-                                    val bmp = drawTableBitmap(table)
+                                    // 方向跟随当前查看：竖屏导竖版图，横屏导横版图
+                                    val isLandscape = context.resources.configuration.orientation ==
+                                        android.content.res.Configuration.ORIENTATION_LANDSCAPE
+                                    val bmp = drawTableBitmap(table, isLandscape)
                                     shareBitmap(context, bmp, "表格", "保存表格图片")
                                     "已生成图片，去分享里保存"
                                 }.getOrElse { "导出失败：${it.message ?: "未知"}" }
@@ -282,7 +303,7 @@ private fun TableFullscreenDialog(table: RichBlocks.Block.Table, largeText: Bool
                         modifier = Modifier.padding(bottom = 4.dp),
                     )
                 }
-                // 表头锁定在顶部（不随上下滚动），左右与数据行共用同一横向滚动
+                // 表头锁定在顶部（不随上下滚动），左右与数据行共用同一横向滚动；单元格文字换行不截断
                 Row(Modifier.horizontalScroll(hScroll)) {
                     table.header.forEachIndexed { c, cell ->
                         Box(
@@ -296,8 +317,6 @@ private fun TableFullscreenDialog(table: RichBlocks.Block.Table, largeText: Bool
                                 lineHeight = cellFont * 1.4f,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary,
-                                maxLines = 3,
-                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
@@ -320,8 +339,6 @@ private fun TableFullscreenDialog(table: RichBlocks.Block.Table, largeText: Bool
                                         cell,
                                         fontSize = cellFont,
                                         lineHeight = cellFont * 1.4f,
-                                        maxLines = 4,
-                                        overflow = TextOverflow.Ellipsis,
                                     )
                                 }
                             }
@@ -330,6 +347,7 @@ private fun TableFullscreenDialog(table: RichBlocks.Block.Table, largeText: Bool
                             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
                         }
                     }
+                }
                 }
             }
         }
@@ -348,75 +366,115 @@ private fun tableToCsv(t: RichBlocks.Block.Table): String = buildString {
 }
 
 /**
- * 表格 → 位图（导出图片用）：android.graphics 手绘，列宽按文本测量、超长省略，
- * 表头主色底白字、斑马行、细网格。不依赖屏幕上是否滚动到那里，整表一次成图。
+ * 表格 → 位图（导出图片用）：android.graphics 手绘整表，单元格长文本用 StaticLayout 自动换行，
+ * 绝不省略号截断——全貌都在。方向跟随当前查看：竖屏查看导竖版（1080 宽），横屏查看导横版（1920 宽）。
+ * 表头主色底白字、斑马行、细网格；总高超 14000px 时按比例缩小字号重排（防极端大表撑爆内存）。
  */
-private fun drawTableBitmap(table: RichBlocks.Block.Table, maxTotalWidth: Int = 3600): Bitmap {
+private fun drawTableBitmap(table: RichBlocks.Block.Table, landscape: Boolean): Bitmap {
+    val targetWidth = if (landscape) 1920 else 1080
     val padH = 26f
     val padV = 22f
-    val fontPx = 46f
-    val measure = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { this.textSize = fontPx }
-    val maxColWidth = 760f
-
-    val allRows = listOf(table.header) + table.rows
+    var fontPx = if (landscape) 58f else 44f
     val colCount = table.header.size.coerceAtLeast(1)
-    val colWidths = FloatArray(colCount) { 200f }
-    allRows.forEach { row ->
-        row.forEachIndexed { c, cell ->
-            if (c < colCount) {
-                val w = measure.measureText(cell) + padH * 2
-                colWidths[c] = colWidths[c].coerceAtLeast(w.coerceAtMost(maxColWidth))
+    val allRows = listOf(table.header) + table.rows
+
+    // 列宽：按单行自然宽度分配，总宽趋近目标宽（铺满不留窄条；超宽表压回目标 1.6 倍内，靠换行消化）
+    fun colWidthsFor(f: Float): FloatArray {
+        val measure = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = f }
+        val w = FloatArray(colCount) { 140f }
+        allRows.forEach { row ->
+            row.forEachIndexed { c, cell ->
+                if (c < colCount) {
+                    val natural = measure.measureText(cell) + padH * 2
+                    w[c] = w[c].coerceAtLeast(natural.coerceAtMost(targetWidth * 0.7f))
+                }
             }
         }
-    }
-    // 总宽超限时按比例压列宽，保住每列可读下限
-    val total = colWidths.sum()
-    if (total > maxTotalWidth) {
-        val k = maxTotalWidth / total
-        for (c in 0 until colCount) colWidths[c] = (colWidths[c] * k).coerceAtLeast(140f)
+        val total = w.sum()
+        if (total < targetWidth) {
+            val k = targetWidth / total
+            for (i in 0 until colCount) w[i] *= k
+        } else if (total > targetWidth * 1.6f) {
+            val k = targetWidth * 1.6f / total
+            for (i in 0 until colCount) w[i] = (w[i] * k).coerceAtLeast(170f)
+        }
+        return w
     }
 
-    val rowH = fontPx + padV * 2
-    val width = colWidths.sum().toInt()
-    val height = (rowH * allRows.size).toInt()
+    fun cellLayout(text: String, widthPx: Float, f: Float, bold: Boolean): StaticLayout {
+        val tp = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = f
+            typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        }
+        @Suppress("DEPRECATION")
+        return StaticLayout(
+            text, tp, widthPx.toInt().coerceAtLeast(1),
+            android.text.Layout.Alignment.ALIGN_NORMAL, 1.2f, 4f, true,
+        )
+    }
+
+    // 布局两遍：先算行高，总高超限就缩字号重排
+    var colWidths = colWidthsFor(fontPx)
+    var rowLayouts: List<List<StaticLayout>> = emptyList()
+    var rowHeights = FloatArray(0)
+    var totalHeight = 0f
+    repeat(2) {
+        rowLayouts = allRows.map { row ->
+            List(colCount) { c ->
+                val cell = row.getOrElse(c) { "" }
+                cellLayout(cell, colWidths[c] - padH * 2, fontPx, bold = row === allRows[0])
+            }
+        }
+        rowHeights = FloatArray(allRows.size) { r -> rowLayouts[r].maxOf { it.height } + padV * 2 }
+        totalHeight = rowHeights.sum()
+        if (totalHeight > 14_000f) {
+            fontPx *= 14_000f / totalHeight
+            colWidths = colWidthsFor(fontPx)
+        }
+    }
+    val width = colWidths.sum().toInt().coerceAtLeast(1)
+    val height = totalHeight.toInt().coerceAtLeast(1)
     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bmp)
+    canvas.drawColor(android.graphics.Color.WHITE)
 
     val headerBg = Paint().apply { color = 0xFF1A73E8.toInt() }
     val zebra = Paint().apply { color = 0xFFF3F6FA.toInt() }
     val grid = Paint().apply { color = 0xFFD8DCE2.toInt(); strokeWidth = 2f }
-    val headerText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFFFFFFFF.toInt(); this.textSize = fontPx; typeface = Typeface.DEFAULT_BOLD
-    }
-    val bodyText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF222222.toInt(); this.textSize = fontPx }
-    val baseline = fontPx * 0.86f + padV
 
-    // 逐行画背景与文本，最后画网格
-    allRows.forEachIndexed { r, row ->
-        val top = r * rowH
-        if (r == 0) {
-            canvas.drawRect(0f, top, width.toFloat(), top + rowH, headerBg)
-        } else if (r % 2 == 0) {
-            canvas.drawRect(0f, top, width.toFloat(), top + rowH, zebra)
+    // 背景（表头蓝底 + 斑马行）
+    var top = 0f
+    allRows.forEachIndexed { r, _ ->
+        val h = rowHeights[r]
+        when {
+            r == 0 -> canvas.drawRect(0f, top, width.toFloat(), top + h, headerBg)
+            r % 2 == 0 -> canvas.drawRect(0f, top, width.toFloat(), top + h, zebra)
         }
+        top += h
+    }
+    // 文本（StaticLayout 自动换行）
+    top = 0f
+    allRows.forEachIndexed { r, _ ->
         var x = 0f
-        row.forEachIndexed { c, cell ->
-            if (c < colCount) {
-                val avail = colWidths[c] - padH * 2
-                val shown = TextUtils.ellipsize(cell, measure, avail, TextUtils.TruncateAt.END).toString()
-                val paint = if (r == 0) headerText else bodyText
-                canvas.drawText(shown, x + padH, top + baseline, paint)
-                x += colWidths[c]
-            }
+        rowLayouts[r].forEachIndexed { c, layout ->
+            canvas.save()
+            canvas.translate(x + padH, top + padV)
+            layout.draw(canvas)
+            canvas.restore()
+            x += colWidths[c]
         }
+        top += rowHeights[r]
     }
+    // 网格
+    var gx = 0f
     for (c in 0..colCount) {
-        val x = colWidths.take(c).sum()
-        canvas.drawLine(x, 0f, x, height.toFloat(), grid)
+        canvas.drawLine(gx, 0f, gx, height.toFloat(), grid)
+        if (c < colCount) gx += colWidths[c]
     }
+    var gy = 0f
     allRows.indices.forEach { r ->
-        val y = r * rowH
-        canvas.drawLine(0f, y, width.toFloat(), y, grid)
+        canvas.drawLine(0f, gy, width.toFloat(), gy, grid)
+        gy += rowHeights[r]
     }
     canvas.drawLine(0f, height - 1f, width.toFloat(), height - 1f, grid)
     return bmp
