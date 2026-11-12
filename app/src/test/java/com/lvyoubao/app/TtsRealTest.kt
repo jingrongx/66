@@ -26,6 +26,27 @@ class TtsRealTest {
     }
 
     @Test
+    fun edgeStreamRealNetwork() = kotlinx.coroutines.runBlocking {
+        val chunks = mutableListOf<ByteArray>()
+        var firstChunkMs = -1L
+        val start = System.currentTimeMillis()
+        val ok = com.lvyoubao.app.ui.common.EdgeTts.streamSynthesize(
+            "你好，这是旅游宝的流式朗读测试，验证首帧是否秒回，边收边播是秒播的核心。",
+        ) { bytes ->
+            if (chunks.isEmpty()) firstChunkMs = System.currentTimeMillis() - start
+            chunks.add(bytes)
+        }
+        val total = chunks.sumOf { it.size }
+        println("EdgeTts.stream -> ok=$ok chunks=${chunks.size} bytes=$total 首帧=${firstChunkMs}ms")
+        org.junit.Assert.assertTrue("流式合成失败（协议/令牌/网络任一环节断了）", ok)
+        org.junit.Assert.assertTrue("流式产物过小，不是有效音频", total > 1_000)
+        org.junit.Assert.assertTrue(
+            "首帧应在 5 秒内到达（秒播前提，实测 ${firstChunkMs}ms）",
+            firstChunkMs in 0..5_000,
+        )
+    }
+
+    @Test
     fun cloudSynthesizeRejectsFakeKeyGracefully() = kotlinx.coroutines.runBlocking {
         val dir = tmpDir()
         val file = com.lvyoubao.app.ui.common.CloudTts.synthesize("测试", dir, "sk-invalid-test-key")

@@ -26,6 +26,8 @@ object EdgeTts {
     private const val EDGE_VERSION = "2-143.0.3650.75"
     private const val VOICE = "zh-CN-XiaoxiaoNeural"
     private const val MAX_CHARS = 3000
+    /** 流式单段上限（字）：2000 汉字 ≈ 6KB SSML，稳在微软 8KB 限制内（对齐 edge-tts 分会话阈值） */
+    private const val STREAM_MAX_CHARS = 2000
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -41,18 +43,7 @@ object EdgeTts {
         val out = File(cacheDir, "tts_${System.currentTimeMillis()}.mp3")
         var audioBytes = 0L
         return suspendCancellableCoroutine { cont ->
-            val request = Request.Builder()
-                .url(endpoint())
-                .header("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
-                .header("Pragma", "no-cache")
-                .header("Cache-Control", "no-cache")
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                        "Chrome/143.0.0.0 Safari/537.36 Edg/143.0.3650.75",
-                )
-                .build()
-            val ws = client.newWebSocket(request, object : WebSocketListener() {
+            val ws = client.newWebSocket(buildRequest(), object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     webSocket.send(configMessage())
                     webSocket.send(ssmlMessage(body))
@@ -94,6 +85,72 @@ object EdgeTts {
             }
         }
     }
+
+    /**
+     * 流式合成（秒播核心）：WSS 每收到一帧 Path:audio 音频立即回调 onAudio，不等整段合成完——
+     * 上层边收边解码边播，首声 ≈ 微软返回首帧的耗时，与文本长度无关。
+     * 返回 true = turn.end 正常收尾且至少收到过一帧音频；false = 连接/协议失败（上层走回退链）。
+     * onAudio 在 OkHttp 回调线程上执行，必须非阻塞（入队即返回）。
+     */
+    suspend fun streamSynthesize(text: String, onAudio: (ByteArray) -> Unit): Boolean {
+        val body = text.trim().take(STREAM_MAX_CHARS)
+        if (body.isEmpty()) return false
+        var gotAudio = false
+        return suspendCancellableCoroutine { cont ->
+            var settled = false
+            fun settle(value: Boolean) {
+                if (settled) return
+                settled = true
+                if (cont.isActive) cont.resume(value && gotAudio)
+            }
+            val ws = client.newWebSocket(buildRequest(), object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    webSocket.send(configMessage())
+                    webSocket.send(ssmlMessage(body))
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    if (bytes.size < 2) return
+                    val headerLen = ((bytes[0].toInt() and 0xFF) shl 8) or (bytes[1].toInt() and 0xFF)
+                    if (bytes.size <= headerLen + 2) return
+                    val header = bytes.substring(2, 2 + headerLen).utf8()
+                    if (header.contains("Path:audio")) {
+                        gotAudio = true
+                        runCatching { onAudio(bytes.substring(2 + headerLen).toByteArray()) }
+                    }
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (text.contains("Path:turn.end")) {
+                        webSocket.close(1000, "done")
+                        settle(true)
+                    }
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    settle(false)
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    settle(true)
+                }
+            })
+            cont.invokeOnCancellation { runCatching { ws.cancel() } }
+        }
+    }
+
+    private fun buildRequest(): Request =
+        Request.Builder()
+            .url(endpoint())
+            .header("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
+            .header("Pragma", "no-cache")
+            .header("Cache-Control", "no-cache")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                    "Chrome/143.0.0.0 Safari/537.36 Edg/143.0.3650.75",
+            )
+            .build()
 
     private fun endpoint(): String {
         val gec = runCatching {

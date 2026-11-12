@@ -13,8 +13,8 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 68
-        versionName = "0.8.46"
+        versionCode = 69
+        versionName = "0.8.47"
     }
 
     signingConfigs {
