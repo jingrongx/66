@@ -108,6 +108,7 @@ object TtsPlayer {
         currentText = body
         _state.value = State.Loading
         job = scope.launch {
+            ttsLog("speak 启动（${body.length} 字，流式段 ${STREAM_SEGMENT_CHARS}/文件段 ${SEGMENT_CHARS}）")
             // 流式链路一段上限 2000 字（一条 WSS 会话），比文件链的 800 字少一倍段边界；
             // 常见回答 ≤2000 字 = 一条连接、边收边播一次到底
             val parts = buildParts(body, STREAM_SEGMENT_CHARS)
@@ -128,7 +129,16 @@ object TtsPlayer {
                 if (myGen != generation) return@launch
                 if (file == null || file.length() == 0L) {
                     // 两级云端合成（Edge→CosyVoice2）都失败：剩余文本整体交给系统 TTS
-                    speakWithSystem(context, parts.drop(i).joinToString(""), myGen)
+                    val reason = buildString {
+                        append(EdgeTts.lastFailure ?: "免费朗读未能连上微软服务")
+                        append("；")
+                        append(
+                            CloudTts.lastFailure
+                                ?: if (cloudKey == null) "未配置云端兜底（设置里填「语音识别 Key」可启用）" else "云端兜底也失败",
+                        )
+                    }
+                    ttsLog("全链失败原因：$reason")
+                    speakWithSystem(context, parts.drop(i).joinToString(""), myGen, reason)
                     return@launch
                 }
                 val ok = playFileAwait(file, myGen)
@@ -191,9 +201,13 @@ object TtsPlayer {
      * 中途断流且已出过声：播到哪算哪，本段视为完成（不回文件链重读造成复读）。
      */
     private suspend fun playStreamed(text: String, gen: Int): Boolean = coroutineScope {
+        val t0 = System.currentTimeMillis()
         val player = Mp3StreamPlayer(
             onStarted = {
-                if (gen == generation && _state.value is State.Loading) _state.value = State.Speaking
+                if (gen == generation && _state.value is State.Loading) {
+                    _state.value = State.Speaking
+                    ttsLog("流式起播（距发起 ${System.currentTimeMillis() - t0}ms）")
+                }
             },
             isCurrent = { gen == generation },
         )
@@ -203,6 +217,7 @@ object TtsPlayer {
         player.endInput()
         val sawPcm = decoder.await()
         streamPlayer = null
+        ttsLog("流式播段结束：ok=$ok sawPcm=$sawPcm 收帧=${player.receivedBytes}B 用时=${System.currentTimeMillis() - t0}ms")
         sawPcm
     }
 
@@ -210,20 +225,32 @@ object TtsPlayer {
      * 单段合成引擎链：Edge（免费无 Key，主力）→ 硅基流动 CosyVoice2（配了语音识别 Key 才启用，
      * 普通 HTTP 比 WebSocket 抗抖动，Edge 协议再变动时也顶得住）→ 返回 null 交给系统 TTS。
      * 每级自带重试；"播几句就断"多因单引擎中途失败，两级接力后剩余段落不再陪葬。
+     * 每次尝试都记日志；全挂时 [EdgeTts.lastFailure]/[CloudTts.lastFailure] 里有具体原因供界面明示。
      */
     private suspend fun synthesizeWithRetry(text: String, dir: File): File? {
         repeat(SYNTH_ATTEMPTS) { attempt ->
             if (attempt > 0) kotlinx.coroutines.delay(500L * attempt)
+            ttsLog("文件链 Edge 尝试 ${attempt + 1}/$SYNTH_ATTEMPTS（${text.length} 字）")
             val file = runCatching { EdgeTts.synthesize(text, dir) }.getOrNull()
-            if (file != null && file.length() > 0) return file
+            if (file != null && file.length() > 0) {
+                ttsLog("文件链 Edge 成功 ${file.length()}B")
+                return file
+            }
+            ttsLog("文件链 Edge 第${attempt + 1}次失败：${EdgeTts.lastFailure ?: "空产物"}")
         }
         val key = cloudKey
         if (key != null) {
             repeat(2) { attempt ->
                 if (attempt > 0) kotlinx.coroutines.delay(400L)
                 val file = runCatching { CloudTts.synthesize(text, dir, key) }.getOrNull()
-                if (file != null && file.length() > 0) return file
+                if (file != null && file.length() > 0) {
+                    ttsLog("文件链 CosyVoice 成功 ${file.length()}B")
+                    return file
+                }
+                ttsLog("文件链 CosyVoice 第${attempt + 1}次失败：${CloudTts.lastFailure ?: "未知"}")
             }
+        } else {
+            ttsLog("未配置语音识别 Key，跳过 CosyVoice 兜底")
         }
         return null
     }
@@ -297,14 +324,15 @@ object TtsPlayer {
         }
     }
 
-    /** 系统 TTS 兜底：初始化（带超时）→ speak → 等待完成 */
-    private suspend fun speakWithSystem(context: Context, text: String, gen: Int) {
+    /** 系统 TTS 兜底：初始化（带超时）→ speak → 等待完成。cloudReason=前面两级云端的具体失败原因，随报错透出 */
+    private suspend fun speakWithSystem(context: Context, text: String, gen: Int, cloudReason: String? = null) {
         if (gen != generation) return
+        ttsLog("落系统 TTS 兜底（${text.length} 字）")
         val engine = ensureSystemTts(context)
         if (engine == null) {
             if (gen == generation) {
                 _state.value = State.Unavailable(
-                    "朗读不可用：免费朗读和云端兜底都失败了，这台手机也没有可用的语音引擎。请检查网络后重试；可在设置里填「语音识别 Key」启用云端兜底",
+                    "朗读不可用：${cloudReason ?: "免费朗读和云端兜底都失败了"}；这台手机也没有可用的语音引擎。请检查网络后重试；可在设置里填「语音识别 Key」启用云端兜底",
                 )
             }
             return
@@ -367,7 +395,7 @@ object TtsPlayer {
 
     private suspend fun ensureSystemTts(context: Context): TextToSpeech? {
         systemTts?.let { return if (systemReady) it else null }
-        return withTimeoutOrNull(8_000) {
+        val engine = withTimeoutOrNull(8_000) {
             suspendCancellableCoroutine { cont ->
                 var settled = false
                 val created = runCatching {
@@ -390,6 +418,8 @@ object TtsPlayer {
                 systemTts = created
             }
         }
+        ttsLog("系统 TTS 引擎：${if (engine != null) "可用" else "不可用（初始化失败或 8 秒超时）"}")
+        return engine
     }
 
     /**
@@ -411,11 +441,18 @@ object TtsPlayer {
         private var writtenBytes = 0L
         private var started = false
 
+        /** 累计收到的 MP3 字节数（诊断日志用） */
+        var receivedBytes = 0L
+            private set
+
         @Volatile private var aborted = false
 
         /** OkHttp 回调线程调用：音频帧入队，立即返回 */
         fun feed(bytes: ByteArray) {
-            if (!aborted && bytes.isNotEmpty()) input.put(bytes)
+            if (!aborted && bytes.isNotEmpty()) {
+                receivedBytes += bytes.size
+                input.put(bytes)
+            }
         }
 
         /** 输入结束：解码器排空后自然收尾 */
@@ -434,38 +471,56 @@ object TtsPlayer {
             runCatching { codec?.stop() }
         }
 
-        /** 解码+播放主循环（挂起直到播完/被接管/中止）。返回是否解码出过 PCM（出过声）。 */
+        /**
+         * 解码+播放主循环（挂起直到播完/被接管/中止）。返回是否解码出过 PCM（出过声）。
+         * 网络帧不与 MP3 帧对齐、且常大于解码器输入缓冲——放不下的部分记入 [leftover]，
+         * 与下一帧拼着喂，绝不静默丢弃（丢了就是吞字/破音）。
+         */
         suspend fun run(gen: Int): Boolean {
             var sawPcm = false
             var eosQueued = false
             var drained = false
+            var idleAfterEos = 0 // EOS 后解码器一直无输出的空转计数（看门狗：解码器错误卡死时兜底退出）
+            var leftover: ByteArray? = null
             try {
                 val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_MPEG)
                 codec = c
                 c.configure(MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_MPEG, 24_000, 1), null, null, 0)
                 c.start()
+                ttsLog("MediaCodec MP3 解码器就绪")
                 val info = MediaCodec.BufferInfo()
                 while (!aborted && isCurrent()) {
                     if (!eosQueued) {
                         val inIdx = c.dequeueInputBuffer(10_000)
                         if (inIdx >= 0) {
                             val buf = c.getInputBuffer(inIdx)
-                            val chunk = input.poll()
-                            if (chunk === EOS) {
+                            val polled = input.poll()
+                            val data = leftover ?: polled
+                            if (data === EOS) {
                                 c.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 eosQueued = true
-                            } else if (buf != null && chunk != null) {
-                                val n = minOf(chunk.size, buf.capacity())
-                                buf.put(chunk, 0, n)
-                                c.queueInputBuffer(inIdx, 0, n, 0, 0)
+                                leftover = null
+                            } else if (buf != null && data != null) {
+                                val cap = buf.capacity()
+                                if (data.size <= cap) {
+                                    buf.put(data, 0, data.size)
+                                    c.queueInputBuffer(inIdx, 0, data.size, 0, 0)
+                                    leftover = null
+                                } else {
+                                    // 放不下：填满缓冲，剩下的与下一帧拼着继续喂
+                                    buf.put(data, 0, cap)
+                                    c.queueInputBuffer(inIdx, 0, cap, 0, 0)
+                                    leftover = data.copyOfRange(cap, data.size)
+                                }
                             } else {
-                                // 暂无数据：还回空槽，10ms 后再来
+                                // 暂无数据：还回空槽，10ms 后再来（leftover 保持待喂）
                                 c.queueInputBuffer(inIdx, 0, 0, 0, 0)
                             }
                         }
                     }
                     val outIdx = c.dequeueOutputBuffer(info, 10_000)
                     if (outIdx >= 0) {
+                        idleAfterEos = 0
                         if (info.size > 0) {
                             ensureTrack(c.outputFormat)
                             val t = track
@@ -473,19 +528,31 @@ object TtsPlayer {
                             if (t != null && out != null) {
                                 out.position(info.offset)
                                 out.limit(info.offset + info.size)
-                                t.write(out, info.size, AudioTrack.WRITE_BLOCKING)
-                                writtenFrames += info.size / (2L * channels)
-                                writtenBytes += info.size
-                                sawPcm = true
-                                if (!started && (writtenBytes >= prerollBytes() || eosQueued)) {
-                                    started = true
-                                    t.play()
-                                    onStarted()
+                                val w = t.write(out, info.size, AudioTrack.WRITE_BLOCKING)
+                                if (w > 0) {
+                                    writtenFrames += w / (2L * channels)
+                                    writtenBytes += w
+                                    sawPcm = true
+                                    if (!started && (writtenBytes >= prerollBytes() || eosQueued)) {
+                                        started = true
+                                        t.play()
+                                        onStarted()
+                                    }
+                                } else if (w < 0) {
+                                    ttsLog("AudioTrack.write 错误码 $w，停止本段")
+                                    break
                                 }
                             }
                         }
                         c.releaseOutputBuffer(outIdx, false)
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) drained = true
+                    } else if (eosQueued) {
+                        idleAfterEos++
+                        // ~5 秒仍无输出：解码器多半已出错卡死（drained 永远等不到），兜底退出
+                        if (idleAfterEos > 300) {
+                            ttsLog("解码器 EOS 后持续无输出，看门狗强制收尾")
+                            break
+                        }
                     }
                     if (eosQueued && drained) break
                 }
@@ -498,8 +565,8 @@ object TtsPlayer {
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
-                // 解码器/音轨异常或被中止：播到哪算哪
+            } catch (e: Exception) {
+                ttsLog("流式解码/播放异常：${e.javaClass.simpleName} ${e.message ?: ""}")
             } finally {
                 releaseInternal()
             }

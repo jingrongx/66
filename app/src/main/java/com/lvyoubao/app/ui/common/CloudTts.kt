@@ -35,6 +35,11 @@ object CloudTts {
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /** 最近一次云端兜底失败的具体原因（供界面明示），成功后清空 */
+    @Volatile
+    var lastFailure: String? = null
+        private set
+
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
 
     @Serializable
@@ -51,7 +56,7 @@ object CloudTts {
         withContext(Dispatchers.IO) {
             val body = text.trim().take(MAX_CHARS)
             if (body.isEmpty() || apiKey.isBlank()) return@withContext null
-            runCatching {
+            val result = runCatching {
                 cacheDir.mkdirs()
                 val out = File(cacheDir, "tts_cld_${System.currentTimeMillis()}.mp3")
                 val payload = json.encodeToString(SpeechRequest(input = body))
@@ -61,13 +66,24 @@ object CloudTts {
                     .post(payload.toRequestBody("application/json".toMediaType()))
                     .build()
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use null
+                    if (!response.isSuccessful) {
+                        lastFailure = "云端兜底 HTTP ${response.code}" +
+                            (if (response.code == 401 || response.code == 403) "（Key 无效或账号未实名）" else "")
+                        ttsLog("CloudTts 失败：$lastFailure")
+                        return@use null
+                    }
                     val bytes = response.body?.bytes() ?: return@use null
                     // 太小的响应基本是错误 JSON，不是音频
-                    if (bytes.size < 200) return@use null
+                    if (bytes.size < 200) {
+                        lastFailure = "云端兜底返回异常（${bytes.size}B，疑似错误信息非音频）"
+                        ttsLog("CloudTts 失败：$lastFailure")
+                        return@use null
+                    }
                     out.writeBytes(bytes)
                     out
                 }
             }.getOrNull()
+            if (result != null) lastFailure = null
+            result
         }
 }

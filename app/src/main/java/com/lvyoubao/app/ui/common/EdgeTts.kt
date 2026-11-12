@@ -1,5 +1,6 @@
 package com.lvyoubao.app.ui.common
 
+import android.util.Log
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -14,6 +15,16 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+
+/**
+ * 朗读链路诊断日志（tag=lvyoubao.tts）：每一级引擎的成败与原因都写出来，
+ * 手机上 `adb logcat -s lvyoubao.tts` 一眼定位「为什么不播」。JVM 单测里
+ * android.util.Log 不可用，靠 runCatching 兜底，println 恒输出。
+ */
+internal fun ttsLog(msg: String) {
+    println("lvyoubao.tts: $msg")
+    runCatching { Log.i("lvyoubao.tts", msg) }
+}
 
 /**
  * Edge 朗读：微软 Edge 浏览器的云端 TTS 接口。免费、无需 Key、零 APK 体积，
@@ -35,6 +46,43 @@ object EdgeTts {
         .pingInterval(15, TimeUnit.SECONDS)
         .build()
 
+    /** 最近一次合成失败的具体原因（供界面明示「为什么读不出来」），成功后清空 */
+    @Volatile
+    var lastFailure: String? = null
+        private set
+
+    /**
+     * 设备时钟 vs 微软服务器的偏差秒数。Sec-MS-GEC 令牌按 5 分钟时间窗校验，
+     * 手动对时/时钟漂移的手机偏差一大就次次 403——参照 edge-tts 7.x 的做法，
+     * 从失败响应的 Date 头学习偏差（[noteFailure]），后续请求一律用校正后的时间生成令牌。
+     */
+    @Volatile
+    private var clockSkewSeconds = 0L
+
+    private fun nowSec(): Long = System.currentTimeMillis() / 1000 + clockSkewSeconds
+
+    /** 失败记账：把可读原因写进 [lastFailure]；403/401 时顺手校正时钟偏差（下次请求即用新令牌） */
+    private fun noteFailure(t: Throwable, response: Response?, where: String) {
+        val reason = when {
+            response != null && (response.code == 401 || response.code == 403) -> {
+                response.header("Date")?.let { dateHeader ->
+                    runCatching {
+                        val parsed = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US)
+                            .parse(dateHeader)
+                        if (parsed != null) {
+                            clockSkewSeconds = parsed.time / 1000 - System.currentTimeMillis() / 1000
+                        }
+                    }
+                }
+                "HTTP ${response.code} 微软令牌被拒（多半是手机时间不准，已按服务器时间自动校正）"
+            }
+            t is java.io.IOException && t.message?.contains("timeout", true) == true -> "连接微软服务超时"
+            else -> "${t.javaClass.simpleName}：${t.message ?: "未知错误"}"
+        }
+        lastFailure = reason
+        ttsLog("EdgeTts $where 失败：$reason（时钟偏差 ${clockSkewSeconds}s）")
+    }
+
     /** 合成语音写到 cacheDir，返回 mp3 文件；任何失败返回 null（上层走回退） */
     suspend fun synthesize(text: String, cacheDir: File): File? {
         val body = text.trim().take(MAX_CHARS)
@@ -42,7 +90,7 @@ object EdgeTts {
         cacheDir.mkdirs()
         val out = File(cacheDir, "tts_${System.currentTimeMillis()}.mp3")
         var audioBytes = 0L
-        return suspendCancellableCoroutine { cont ->
+        val result = suspendCancellableCoroutine { cont ->
             val ws = client.newWebSocket(buildRequest(), object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     webSocket.send(configMessage())
@@ -71,6 +119,7 @@ object EdgeTts {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    noteFailure(t, response, "整段合成")
                     out.delete()
                     if (cont.isActive) cont.resume(null)
                 }
@@ -84,27 +133,49 @@ object EdgeTts {
                 out.delete()
             }
         }
+        if (result != null) lastFailure = null
+        return result
     }
 
     /**
      * 流式合成（秒播核心）：WSS 每收到一帧 Path:audio 音频立即回调 onAudio，不等整段合成完——
      * 上层边收边解码边播，首声 ≈ 微软返回首帧的耗时，与文本长度无关。
      * 返回 true = turn.end 正常收尾且至少收到过一帧音频；false = 连接/协议失败（上层走回退链）。
+     * 失败自动重试一次（403 时钟偏差经 [noteFailure] 校正后重试即生效）；
+     * 已收到过音频帧就不重试——重试会从头读一遍，播出去就是复读。
      * onAudio 在 OkHttp 回调线程上执行，必须非阻塞（入队即返回）。
      */
     suspend fun streamSynthesize(text: String, onAudio: (ByteArray) -> Unit): Boolean {
         val body = text.trim().take(STREAM_MAX_CHARS)
         if (body.isEmpty()) return false
         var gotAudio = false
-        return suspendCancellableCoroutine { cont ->
+        var ok = false
+        repeat(2) { attempt ->
+            if (attempt > 0 && gotAudio) return@repeat
+            if (attempt > 0) ttsLog("EdgeTts 流式重试（第2次，时钟偏差已按服务器时间校正）")
+            val once = streamOnce(body) { gotAudio = true; onAudio(it) }
+            if (once) {
+                ok = true
+                return@repeat
+            }
+            if (gotAudio) ttsLog("EdgeTts 流式中断（已收到过音频帧，不重试防复读）")
+        }
+        if (ok) lastFailure = null
+        return ok && gotAudio
+    }
+
+    private suspend fun streamOnce(body: String, onFirstAudio: (ByteArray) -> Unit): Boolean =
+        suspendCancellableCoroutine { cont ->
             var settled = false
+            var got = false
             fun settle(value: Boolean) {
                 if (settled) return
                 settled = true
-                if (cont.isActive) cont.resume(value && gotAudio)
+                if (cont.isActive) cont.resume(value && got)
             }
             val ws = client.newWebSocket(buildRequest(), object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    ttsLog("EdgeTts 流式已连接，发送 SSML（${body.length} 字）")
                     webSocket.send(configMessage())
                     webSocket.send(ssmlMessage(body))
                 }
@@ -115,8 +186,11 @@ object EdgeTts {
                     if (bytes.size <= headerLen + 2) return
                     val header = bytes.substring(2, 2 + headerLen).utf8()
                     if (header.contains("Path:audio")) {
-                        gotAudio = true
-                        runCatching { onAudio(bytes.substring(2 + headerLen).toByteArray()) }
+                        if (!got) {
+                            got = true
+                            ttsLog("EdgeTts 流式收到首帧 ${bytes.size}B")
+                        }
+                        runCatching { onFirstAudio(bytes.substring(2 + headerLen).toByteArray()) }
                     }
                 }
 
@@ -128,6 +202,7 @@ object EdgeTts {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    noteFailure(t, response, "流式合成")
                     settle(false)
                 }
 
@@ -137,7 +212,6 @@ object EdgeTts {
             })
             cont.invokeOnCancellation { runCatching { ws.cancel() } }
         }
-    }
 
     private fun buildRequest(): Request =
         Request.Builder()
@@ -154,7 +228,7 @@ object EdgeTts {
 
     private fun endpoint(): String {
         val gec = runCatching {
-            EdgeTtsDrm.generateSecMsGecV2(System.currentTimeMillis() / 1000)
+            EdgeTtsDrm.generateSecMsGecV2(nowSec())
         }.getOrNull()
         return "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1" +
             "?TrustedClientToken=$TRUSTED_TOKEN" +
