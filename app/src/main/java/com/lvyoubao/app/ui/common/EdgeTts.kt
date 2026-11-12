@@ -1,6 +1,5 @@
 package com.lvyoubao.app.ui.common
 
-import android.util.Log
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -17,13 +16,12 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 
 /**
- * 朗读链路诊断日志（tag=lvyoubao.tts）：每一级引擎的成败与原因都写出来，
- * 手机上 `adb logcat -s lvyoubao.tts` 一眼定位「为什么不播」。JVM 单测里
- * android.util.Log 不可用，靠 runCatching 兜底，println 恒输出。
+ * 朗读链路诊断日志：写入运行日志（LogStore，设置页可导出），也打 logcat（tag=lvyoubao.tts）。
+ * 每一级引擎的成败与原因都记录在案——「为什么不播」不再靠猜。JVM 单测里
+ * android.util.Log 不可用，LogStore 内部 runCatching 兜底，println 恒输出。
  */
 internal fun ttsLog(msg: String) {
-    println("lvyoubao.tts: $msg")
-    runCatching { Log.i("lvyoubao.tts", msg) }
+    com.lvyoubao.app.data.LogStore.log("tts", msg)
 }
 
 /**

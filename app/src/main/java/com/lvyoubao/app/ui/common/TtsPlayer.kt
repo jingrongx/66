@@ -145,7 +145,9 @@ object TtsPlayer {
         val sysOk = runCatching { systemTtsAvailable(context) }.getOrDefault(false)
         lines += if (sysOk) "④ 系统语音引擎：✅ 可用" else "④ 系统语音引擎：❌ 不可用（这台手机没装语音引擎）"
 
-        lines.joinToString("\n")
+        val report = lines.joinToString("\n")
+        ttsLog("诊断报告 →\n$report")
+        report
     }
 
     /** 系统 TTS 引擎是否可用（初始化一次并缓存） */

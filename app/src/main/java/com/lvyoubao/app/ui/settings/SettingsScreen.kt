@@ -2,6 +2,7 @@ package com.lvyoubao.app.ui.settings
 
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -61,12 +62,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.ProviderPresets
 import com.lvyoubao.app.ui.SettingsViewModel
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.sync.QrCodeImage
 import com.lvyoubao.app.ui.sync.QrScanScreen
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -364,6 +369,29 @@ fun SettingsScreen(
                             .padding(top = 8.dp),
                     )
                 }
+                Spacer(Modifier.height(6.dp))
+                // 导出运行日志：自动播报触发/跳过、朗读三级引擎逐次尝试与失败原因、云端原话全在里面
+                TextButton(onClick = {
+                    scope.launch {
+                        runCatching {
+                            val f = withContext(Dispatchers.IO) {
+                                LogStore.export(File(context.filesDir, "exports"))
+                            }
+                            val uri = FileProvider.getUriForFile(
+                                context, "${context.packageName}.fileprovider", f,
+                            )
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(
+                                Intent.createChooser(intent, "导出运行日志")
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                    }
+                }) { Text("📤 导出运行日志（排查问题把日志发开发者）") }
                 Spacer(Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),

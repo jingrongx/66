@@ -50,6 +50,11 @@ class MainActivity : ComponentActivity() {
             // Edge 朗读中途失败时换云端接力，剩余段落不再陪葬
             LaunchedEffect(appSettings.asrKey) {
                 com.lvyoubao.app.ui.common.TtsPlayer.setCloudKey(appSettings.asrKey)
+                com.lvyoubao.app.data.LogStore.log(
+                    "tts",
+                    if (appSettings.asrKey.isBlank()) "云端朗读兜底 Key：未配置（CosyVoice 兜底会跳过）"
+                    else "云端朗读兜底 Key：已配置（长度 ${appSettings.asrKey.length}）",
+                )
             }
             val density = LocalDensity.current
             // 锁定系统字体缩放（关怀模式/大字体把 fontScale 放大后，固定字号的设计布局会被二次

@@ -285,8 +285,17 @@ fun AskScreen(
         // 只读 20 秒内的新回答：切页面/切会话/重进 App 不再把旧消息读一遍
         val fresh = System.currentTimeMillis() - msg.ts < 20_000
         if (settings.autoSpeak && msg.ts != spokenTs && fresh) {
+            com.lvyoubao.app.data.LogStore.log(
+                "autospeak",
+                "触发自动播报：回答 ts=${msg.ts} 长度=${ChatViewModel.speakableText(msg).length} 字",
+            )
             spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
+        } else {
+            com.lvyoubao.app.data.LogStore.log(
+                "autospeak",
+                "跳过本次：开关=${settings.autoSpeak} 已读过=${msg.ts == spokenTs} 是否新鲜=$fresh",
+            )
         }
     }
 
