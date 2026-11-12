@@ -407,12 +407,13 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 if (hadImage && question.isBlank()) append("（请结合图片回答）")
             }
 
-            // 历史轮次带上下文（最近 12 条）。此前图片只在发送那一轮可见，模型手上没有原图——
-            // 用户接着图片继续追问（如「把表里的缩写改成中文」）时，模型手里只有自己上一轮的转述，
-            // 会答非所问甚至让用户重发表格。现在：最近一轮带图的消息把落盘的压缩图随历史重发
-            // （最多 2 张，控制视觉请求体积）；更早的带图轮次补一句文字标注，免得模型误以为还看得见图
+            // 历史轮次带上下文：按字符预算从最新往旧连续装（selectHistory），不再固定条数——
+            // 短问答能带近百轮，长文本自动少带；预算外部分由滚动摘要压缩兜底。图片只在发送
+            // 那一轮可见的教训保留：最近一轮带图的消息把落盘的压缩图随历史重发（最多 2 张，
+            // 控制视觉请求体积）；更早的带图轮次补一句文字标注，免得模型误以为还看得见图
             val allMsgs = sessions.get(sessionId)?.messages ?: emptyList()
-            val historyMessages = allMsgs.dropLast(1).takeLast(12)
+            val selection = selectHistory(allMsgs.dropLast(1), HISTORY_CHAR_BUDGET)
+            val historyMessages = selection.kept
             val lastImageTurn = historyMessages.lastOrNull { it.role == "user" && it.imagePaths.isNotEmpty() }
             val history = historyMessages.map { m ->
                 when {
@@ -426,17 +427,19 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     else -> OutMessage(role = m.role, text = m.text)
                 }
             }
-            // 长会话滚动摘要：12 条窗口截掉的部分，由 AI 在上一轮回答后提前浓缩好注入——
-            // 没有它，会话超过 6 轮后最早的对话会被静默截掉，「前几轮有上下文、后面跑偏」就是它
-            val droppedCount = (allMsgs.size - 1 - historyMessages.size).coerceAtLeast(0)
+            // 长会话滚动摘要：预算装不下的更早对话，由 AI 在上一轮回答后提前浓缩好注入——
+            // 没有它，会话一超出预算，最早的对话就被静默截掉，「前几轮有上下文、后面跑偏」就是它。
+            // 注入条件是「覆盖到」而非「恰好等于」：刷新侧按下一轮口径预排（预留了新提问的量），
+            // 摘要可能比实际截掉的多覆盖一两条——多覆盖只是轻微重复，少覆盖才是真断层
+            val droppedCount = selection.droppedCount
             val summaryBlock = sessionSummaries[sessionId]
-                ?.takeIf { it.first == droppedCount }
+                ?.takeIf { droppedCount > 0 && it.first >= droppedCount }
                 ?.second
                 ?.let {
                     listOf(
                         OutMessage(
                             "system",
-                            "【本会话更早内容的摘要】（这段发生在最近 12 条消息之前，用于延续话题）\n$it",
+                            "【本会话更早内容的摘要】（这段发生在本轮携带的对话记录之前，用于延续话题）\n$it",
                         ),
                     )
                 }
@@ -547,25 +550,52 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         viewModelScope.launch { sessions.delete(id) }
     }
 
-    // ---------- 长会话滚动摘要（补 12 条窗口外的上下文） ----------
+    /** 窗口选取结果：kept 为从新往旧的连续历史段（时间正序），droppedCount 为预算外条数（交滚动摘要兜底） */
+    private data class HistorySelection(val kept: List<SessionMessage>, val droppedCount: Int)
+
+    /**
+     * 历史窗口选取：按字符预算从最新往旧连续装入，装不下为止（不再固定条数）。
+     * 模型上下文再大（deepseek-flash 1M），请求体积也要封顶——长会话的费用与首字延迟才有上界。
+     * 整条消息参与预算、不做条内截断（截断丢的恰恰是用户要的关键信息）；预算装不下的整条
+     * 让位给更新的消息，交给滚动摘要兜底。prior 传「去掉当前用户消息后的历史」（发送侧）
+     * 或全量（摘要预排侧），两条路径必须同源，口径漂移就会回到摘要永远对不上号的老坑
+     */
+    private fun selectHistory(prior: List<SessionMessage>, charBudget: Int): HistorySelection {
+        if (prior.isEmpty()) return HistorySelection(emptyList(), 0)
+        var used = 0
+        var keptCount = 0
+        for (m in prior.asReversed()) {
+            val cost = m.text.length + HISTORY_MSG_OVERHEAD_CHARS + m.imagePaths.size * HISTORY_IMAGE_COST_CHARS
+            if (keptCount >= HISTORY_MIN_MESSAGES && used + cost > charBudget) break
+            used += cost
+            keptCount++
+        }
+        return HistorySelection(prior.takeLast(keptCount), prior.size - keptCount)
+    }
+
+    // ---------- 长会话滚动摘要（补字符预算窗口外的上下文） ----------
     // 借鉴 Anthropic 公开的记忆架构思路：交互间隙做「离线巩固」——每轮回答完在后台把
-    // 窗口外被截掉的对话浓缩成摘要缓存，等下一轮用户提问时直接取现成的注入，不阻塞发送。
+    // 预算外被截掉的对话浓缩成摘要缓存，等下一轮用户提问时直接取现成的注入，不阻塞发送。
     // 生成失败静默降级为不带摘要；会话删除时清缓存。
-    private val sessionSummaries = HashMap<String, Pair<Int, String>>()   // sessionId → (已覆盖条数, 摘要)
+    private val sessionSummaries = HashMap<String, Pair<Int, String>>()   // sessionId → (摘要覆盖到的条数, 摘要)
     private val summaryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    /** 每轮回答完成后后台刷新摘要：截掉的条数变了才重新生成（一次小请求，越聊越长的会话每轮一次） */
+    /** 每轮回答完成后后台刷新摘要：预算外条数变了才重新生成（一次小请求，越聊越长的会话每轮一次） */
     private fun refreshSessionSummary(sessionId: String, settings: AiSettings) {
         if (settings.apiKey.isBlank()) return
         val msgs = sessions.get(sessionId)?.messages ?: return
-        val dropped = (msgs.size - 1 - 12).coerceAtLeast(0)
-        if (dropped < 2) return                                  // 没截掉东西不用摘要
-        if (sessionSummaries[sessionId]?.first == dropped) return // 已覆盖当前窗口
+        // 按下一轮发送的真实口径预排：msgs 全量恰好是下次发送的 prior（下次发送会在其后
+        // 追加新提问再 dropLast(1)），预算里预留 HISTORY_NEXT_TURN_RESERVE_CHARS 给那条新提问。
+        // 此前两侧各算各的口径差了一条（off-by-one），摘要 key 永远对不上号、一次都没注入过——
+        // 窗口口径必须与 selectHistory 同源，漂移了就又回到老坑
+        val targetDropped = selectHistory(msgs, HISTORY_CHAR_BUDGET - HISTORY_NEXT_TURN_RESERVE_CHARS).droppedCount
+        if (targetDropped < 2) return                                  // 没截掉东西不用摘要
+        if (sessionSummaries[sessionId]?.first?.let { it >= targetDropped } == true) return // 已覆盖当前窗口
         if (!summaryInFlight.compareAndSet(false, true)) return  // 上一条还在生成，下一轮再补
         viewModelScope.launch {
             try {
                 // 语料：会话开头 2 条（怎么起的话头）+ 截掉段落里最近的 30 条，逐条截断控预算
-                val corpus = (msgs.take(2) + msgs.take(dropped).takeLast(30))
+                val corpus = (msgs.take(2) + msgs.take(targetDropped).takeLast(30))
                     .distinctBy { it.ts }
                 val transcript = corpus.joinToString("\n") { m ->
                     (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(if (m.role == "user") 120 else 60)
@@ -587,7 +617,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     thinking = false,
                 ).getOrNull()?.trim() ?: return@launch
                 if (reply.length in 20..800) {
-                    sessionSummaries[sessionId] = dropped to reply
+                    sessionSummaries[sessionId] = targetDropped to reply
                 }
             } finally {
                 summaryInFlight.set(false)
@@ -753,6 +783,25 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     companion object {
         /** 相册一次最多选几张（发送时的真正上限由各供应商预设 maxImages 把控） */
         const val MAX_PICK_IMAGES = 4
+
+        /**
+         * 历史窗口字符预算：从最新往旧连续装入，超出部分由滚动摘要压缩兜底。
+         * 中文约 0.6~0.7 token/字符，48k 字符约合 3 万 token 出头——主流 128K 以上上下文的
+         * 模型只占零头，短问答能带近百轮；请求体积封顶，长会话的费用和首字延迟才有上界
+         */
+        const val HISTORY_CHAR_BUDGET = 48_000
+
+        /** 历史窗口保底条数：预算再紧也至少带最近一轮问答，否则指代类追问（「再把表格改改」）完全失去依托 */
+        const val HISTORY_MIN_MESSAGES = 2
+
+        /** 每条历史消息的固定开销当量（role/分隔等杂项） */
+        const val HISTORY_MSG_OVERHEAD_CHARS = 16
+
+        /** 每张随历史重发的图片按此字符当量计入预算（视觉 token 的粗略折算） */
+        const val HISTORY_IMAGE_COST_CHARS = 8_000
+
+        /** 摘要预排时给下一轮「新提问」预留的字符量（语音提问通常几十字，余量放大到一屏文本） */
+        const val HISTORY_NEXT_TURN_RESERVE_CHARS = 4_000
 
         /** 天气类问题（强制注入专业气象数据） */
         val WEATHER_INTENT = Regex("天气|下雨|下雪|降雪|降雨|天晴|放晴|转晴|晴不晴|气温|温度|几度|冷不冷|热不热|穿什么|带伞|雨伞|刮风|风力|风速|湿度|降水")
