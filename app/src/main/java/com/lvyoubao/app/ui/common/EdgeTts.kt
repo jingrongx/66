@@ -74,9 +74,16 @@ object EdgeTts {
                         }
                     }
                 }
-                "HTTP ${response.code} 微软令牌被拒（多半是手机时间不准，已按服务器时间自动校正）"
+                "HTTP ${response.code} 微软令牌被拒（已按服务器时间自动校正并重试）"
             }
-            t is java.io.IOException && t.message?.contains("timeout", true) == true -> "连接微软服务超时"
+            t is javax.net.ssl.SSLException ->
+                "SSL 握手被断开（当前网络到微软的连接被重置——此网络环境连不上微软朗读，属常见网络拦截）"
+            t is java.net.ConnectException ->
+                "无法建立连接（此网络环境连不上微软朗读）"
+            t is java.net.UnknownHostException ->
+                "微软域名解析失败（DNS 异常或无网络）"
+            t is java.io.IOException && t.message?.contains("timeout", true) == true ->
+                "连接微软服务超时"
             else -> "${t.javaClass.simpleName}：${t.message ?: "未知错误"}"
         }
         lastFailure = reason
