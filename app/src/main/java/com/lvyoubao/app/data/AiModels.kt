@@ -104,6 +104,7 @@ data class SearchRequestBody(
     val query: String,
     val count: Int = 5,
     val need_content: Boolean = false,
+    val ori_question: String? = null,
 )
 
 @Serializable
@@ -119,3 +120,16 @@ data class SearchResult(
 
 @Serializable
 data class SearchResponseBody(val results: List<SearchResult> = emptyList())
+
+// ---------- DeepSeek 阅读链接 / 网页解析（POST /v1/tools/fetch） ----------
+
+@Serializable
+data class FetchRequestBody(
+    val url: String,
+)
+
+@Serializable
+data class FetchResponseBody(
+    val title: String = "",
+    val content: String = "",
+)

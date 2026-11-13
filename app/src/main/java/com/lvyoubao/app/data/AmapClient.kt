@@ -247,7 +247,7 @@ class AmapClient(private val key: String) {
 
     /** v3 公交（transit/integrated）：取前 3 个换乘方案，折线 = 步行段 + 公交段拼接 */
     private fun v3Transit(fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): List<RoutePlan> {
-        val city = regeocodeCity(fromLon, fromLat) ?: throw ApiException("公交路线需要先定位所在城市")
+        val city = regeocodeCity(fromLon, fromLat, isGcj02 = true) ?: throw ApiException("公交路线需要先定位所在城市")
         val url = "https://restapi.amap.com/v3/direction/transit/integrated" +
             "?origin=$fromLon,$fromLat&destination=$toLon,$toLat&city=${urlEncode(city)}&strategy=0&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
@@ -301,17 +301,24 @@ class AmapClient(private val key: String) {
         }
     }
 
-    /** 逆地理编码：坐标 → 城市（公交路线必填 city 参数） */
-    fun regeocodeCity(wgsLon: Double, wgsLat: Double): String? = runCatching {
-        val g = Gcj02.fromWgs(wgsLat, wgsLon)
-        val url = "https://restapi.amap.com/v3/geocode/regeo?location=${g.second},${g.first}&key=$key"
+    /** 逆地理编码：坐标 → 城市（公交路线必填 city 参数，支持直接传 GCJ-02 或 WGS-84） */
+    fun regeocodeCity(lon: Double, lat: Double, isGcj02: Boolean = false): String? = runCatching {
+        val (gcjLat, gcjLon) = if (isGcj02) lat to lon else Gcj02.fromWgs(lat, lon)
+        val url = "https://restapi.amap.com/v3/geocode/regeo?location=${gcjLon},${gcjLat}&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
         if (root["status"]?.jsonPrimitive?.content != "1") return@runCatching null
-        val ac = root["regeocodes"]?.jsonArray?.firstOrNull()
-            ?.jsonObject?.get("addressComponent")?.jsonObject
-        val city = runCatching { ac?.get("city")?.jsonPrimitive?.content }.getOrNull()
-        val province = runCatching { ac?.get("province")?.jsonPrimitive?.content }.getOrNull()
-        (city ?: province)?.takeIf { it.isNotBlank() && it != "[]" }
+        // 高德单点逆地理编码返回 regeocode 对象（batch=true 才有 regeocodes 数组）
+        val regeo = root["regeocode"]?.jsonObject
+            ?: root["regeocodes"]?.jsonArray?.firstOrNull()?.jsonObject
+            ?: return@runCatching null
+        val ac = regeo["addressComponent"]?.jsonObject
+        val cityVal = runCatching { ac?.get("city")?.jsonPrimitive?.content }.getOrNull()
+        val provVal = runCatching { ac?.get("province")?.jsonPrimitive?.content }.getOrNull()
+        val adcodeVal = runCatching { ac?.get("adcode")?.jsonPrimitive?.content }.getOrNull()
+        val city = cityVal?.takeIf { it.isNotBlank() && it != "[]" }
+        val province = provVal?.takeIf { it.isNotBlank() && it != "[]" }
+        val adcode = adcodeVal?.takeIf { it.isNotBlank() && it != "[]" }
+        city ?: province ?: adcode
     }.getOrNull()
 
     companion object {

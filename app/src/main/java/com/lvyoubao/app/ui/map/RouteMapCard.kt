@@ -6,6 +6,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.view.MotionEvent
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -62,6 +63,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -291,15 +297,21 @@ fun RouteMapCard(
         if (plans[m] == null) fetchPlans(m)
     }
 
-    /** 地点卡：选中一个候选点作为目的地，直接查步行路线 */
+    /** 地点卡：选中一个候选点作为目的地，立即算路并展示路线 */
     fun selectPoi(poi: MapPoi) {
-        if (selectedPoi == poi && dest == (poi.lon to poi.lat)) return
         selectedPoi = poi
         dest = poi.lon to poi.lat
         plans = emptyMap()
         planIndex = 0
         error = null
-        fetchPlans(RouteMode.WALK)
+        fetchPlans(mode)
+    }
+
+    // 首次进入：卡片若无路线方案（如地点卡进入默认显示走路），自动触发查询当前选中方式路线
+    LaunchedEffect(card, dest) {
+        if (currentPlan == null && !loading && error == null) {
+            fetchPlans(mode)
+        }
     }
 
     fun replan(announce: Boolean) {
@@ -540,7 +552,9 @@ fun RouteMapCard(
                     removeLayer(layers, originMarker)
                     removeLayer(layers, destMarker)
                     val originPt = plan?.points?.firstOrNull() ?: (card.fromLon to card.fromLat)
-                    originMarker = if (card.hasOrigin) {
+                    // 若起点与当前定位点很近（< 50米），说明路线从当前位置出发，不画重复的灰色原点
+                    val isOriginNearMe = me?.let { FatigueEngine.haversine(it.lat, it.lon, originPt.second, originPt.first) < 50 } ?: false
+                    originMarker = if (card.hasOrigin && !isOriginNearMe) {
                         dotMarker(context, originPt.second, originPt.first, ORIGIN_ARGB, 12)
                             ?.also { layers.add(it) }
                     } else null
@@ -558,18 +572,31 @@ fun RouteMapCard(
                     mv.post {
                         val pts = plan?.points?.map { org.mapsforge.core.model.LatLong(it.second, it.first) }
                             ?: listOf(org.mapsforge.core.model.LatLong(dest.second, dest.first))
-                        // place 卡视野只框目的地（及候选点），不框 from（生成卡片时的旧位置会把视野拖去千里外）
                         val all = if (card.hasOrigin && card.kind == "route") {
                             pts + org.mapsforge.core.model.LatLong(card.fromLat, card.fromLon)
                         } else pts
                         if (all.isNotEmpty()) {
+                            val minLat = all.minOf { it.latitude }
+                            val maxLat = all.maxOf { it.latitude }
+                            val minLon = all.minOf { it.longitude }
+                            val maxLon = all.maxOf { it.longitude }
+                            // 几何外包矩形中心点（彻底解决 average() 在折线密集处使中心严重偏移的问题）
+                            val geoCenterLat = (minLat + maxLat) / 2.0
+                            val geoCenterLon = (minLon + maxLon) / 2.0
+
+                            // 避让底部悬浮面板：扣除面板高度，保证路线完整展示在可视区域
+                            val effectiveHeight = (mv.height - panelHeightPx).coerceAtLeast(100)
+                            val zoom = fitZoomLevel(mv.width, effectiveHeight, all)
+
+                            // 视场垂直偏移补偿：面板遮挡下半区，中心纬度适当下移（地图向上抬），路线居于屏幕上半部
+                            val panelRatio = (panelHeightPx.toFloat() / mv.height.coerceAtLeast(1).toFloat()).coerceIn(0f, 0.45f)
+                            val latSpan = maxLat - minLat
+                            val adjustedCenterLat = geoCenterLat - (latSpan * panelRatio * 0.5)
+
                             mv.model.mapViewPosition.setCenter(
-                                org.mapsforge.core.model.LatLong(
-                                    all.map { it.latitude }.average(),
-                                    all.map { it.longitude }.average(),
-                                ),
+                                org.mapsforge.core.model.LatLong(adjustedCenterLat, geoCenterLon),
                             )
-                            mv.model.mapViewPosition.setZoomLevel(fitZoomLevel(mv.width, mv.height, all))
+                            mv.model.mapViewPosition.setZoomLevel(zoom)
                         }
                     }
                 }
@@ -635,9 +662,9 @@ fun RouteMapCard(
         }
     }
 
-    // ---- 胶囊控制列（花瓣地图风格：白胶囊 + 细分隔线 + 48dp 命中区）里的图标按钮 ----
+    // ---- 胶囊控制列（白胶囊 + 细分隔线 + 48dp 命中区）里的专业图标按钮 ----
     @Composable
-    fun MapControlIcon(label: String, desc: String, onClick: () -> Unit) {
+    fun MapControlIcon(desc: String, onClick: () -> Unit, content: @Composable () -> Unit) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
@@ -645,12 +672,7 @@ fun RouteMapCard(
                 .semantics { contentDescription = desc }
                 .clickable(onClick = onClick),
         ) {
-            Text(
-                label,
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
+            content()
         }
     }
 
@@ -1096,31 +1118,101 @@ fun RouteMapCard(
                             .graphicsLayer { translationY = -panelHeightPx / 2f },
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            MapControlIcon("＋", "放大地图") {
+                            MapControlIcon("放大地图", onClick = {
                                 val mv = mapViewRef
                                 if (mv != null) mv.model.mapViewPosition.zoomIn()
+                            }) {
+                                Canvas(Modifier.size(18.dp)) {
+                                    val stroke = 2.4.dp.toPx()
+                                    val color = Color(0xFF1E293B)
+                                    drawLine(color, Offset(0f, size.height / 2f), Offset(size.width, size.height / 2f), strokeWidth = stroke, cap = StrokeCap.Round)
+                                    drawLine(color, Offset(size.width / 2f, 0f), Offset(size.width / 2f, size.height), strokeWidth = stroke, cap = StrokeCap.Round)
+                                }
                             }
                             ControlDivider()
-                            MapControlIcon("－", "缩小地图") {
+                            MapControlIcon("缩小地图", onClick = {
                                 val mv = mapViewRef
                                 if (mv != null) mv.model.mapViewPosition.zoomOut()
+                            }) {
+                                Canvas(Modifier.size(18.dp)) {
+                                    val stroke = 2.4.dp.toPx()
+                                    val color = Color(0xFF1E293B)
+                                    drawLine(color, Offset(0f, size.height / 2f), Offset(size.width, size.height / 2f), strokeWidth = stroke, cap = StrokeCap.Round)
+                                }
                             }
                             ControlDivider()
-                            // 罗盘：指示设备朝向（本地地图库暂不支持底图旋转，用指北箭头代替）
-                            Box(
-                                Modifier.size(48.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    "▲",
-                                    fontSize = 20.sp,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.graphicsLayer { rotationZ = azimuth },
-                                )
+                            // 专业罗盘指北针（红白双色菱形指针 + 刻度环，告别粗糙纯黑正三角形）
+                            MapControlIcon("罗盘指北", onClick = {
+                                val plan = currentPlan
+                                if (plan != null && plan.points.isNotEmpty()) {
+                                    mapViewRef?.post {
+                                        val all = plan.points.map { org.mapsforge.core.model.LatLong(it.second, it.first) }
+                                        val minLat = all.minOf { it.latitude }
+                                        val maxLat = all.maxOf { it.latitude }
+                                        val minLon = all.minOf { it.longitude }
+                                        val maxLon = all.maxOf { it.longitude }
+                                        mapViewRef?.model?.mapViewPosition?.setCenter(
+                                            org.mapsforge.core.model.LatLong((minLat + maxLat) / 2.0, (minLon + maxLon) / 2.0),
+                                        )
+                                    }
+                                }
+                            }) {
+                                Box(
+                                    Modifier.size(24.dp).graphicsLayer { rotationZ = azimuth },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Canvas(Modifier.fillMaxSize()) {
+                                        val w = size.width
+                                        val h = size.height
+                                        val cx = w / 2f
+                                        val cy = h / 2f
+                                        // 罗盘刻度外环
+                                        drawCircle(Color(0xFFCBD5E1), radius = w * 0.46f, style = Stroke(width = 1.2.dp.toPx()))
+                                        // 北指针（鲜红菱形尖端）
+                                        val northPath = Path().apply {
+                                            moveTo(cx, h * 0.08f)
+                                            lineTo(cx + w * 0.18f, cy)
+                                            lineTo(cx - w * 0.18f, cy)
+                                            close()
+                                        }
+                                        drawPath(northPath, Color(0xFFDC2626))
+                                        // 南指针（银灰菱形尖端）
+                                        val southPath = Path().apply {
+                                            moveTo(cx, h * 0.92f)
+                                            lineTo(cx + w * 0.18f, cy)
+                                            lineTo(cx - w * 0.18f, cy)
+                                            close()
+                                        }
+                                        drawPath(southPath, Color(0xFF94A3B8))
+                                        // 轴心
+                                        drawCircle(Color.White, radius = w * 0.11f)
+                                        drawCircle(Color(0xFF334155), radius = w * 0.055f)
+                                    }
+                                }
                             }
                             ControlDivider()
-                            MapControlIcon("◎", "回到我的位置") {
+                            // 专业我的位置瞄准图标（圆形刻度 + 中心原点 + 四向准星）
+                            MapControlIcon("回到我的位置", onClick = {
                                 locateMe()
+                            }) {
+                                Canvas(Modifier.size(20.dp)) {
+                                    val w = size.width
+                                    val h = size.height
+                                    val cx = w / 2f
+                                    val cy = h / 2f
+                                    val color = Color(0xFF0D7385)
+                                    val stroke = 1.8.dp.toPx()
+                                    // 准星外环
+                                    drawCircle(color, radius = w * 0.35f, style = Stroke(width = stroke))
+                                    // 中心实心圆点
+                                    drawCircle(color, radius = w * 0.16f)
+                                    // 四向十字准星刻度线
+                                    val tickLen = w * 0.18f
+                                    drawLine(color, Offset(cx, 0f), Offset(cx, tickLen), strokeWidth = stroke, cap = StrokeCap.Round)
+                                    drawLine(color, Offset(cx, h - tickLen), Offset(cx, h), strokeWidth = stroke, cap = StrokeCap.Round)
+                                    drawLine(color, Offset(0f, cy), Offset(tickLen, cy), strokeWidth = stroke, cap = StrokeCap.Round)
+                                    drawLine(color, Offset(w - tickLen, cy), Offset(w, cy), strokeWidth = stroke, cap = StrokeCap.Round)
+                                }
                             }
                         }
                     }

@@ -109,19 +109,19 @@ internal fun arrowMarker(context: Context, lat: Double, lon: Double, argb: Int, 
 }.getOrNull()
 
 /**
- * 定位精度圈：当前位置周围一圈半透明蓝，半径 = 定位误差半径（米），专业地图的标配——
- * 用户一眼看出这个点有多可信，误差大时不会误以为手机飘了。
+ * 定位精度圈：当前位置周围一圈半透明蓝，视觉半径合理约束（最大 50 米），
+ * 避免室内或弱信号下数百米甚至数千米的大圈把整个屏幕甚至几个省全盖满。
  */
 internal fun accuracyCircle(lat: Double, lon: Double, accuracyM: Float): org.mapsforge.map.layer.overlay.Circle? {
-    val radius = accuracyM.coerceIn(15f, 3000f)
+    val radius = accuracyM.coerceIn(8f, 50f)
     return runCatching {
         val fill = AndroidGraphicFactory.INSTANCE.createPaint().apply {
-            setColor(android.graphics.Color.argb(40, 13, 115, 133))
+            setColor(android.graphics.Color.argb(30, 26, 115, 232))
             setStyle(org.mapsforge.core.graphics.Style.FILL)
         }
         val stroke = AndroidGraphicFactory.INSTANCE.createPaint().apply {
-            setColor(android.graphics.Color.argb(90, 13, 115, 133))
-            setStrokeWidth(2f)
+            setColor(android.graphics.Color.argb(70, 26, 115, 232))
+            setStrokeWidth(1.5f)
             setStyle(org.mapsforge.core.graphics.Style.STROKE)
         }
         org.mapsforge.map.layer.overlay.Circle(LatLong(lat, lon), radius, fill, stroke)
@@ -217,18 +217,18 @@ internal fun pickMapSelection(context: Context, points: List<Pair<Double, Double
     return MapSelection(maps, uncovered, missing)
 }
 
-/** 找一个能把所有点装下的缩放级别（留 18% 边距）；单点（地点卡「附近」）直接给街级 16 */
+/** 找一个能把所有点装下的缩放级别（留足安全边距）；支持 4（大尺度跨省自驾）至 18（街景级）全量范围 */
 internal fun fitZoomLevel(widthPx: Int, heightPx: Int, points: List<LatLong>): Byte {
-    if (widthPx <= 0 || heightPx <= 0 || points.isEmpty()) return 14
+    if (widthPx <= 0 || heightPx <= 0 || points.isEmpty()) return 15
     if (points.size == 1) return 16
-    var zoom = 12
-    while (zoom < 20) {
+    var zoom = 4
+    while (zoom < 19) {
         val xs = points.map { MercatorProjection.longitudeToPixelX(it.longitude, zoom.toByte(), 256) }
         val ys = points.map { MercatorProjection.latitudeToPixelY(it.latitude, zoom.toByte(), 256) }
-        if ((xs.max() - xs.min()) > widthPx * 0.82 || (ys.max() - ys.min()) > heightPx * 0.82) break
+        if ((xs.max() - xs.min()) > widthPx * 0.76 || (ys.max() - ys.min()) > heightPx * 0.76) break
         zoom++
     }
-    return (zoom - 1).coerceAtLeast(12).toByte()
+    return (zoom - 1).coerceIn(4, 18).toByte()
 }
 
 /**

@@ -59,11 +59,13 @@ class AiClient(private val settings: AiSettings) {
         onRetry: (() -> Unit)? = null,
     ): Result<AssistantReply> = withContext(Dispatchers.IO) {
         guard {
-            val effective = if (searchEnabled && isDeepSeek) {
-                val lastUser = messages.lastOrNull { it.role == "user" }?.text.orEmpty()
+            val lastUser = messages.lastOrNull { it.role == "user" }?.text.orEmpty()
+            val effective = if (searchEnabled) {
                 trySearchInject(lastUser, messages)
             } else {
-                messages
+                // 即使未开启全局搜索，若用户输入包含特定文章/网页链接，自动提取正文（阅读链接）
+                val explicitUrl = FreeWebSearch.extractFirstUrl(lastUser)
+                if (explicitUrl != null) tryUrlInject(explicitUrl, messages) else messages
             }
             generate(effective, thinking, toolExecutor, onAnswer, onReasoning, onRetry)
         }
@@ -87,14 +89,23 @@ class AiClient(private val settings: AiSettings) {
             }
         }
 
-    /** 搜索失败时静默降级为无搜索（不阻断回答） */
-    private suspend fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {        if (query.isBlank()) return messages
-        val results = runCatching { search(query.take(128)) }.getOrNull().orEmpty()
+    /** 搜索与链接正文注入：失败时静默降级为无搜索（不阻断回答） */
+    private suspend fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {
+        if (query.isBlank()) return messages
+
+        // 1. 若用户输入中含有具体网页/文章链接（如公众号链接），优先走阅读链接（1:1 对标 DeepSeek App 阅读链接能力）
+        val targetUrl = FreeWebSearch.extractFirstUrl(query)
+        if (targetUrl != null) {
+            return tryUrlInject(targetUrl, messages)
+        }
+
+        // 2. 关键词联网搜索（DeepSeek 全家桶 Search API + 国内免费源聚合备份）
+        val results = runCatching { search(query.take(128), oriQuestion = query) }.getOrNull().orEmpty()
         if (results.isEmpty()) return messages
         val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA)
             .format(java.util.Date())
         val block = buildString {
-            appendLine("【实时搜索结果】（DeepSeek 搜索，检索时间 $now）")
+            appendLine("【实时搜索结果】（多源实时检索，检索时间 $now）")
             results.forEachIndexed { i, r ->
                 appendLine("${i + 1}. ${r.title}（${r.site_name ?: host(r.url)}${r.date?.let { "，" + it.take(10) } ?: ""}）")
                 appendLine("   摘要：${r.summary.ifBlank { r.snippet }}")
@@ -107,24 +118,80 @@ class AiClient(private val settings: AiSettings) {
             messages.last()
     }
 
+    /** 读取并注入网页/文章正文 */
+    private suspend fun tryUrlInject(url: String, messages: List<OutMessage>): List<OutMessage> {
+        val article = if (isDeepSeek && settings.apiKey.isNotBlank()) {
+            fetchUrlWithDeepSeek(url) ?: FreeWebSearch.fetchUrlContent(url)
+        } else {
+            FreeWebSearch.fetchUrlContent(url)
+        } ?: return messages
+
+        val (title, content) = article
+        val block = buildString {
+            appendLine("【用户分享的网页/文章正文】")
+            appendLine("标题：$title")
+            appendLine("网址：$url")
+            appendLine("正文内容：")
+            appendLine(content.take(15000))
+            append("请根据以上网页/文章正文内容，全面、准确地回答用户的问题或进行分析总结。")
+        }
+        return messages.dropLast(1) +
+            OutMessage("system", block) +
+            messages.last()
+    }
+
     private fun host(url: String): String =
         runCatching { java.net.URI(url).host?.removePrefix("www.") }.getOrNull() ?: url
 
-    /** POST {base}/v1/tools/search（DeepSeek 联网搜索，$0.75/千次成功请求） */
-    suspend fun search(query: String): List<SearchResult> = withContext(Dispatchers.IO) {
-        val body = json.encodeToJsonElement(
-            SearchRequestBody(query = query, count = 5, need_content = false),
-        ).toString()
-        val request = Request.Builder()
-            .url("$baseUrl/v1/tools/search")
-            .header("Authorization", authHeader)
-            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-        client.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw ApiException(mapError(response.code, text), response.code)
-            json.decodeFromString<SearchResponseBody>(text).results
+    /**
+     * 联网搜索：
+     * 优先走 DeepSeek 官方 Search API（$0.75/千次，支持 ori_question 上下文）；
+     * 若未配置 DeepSeek Key、非 DeepSeek 模型、或 DeepSeek 搜索无结果时，自动无缝走国内免费免 Key 通道（cn.bing.com / 百度）。
+     */
+    suspend fun search(query: String, oriQuestion: String? = null): List<SearchResult> = withContext(Dispatchers.IO) {
+        var results: List<SearchResult> = emptyList()
+
+        if (isDeepSeek && settings.apiKey.isNotBlank()) {
+            results = runCatching {
+                val body = json.encodeToJsonElement(
+                    SearchRequestBody(query = query, count = 5, need_content = false, ori_question = oriQuestion),
+                ).toString()
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/tools/search")
+                    .header("Authorization", authHeader)
+                    .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) emptyList()
+                    else json.decodeFromString<SearchResponseBody>(text).results
+                }
+            }.getOrDefault(emptyList())
         }
+
+        // 备用与增强：无结果或非 DeepSeek 服务商时走免 Key 国内免费源
+        if (results.isEmpty()) {
+            results = FreeWebSearch.search(query, 5)
+        }
+        results
+    }
+
+    /** POST {base}/v1/tools/fetch（DeepSeek 官方全家桶应用 API：阅读链接 / 网页解析） */
+    suspend fun fetchUrlWithDeepSeek(url: String): Pair<String, String>? = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = json.encodeToJsonElement(FetchRequestBody(url = url)).toString()
+            val request = Request.Builder()
+                .url("$baseUrl/v1/tools/fetch")
+                .header("Authorization", authHeader)
+                .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@runCatching null
+                val text = response.body?.string().orEmpty()
+                val resp = json.decodeFromString<FetchResponseBody>(text)
+                if (resp.content.isNotBlank()) resp.title to resp.content else null
+            }
+        }.getOrNull()
     }
 
     /**

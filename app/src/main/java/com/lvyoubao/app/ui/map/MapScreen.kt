@@ -1,5 +1,9 @@
 package com.lvyoubao.app.ui.map
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -760,30 +764,35 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                     .align(Alignment.BottomEnd)
                                     .padding(10.dp),
                             ) {
-                                // 缩放圆钮与 RouteMapCard 的 RoundMapButton 同规格：44dp 圆 + 20sp，触达面积达标
+                                // 缩放圆钮：44dp 命中区 + 统一线宽矢量绘制，避免文字字符大小不一
                                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
-                                    Text(
-                                        "＋",
-                                        fontSize = 20.sp,
-                                        fontWeight = FontWeight.Bold,
+                                    Box(
+                                        contentAlignment = Alignment.Center,
                                         modifier = Modifier
-                                            .clickable {
-                                                mapViewRef?.model?.mapViewPosition?.zoomIn()
-                                            }
-                                            .padding(10.dp),
-                                    )
+                                            .size(44.dp)
+                                            .clickable { mapViewRef?.model?.mapViewPosition?.zoomIn() },
+                                    ) {
+                                        Canvas(Modifier.size(18.dp)) {
+                                            val stroke = 2.4.dp.toPx()
+                                            val color = Color(0xFF1E293B)
+                                            drawLine(color, Offset(0f, size.height / 2f), Offset(size.width, size.height / 2f), strokeWidth = stroke, cap = StrokeCap.Round)
+                                            drawLine(color, Offset(size.width / 2f, 0f), Offset(size.width / 2f, size.height), strokeWidth = stroke, cap = StrokeCap.Round)
+                                        }
+                                    }
                                 }
                                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
-                                    Text(
-                                        "－",
-                                        fontSize = 20.sp,
-                                        fontWeight = FontWeight.Bold,
+                                    Box(
+                                        contentAlignment = Alignment.Center,
                                         modifier = Modifier
-                                            .clickable {
-                                                mapViewRef?.model?.mapViewPosition?.zoomOut()
-                                            }
-                                            .padding(10.dp),
-                                    )
+                                            .size(44.dp)
+                                            .clickable { mapViewRef?.model?.mapViewPosition?.zoomOut() },
+                                    ) {
+                                        Canvas(Modifier.size(18.dp)) {
+                                            val stroke = 2.4.dp.toPx()
+                                            val color = Color(0xFF1E293B)
+                                            drawLine(color, Offset(0f, size.height / 2f), Offset(size.width, size.height / 2f), strokeWidth = stroke, cap = StrokeCap.Round)
+                                        }
+                                    }
                                 }
                                 Surface(
                                     shape = RoundedCornerShape(20.dp),
