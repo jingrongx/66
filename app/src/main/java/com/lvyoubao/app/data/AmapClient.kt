@@ -88,10 +88,12 @@ class AmapClient(private val key: String) {
         }.orEmpty()
     }
 
-    /** 步行路径规划：返回距离/耗时/途经点坐标 */
+    /** 步行路径规划：输入 WGS-84 坐标，内部转 GCJ-02 调高德，返回转回 WGS-84 途经点坐标（画 OSM 底图同系） */
     fun walkingRoute(fromLon: Double, fromLat: Double, toLon: Double, toLat: Double): RouteResult {
+        val gFrom = Gcj02.fromWgs(fromLat, fromLon)
+        val gTo = Gcj02.fromWgs(toLat, toLon)
         val url = "https://restapi.amap.com/v3/direction/walking" +
-            "?origin=$fromLon,$fromLat&destination=$toLon,$toLat&key=$key"
+            "?origin=${gFrom.second},${gFrom.first}&destination=${gTo.second},${gTo.first}&key=$key"
         val root = json.parseToJsonElement(get(url)).jsonObject
         if (root["status"]?.jsonPrimitive?.content != "1") {
             throw ApiException(mapAmapError(
@@ -107,7 +109,10 @@ class AmapClient(private val key: String) {
                 val c = seg.split(",")
                 val lon = c.getOrNull(0)?.toDoubleOrNull()
                 val lat = c.getOrNull(1)?.toDoubleOrNull()
-                if (lon != null && lat != null) points.add(lon to lat)
+                if (lon != null && lat != null) {
+                    val w = Gcj02.toWgs(lat, lon)
+                    points.add(w.second to w.first)
+                }
             }
         }
         return RouteResult(

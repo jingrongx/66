@@ -397,13 +397,19 @@ fun RouteMapCard(
         }
     }
 
-    // 偏航（离路线 80 米开）→ 自动重新规划（30 秒最多一次）
+    // 偏航重规划：按出行方式智能自适应（驾车车速快响应更灵敏，步行适当宽容避免频繁晃动误报）
     LaunchedEffect(me) {
         val m = me ?: return@LaunchedEffect
         val plan = currentPlan ?: return@LaunchedEffect
         if (!navigating || plan.points.isEmpty()) return@LaunchedEffect
         val off = NavigationTracker.distanceToPolylineM(m.lat, m.lon, plan.points)
-        if (off > 80 && System.currentTimeMillis() - lastReplanAt > 30_000) {
+        val (thresholdM, cooldownMs) = when (mode) {
+            RouteMode.DRIVE -> 45 to 10_000L
+            RouteMode.RIDE -> 50 to 12_000L
+            RouteMode.WALK -> 60 to 18_000L
+            RouteMode.BUS -> 80 to 20_000L
+        }
+        if (off > thresholdM && System.currentTimeMillis() - lastReplanAt > cooldownMs) {
             lastReplanAt = System.currentTimeMillis()
             if (voiceOn) TtsPlayer.speak(context, "偏航了，正在重新规划路线")
             replan(announce = false)

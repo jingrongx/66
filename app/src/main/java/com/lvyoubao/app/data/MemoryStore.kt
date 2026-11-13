@@ -106,12 +106,13 @@ class MemoryStore(context: Context) {
         persist()
     }
 
-    /** 按与查询的关键词重叠度挑最相关的若干条，拼成注入上下文 */
-    fun relevantContext(query: String, limit: Int = 3): String {
+    /** 按与查询的关键词重叠度挑最相关的若干条，拼成注入上下文；可排除已整体注入的 kind（如 PROFILE）避免重复 */
+    fun relevantContext(query: String, limit: Int = 3, excludeKinds: Set<String> = emptySet()): String {
         if (_entries.value.isEmpty() || query.isBlank()) return ""
         val tokens = tokenize(query)
         if (tokens.isEmpty()) return ""
         val scored = _entries.value
+            .filter { it.kind !in excludeKinds }
             .map { e ->
                 val text = e.title + e.detail
                 val hits = tokens.count { text.contains(it) }
@@ -172,10 +173,11 @@ class MemoryStore(context: Context) {
             append(
                 "任务：输出更新后的完整记忆清单。仍成立的旧记忆原样保留，重复的合并，" +
                     "过时或被用户推翻的删除，对话里体现的新事实加进去。" +
-                    "只提取对话里用户明确表达的长期事实（住址城市、家人称呼、出行习惯、饮食口味、" +
-                    "身体状况、常用地点、宠物车房、兴趣偏好等），不要编造、不要存一次性信息" +
-                    "（比如本次去哪玩、临时问的问题）。每条一句话不超过30字。最多15条。" +
-                    "只输出 JSON 字符串数组，不要任何解释。",
+                    "注意：已有记忆中用户的固定事实（住址城市、家人称呼、身体状况、核心偏好等）" +
+                    "若新对话中未涉及，请务必原样保留，绝不要因为新对话没提就漏掉；" +
+                    "只有用户在对话中明确推翻、纠正时才修改或删除。" +
+                    "只提取用户明确表达的长期事实，不要编造、不要存一次性临时信息（比如本次去哪玩、临时问的问题）。" +
+                    "每条一句话不超过30字。最多15条。只输出 JSON 字符串数组，不要任何解释。",
             )
         }
         val body = AiClient(settings).chatPlain(
@@ -205,12 +207,12 @@ class MemoryStore(context: Context) {
         return true
     }
 
-    /** 合并画像：保留仍然成立的（原时间戳），新增没有的；明显缩水或太新的不删 */
+    /** 合并画像：保留仍然成立的（原时间戳），新增没有的；明显缩水或24小时内太新的不删 */
     private suspend fun mergeProfile(facts: List<String>, existing: List<MemoryEntry>) = mutex.withLock {
         val now = System.currentTimeMillis()
         val onlyAdd = existing.size >= 4 && facts.size * 2 < existing.size
         val kept = existing.filter { e ->
-            onlyAdd || (now - e.ts > DAY_MS && facts.any { sameFact(it, e.title) })
+            onlyAdd || (now - e.ts <= DAY_MS) || facts.any { sameFact(it, e.title) }
         }
         val keptTitles = kept.map { it.title }
         val toAdd = facts.asSequence()
@@ -237,24 +239,33 @@ class MemoryStore(context: Context) {
 
     private fun tokenize(query: String): List<String> {
         val cleaned = query.replace(Regex("[？?！!，,。.\\s（）()\"']"), " ")
-        val words = cleaned.split(' ').filter { it.length >= 2 }.toMutableList()
+        val words = cleaned.split(' ').filter { it.length >= 2 && it !in STOP_WORDS }.toMutableList()
         // 中文无空格分词：滑窗 2-gram 兜底
         val compact = cleaned.replace(" ", "")
         if (compact.length >= 2 && words.size < 3) {
-            words.addAll((0..compact.length - 2).map { compact.substring(it, it + 2) })
+            val grams = (0..compact.length - 2)
+                .map { compact.substring(it, it + 2) }
+                .filter { it !in STOP_WORDS }
+            words.addAll(grams)
         }
         return words.distinct().take(20)
-    }
-
-    private fun persist() {
-        runCatching {
-            file.writeText(_entries.value.joinToString("\n") { json.encodeToString(it) })
-        }
     }
 
     private companion object {
         const val MAX_ENTRIES = 500
         const val PROFILE_MAX = 60
         const val DAY_MS = 24 * 3600_000L
+        val STOP_WORDS = setOf(
+            "这个", "那个", "什么", "怎么", "哪里", "还有", "可以", "我们", "你们", "他们",
+            "现在", "时候", "应该", "可能", "就是", "但是", "然后", "如果", "因为", "所以",
+            "附近", "大概", "多少", "一个", "一下", "不了", "没有", "是不是", "怎么样",
+            "我想", "告诉", "知道", "请问", "帮我", "看看", "查询",
+        )
+    }
+
+    private fun persist() {
+        runCatching {
+            file.writeText(_entries.value.joinToString("\n") { json.encodeToString(it) })
+        }
     }
 }

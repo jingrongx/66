@@ -54,6 +54,7 @@ class MapViewModel(
         val routing: Boolean = false,
         val routePoints: List<Pair<Double, Double>> = emptyList(),
         val trackPoints: List<Pair<Double, Double>> = emptyList(),  // 感知轨迹（足迹叠加）
+        val importedTrack: com.lvyoubao.app.data.GpxUtils.GpxTrack? = null, // 导入的 GPX 路书轨迹
     )
 
     /** 下载速度表：指数滑动平均，避免瞬时抖动跳来跳去 */
@@ -582,6 +583,41 @@ class MapViewModel(
                 },
             )
         }
+    }
+
+    /** 导出当前足迹为标准 GPX 1.1 文件 */
+    fun exportTrackGpx(context: Context): File? {
+        val tracks = trackStore.points.value
+        if (tracks.isEmpty()) {
+            _ui.update { it.copy(message = "暂无足迹记录可导出") }
+            return null
+        }
+        return runCatching {
+            val dir = File(context.filesDir, "exports").apply { mkdirs() }
+            val nowStr = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.CHINA).format(java.util.Date())
+            val file = File(dir, "track_$nowStr.gpx")
+            val gpxContent = com.lvyoubao.app.data.GpxUtils.buildGpx("旅游宝足迹_$nowStr", emptyList(), tracks)
+            file.writeText(gpxContent)
+            _ui.update { it.copy(message = "足迹已导出：${file.name}") }
+            file
+        }.getOrNull()
+    }
+
+    /** 导入外部 GPX 路书轨迹 */
+    fun importGpx(stream: java.io.InputStream) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val track = runCatching { com.lvyoubao.app.data.GpxUtils.parseGpx(stream) }.getOrNull()
+            if (track != null && track.points.isNotEmpty()) {
+                _ui.update { it.copy(importedTrack = track, message = "已导入路书「${track.name}」（共 ${track.points.size} 个点位）") }
+            } else {
+                _ui.update { it.copy(message = "GPX 文件解析失败或未包含有效轨迹点") }
+            }
+        }
+    }
+
+    /** 清除导入的路书 */
+    fun clearImportedTrack() {
+        _ui.update { it.copy(importedTrack = null, message = "已清除导入的路书") }
     }
 
     fun clearMessage() = _ui.update { it.copy(message = null) }

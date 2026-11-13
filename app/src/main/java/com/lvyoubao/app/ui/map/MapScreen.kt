@@ -103,6 +103,18 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
     var customUrl by remember { mutableStateOf("") }
     var tab by remember { mutableStateOf("view") }
 
+    val gpxLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    vm.importGpx(stream)
+                }
+            }
+        }
+    }
+
     BackHandler { onClose() }
 
     // 选中地图：默认选「当前位置所在的省」；不在任何已下载省里就退回文件名最后一张。
@@ -176,8 +188,27 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
+                TextButton(onClick = { gpxLauncher.launch(arrayOf("*/*")) }) {
+                    Text("📥 导入路书", style = MaterialTheme.typography.labelSmall)
+                }
+                if (state.trackPoints.isNotEmpty()) {
+                    TextButton(onClick = {
+                        val file = vm.exportTrackGpx(context)
+                        if (file != null) {
+                            val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                type = "application/gpx+xml"
+                                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(android.content.Intent.createChooser(intent, "分享 GPX 轨迹"))
+                        }
+                    }) {
+                        Text("📤 导出足迹", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
                 if (tab == "view") {
-                    TextButton(onClick = { selectedMap?.let { vm.deleteMap(it) } }) { Text("删除当前地图") }
+                    TextButton(onClick = { selectedMap?.let { vm.deleteMap(it) } }) { Text("删除底图", style = MaterialTheme.typography.labelSmall) }
                 }
             }
             Spacer(Modifier.height(4.dp))
@@ -551,6 +582,8 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     var drawnPoints by remember(mapsHash) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
                     var trackOverlay by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
                     var drawnTrack by remember(mapsHash) { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
+                    var importedTrackOverlay by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Polyline?>(null) }
+                    var drawnImportedTrack by remember(mapsHash) { mutableStateOf<com.lvyoubao.app.data.GpxUtils.GpxTrack?>(null) }
                     var mapViewRef by remember(mapsHash) { mutableStateOf<org.mapsforge.map.android.view.MapView?>(null) }
                     var meMarker by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Marker?>(null) }
                     var meAccuracyCircle by remember(mapsHash) { mutableStateOf<org.mapsforge.map.layer.overlay.Circle?>(null) }
@@ -665,8 +698,60 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                                             }
                                         }
                                     }
+                                    // 外部导入的 GPX 路书轨迹叠加
+                                    if (state.importedTrack != drawnImportedTrack) {
+                                        importedTrackOverlay?.let { overlay ->
+                                            runCatching { mapView.layerManager.layers.remove(overlay) }
+                                        }
+                                        val trk = state.importedTrack
+                                        if (trk != null && trk.points.size >= 2) {
+                                            importedTrackOverlay = addPolyline(
+                                                mapView.layerManager.layers, trk.points,
+                                                android.graphics.Color.argb(230, 142, 36, 170), 10f,
+                                            )
+                                            mapView.post {
+                                                val pts = trk.points.map { org.mapsforge.core.model.LatLong(it.second, it.first) }
+                                                if (pts.isNotEmpty()) {
+                                                    mapView.model.mapViewPosition.setCenter(
+                                                        org.mapsforge.core.model.LatLong(
+                                                            pts.map { it.latitude }.average(),
+                                                            pts.map { it.longitude }.average(),
+                                                        ),
+                                                    )
+                                                    mapView.model.mapViewPosition.setZoomLevel(
+                                                        fitZoomLevel(mapView.width, mapView.height, pts),
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        drawnImportedTrack = trk
+                                    }
                                 },
                             )
+                            // 导入路书提示标签
+                            state.importedTrack?.let { trk ->
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                                    shadowElevation = 2.dp,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier.padding(10.dp).align(Alignment.TopStart),
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    ) {
+                                        Text("📍 路书：${trk.name}（${trk.points.size}点）", style = MaterialTheme.typography.labelSmall)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            "清除",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.clickable { vm.clearImportedTrack() },
+                                        )
+                                    }
+                                }
+                            }
                             // 右下角控制列：放大 / 缩小 / 我的位置（内置缩放按钮已关，避免遮挡）
                             Column(
                                 horizontalAlignment = Alignment.End,

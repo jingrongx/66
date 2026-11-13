@@ -58,6 +58,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     init {
         // 纠错飞轮：加载用户纠正记录（语音稿 vs 用户实际发送的差异对），AI 纠错时注入提示词
         HotwordCorrector.loadLearnedFixes(app.applicationContext)
+        // 图片垃圾回收：清理未被任何会话引用的孤立落盘图片
+        viewModelScope.launch(Dispatchers.IO) {
+            sessions.cleanOrphanImages()
+        }
     }
 
     val settings = repo.settings
@@ -392,7 +396,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     appendLine()
                     append(profileBlock)
                 }
-                val memoryBlock = memory.relevantContext(question)
+                // 画像已整体注入，此处排除 PROFILE 避免同一条记忆在 Prompt 里重复出现两次
+                val memoryBlock = memory.relevantContext(question, excludeKinds = setOf(MemoryStore.MemoryEntry.PROFILE))
                 if (memoryBlock.isNotBlank()) {
                     appendLine()
                     append(memoryBlock)
@@ -427,14 +432,13 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     else -> OutMessage(role = m.role, text = m.text)
                 }
             }
-            // 长会话滚动摘要：预算装不下的更早对话，由 AI 在上一轮回答后提前浓缩好注入——
-            // 没有它，会话一超出预算，最早的对话就被静默截掉，「前几轮有上下文、后面跑偏」就是它。
-            // 注入条件是「覆盖到」而非「恰好等于」：刷新侧按下一轮口径预排（预留了新提问的量），
-            // 摘要可能比实际截掉的多覆盖一两条——多覆盖只是轻微重复，少覆盖才是真断层
+            // 长会话滚动摘要：预算装不下的更早对话，由 AI 在上一轮回答后提前浓缩并持久化——
+            // 杀进程/重启后依然有效，不会出现断崖式失忆
             val droppedCount = selection.droppedCount
-            val summaryBlock = sessionSummaries[sessionId]
-                ?.takeIf { droppedCount > 0 && it.first >= droppedCount }
-                ?.second
+            val sessionObj = sessions.get(sessionId)
+            val summaryBlock = sessionObj
+                ?.takeIf { droppedCount > 0 && it.summaryDroppedCount >= droppedCount && it.summaryText.isNotBlank() }
+                ?.summaryText
                 ?.let {
                     listOf(
                         OutMessage(
@@ -546,7 +550,6 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     fun deleteSession(id: String) {
-        sessionSummaries.remove(id)
         viewModelScope.launch { sessions.delete(id) }
     }
 
@@ -573,42 +576,63 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         return HistorySelection(prior.takeLast(keptCount), prior.size - keptCount)
     }
 
-    // ---------- 长会话滚动摘要（补字符预算窗口外的上下文） ----------
-    // 借鉴 Anthropic 公开的记忆架构思路：交互间隙做「离线巩固」——每轮回答完在后台把
-    // 预算外被截掉的对话浓缩成摘要缓存，等下一轮用户提问时直接取现成的注入，不阻塞发送。
-    // 生成失败静默降级为不带摘要；会话删除时清缓存。
-    private val sessionSummaries = HashMap<String, Pair<Int, String>>()   // sessionId → (摘要覆盖到的条数, 摘要)
+    // ---------- 长会话增量递归摘要（补字符预算窗口外的上下文） ----------
+    // 借鉴 Anthropic 与 MemGPT 递归摘要思路：交互间隙做「离线巩固」——每轮回答完在后台把
+    // 预算外被截掉的对话浓缩成摘要并持久化，等下一轮用户提问时直接取现成的注入，不阻塞发送。
+    // 支持增量递归（已有旧摘要 + 新滑出的对话 -> 更新摘要），杜绝跳过中段消息的信息黑洞。
     private val summaryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    /** 每轮回答完成后后台刷新摘要：预算外条数变了才重新生成（一次小请求，越聊越长的会话每轮一次） */
+    /** 每轮回答完成后后台刷新摘要：增量递归摘要并持久化，预算外条数变了才重新生成 */
     private fun refreshSessionSummary(sessionId: String, settings: AiSettings) {
         if (settings.apiKey.isBlank()) return
-        val msgs = sessions.get(sessionId)?.messages ?: return
-        // 按下一轮发送的真实口径预排：msgs 全量恰好是下次发送的 prior（下次发送会在其后
-        // 追加新提问再 dropLast(1)），预算里预留 HISTORY_NEXT_TURN_RESERVE_CHARS 给那条新提问。
-        // 此前两侧各算各的口径差了一条（off-by-one），摘要 key 永远对不上号、一次都没注入过——
-        // 窗口口径必须与 selectHistory 同源，漂移了就又回到老坑
+        val currentSession = sessions.get(sessionId) ?: return
+        val msgs = currentSession.messages
         val targetDropped = selectHistory(msgs, HISTORY_CHAR_BUDGET - HISTORY_NEXT_TURN_RESERVE_CHARS).droppedCount
-        if (targetDropped < 2) return                                  // 没截掉东西不用摘要
-        if (sessionSummaries[sessionId]?.first?.let { it >= targetDropped } == true) return // 已覆盖当前窗口
-        if (!summaryInFlight.compareAndSet(false, true)) return  // 上一条还在生成，下一轮再补
+        if (targetDropped < 2) return
+        if (currentSession.summaryDroppedCount >= targetDropped && currentSession.summaryText.isNotBlank()) return
+        if (!summaryInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
             try {
-                // 语料：会话开头 2 条（怎么起的话头）+ 截掉段落里最近的 30 条，逐条截断控预算
-                val corpus = (msgs.take(2) + msgs.take(targetDropped).takeLast(30))
-                    .distinctBy { it.ts }
-                val transcript = corpus.joinToString("\n") { m ->
-                    (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(if (m.role == "user") 120 else 60)
-                }.take(4000)
-                val prompt = buildString {
-                    appendLine("【较早对话】")
-                    appendLine(transcript)
-                    append(
-                        "任务：把上面这段较早的对话浓缩成一段摘要（不超过 200 字），必须保留：讨论过的主题、" +
-                            "提到的专有名词与关键数字（地名/药名/人名/金额/时间）、已达成的结论、用户表达的偏好。" +
-                            "只输出摘要本身，不回答问题、不解释。",
-                    )
+                val previousSummary = currentSession.summaryText
+                val previousDropped = currentSession.summaryDroppedCount
+                // 增量递归摘要：若已有上一轮摘要，将 [旧摘要 + 本次新滑出的对话] 结合浓缩，防止信息丢失；
+                // 若首次摘要，则取前 targetDropped 条逐条浓缩
+                val prompt = if (previousSummary.isNotBlank() && previousDropped in 1 until targetDropped) {
+                    val newlyDropped = msgs.subList(previousDropped, targetDropped)
+                    val newTranscript = newlyDropped.joinToString("\n") { m ->
+                        (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(if (m.role == "user") 120 else 60)
+                    }.take(3000)
+                    buildString {
+                        appendLine("【已有较早对话的摘要】")
+                        appendLine(previousSummary)
+                        appendLine()
+                        appendLine("【新滑出窗口的较早对话】")
+                        appendLine(newTranscript)
+                        appendLine()
+                        append(
+                            "任务：将【已有较早对话的摘要】与【新滑出窗口的较早对话】合并，浓缩为一段新的连贯摘要（不超过 300 字）。" +
+                                "必须保留：讨论过的主题、提到的专有名词与关键数字（地名/药名/人名/金额/时间）、已达成的结论、用户表达的偏好。" +
+                                "只输出摘要本身，不回答问题、不解释。",
+                        )
+                    }
+                } else {
+                    val droppedMsgs = msgs.take(targetDropped)
+                    // 会话开头 2 条 + 最近被截掉的消息，按时间正序覆盖
+                    val corpus = if (droppedMsgs.size <= 32) droppedMsgs else (droppedMsgs.take(2) + droppedMsgs.takeLast(30)).distinctBy { it.ts }
+                    val transcript = corpus.joinToString("\n") { m ->
+                        (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(if (m.role == "user") 120 else 60)
+                    }.take(4000)
+                    buildString {
+                        appendLine("【较早对话】")
+                        appendLine(transcript)
+                        append(
+                            "任务：把上面这段较早的对话浓缩成一段摘要（不超过 200 字），必须保留：讨论过的主题、" +
+                                "提到的专有名词与关键数字（地名/药名/人名/金额/时间）、已达成的结论、用户表达的偏好。" +
+                                "只输出摘要本身，不回答问题、不解释。",
+                        )
+                    }
                 }
+
                 val reply = AiClient(settings).chatPlain(
                     listOf(
                         OutMessage("system", "你是会话摘要器：只输出摘要本身，绝不回答问题、绝不解释。"),
@@ -617,7 +641,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     thinking = false,
                 ).getOrNull()?.trim() ?: return@launch
                 if (reply.length in 20..800) {
-                    sessionSummaries[sessionId] = targetDropped to reply
+                    sessions.updateSummary(sessionId, targetDropped, reply)
                 }
             } finally {
                 summaryInFlight.set(false)
@@ -640,22 +664,23 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     /**
      * 记忆飞轮：攒够 3 句新用户消息就把会话交给 AI 总结成画像，越聊越懂用户；
-     * 结束会话时 force 补总结。失败静默跳过，下一批再试；互斥避免并发总结。
+     * 进度持久化在 Session 中，杀后台/重启不归零；总结成功才递增计数，失败不吞进度。
      */
     private val summarizeMutex = Mutex()
-    private val summarizedUpto = HashMap<String, Int>()
 
     private fun maybeSummarizeSession(sessionId: String, settings: AiSettings, force: Boolean = false) {
         if (settings.apiKey.isBlank()) return
         viewModelScope.launch {
             val session = sessions.get(sessionId) ?: return@launch
             val userCount = session.messages.count { it.role == "user" }
-            val done = summarizedUpto[sessionId] ?: 0
+            val done = session.summarizedUserCount
             if (userCount == 0 || userCount <= done) return@launch
-            if (!force && summarizedUpto.containsKey(sessionId) && userCount - done < 3) return@launch
-            summarizedUpto[sessionId] = userCount
+            if (!force && userCount - done < 3) return@launch
             summarizeMutex.withLock {
-                runCatching { memory.updateProfileFromSession(session, settings) }
+                val ok = runCatching { memory.updateProfileFromSession(session, settings) }.getOrDefault(false)
+                if (ok) {
+                    sessions.updateSummarizedUserCount(sessionId, userCount)
+                }
             }
         }
     }
