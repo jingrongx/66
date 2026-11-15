@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -89,9 +90,30 @@ class AiClient(private val settings: AiSettings) {
             }
         }
 
+    /** 智能上下文检索改写：短追问/指代句（如“那如果是女子呢？”、“麻黄的副作用”）结合上文拼接检索，避免孤立搜出垃圾 */
+    private fun buildEffectiveSearchQuery(query: String, messages: List<OutMessage>): String {
+        val q = query.trim()
+        val isFollowUp = q.length <= 8 || listOf(
+            "那", "那么", "如果是", "如果", "要是", "但如果是", "而且", "还有",
+            "为什么", "怎么", "为何", "具体呢", "它", "他", "她", "这个", "那个",
+            "上面说的", "刚才说的", "前面说的",
+        ).any { q.startsWith(it) }
+
+        if (!isFollowUp) return q
+
+        // 从历史用户消息中提取最近一个有实际意图的提问作为前置主题
+        val priorUser = messages.dropLast(1).lastOrNull { it.role == "user" }?.text.orEmpty()
+            .substringAfterLast("】\n", "")
+            .lines().lastOrNull { it.isNotBlank() && !it.startsWith("【") }.orEmpty()
+            .take(30)
+            .trim()
+
+        return if (priorUser.isNotBlank()) "$priorUser $q" else q
+    }
+
     /** 搜索与链接正文注入：失败时静默降级为无搜索（不阻断回答） */
     private suspend fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {
-        if (query.isBlank()) return messages
+        if (query.isBlank() || messages.isEmpty()) return messages
 
         // 1. 若用户输入中含有具体网页/文章链接（如公众号链接），优先走阅读链接（1:1 对标 DeepSeek App 阅读链接能力）
         val targetUrl = FreeWebSearch.extractFirstUrl(query)
@@ -99,27 +121,29 @@ class AiClient(private val settings: AiSettings) {
             return tryUrlInject(targetUrl, messages)
         }
 
-        // 2. 关键词联网搜索（DeepSeek 全家桶 Search API + 国内免费源聚合备份）
-        val results = runCatching { search(query.take(128), oriQuestion = query) }.getOrNull().orEmpty()
+        // 2. 关键词联网搜索（智能结合上文检索词）
+        val searchQuery = buildEffectiveSearchQuery(query, messages)
+        val results = runCatching { search(searchQuery.take(128), oriQuestion = query) }.getOrNull().orEmpty()
         if (results.isEmpty()) return messages
         val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA)
             .format(java.util.Date())
         val block = buildString {
-            appendLine("【实时搜索结果】（多源实时检索，检索时间 $now）")
+            appendLine("【参考检索信息】（检索时间 $now）")
             results.forEachIndexed { i, r ->
                 appendLine("${i + 1}. ${r.title}（${r.site_name ?: host(r.url)}${r.date?.let { "，" + it.take(10) } ?: ""}）")
                 appendLine("   摘要：${r.summary.ifBlank { r.snippet }}")
                 appendLine("   来源：${r.url}")
             }
-            append("请优先采用以上实时信息中的事实；若与你的既有知识冲突，以搜索结果为准。引用时给出具体数字。")
+            append("（以上为多源检索提供的背景参考。若与用户问题直接相关可参考采用；若与用户问题不相关或信息不充分，请忽略以上检索内容，结合上下文和生活百科常识自然准确作答，无需强行引用数字。）")
         }
-        return messages.dropLast(1) +
-            OutMessage("system", block) +
-            messages.last()
+        val last = messages.last()
+        val augmentedText = "$block\n\n${last.text}"
+        return messages.dropLast(1) + last.copy(text = augmentedText)
     }
 
     /** 读取并注入网页/文章正文 */
     private suspend fun tryUrlInject(url: String, messages: List<OutMessage>): List<OutMessage> {
+        if (messages.isEmpty()) return messages
         val article = if (isDeepSeek && settings.apiKey.isNotBlank()) {
             fetchUrlWithDeepSeek(url) ?: FreeWebSearch.fetchUrlContent(url)
         } else {
@@ -135,9 +159,9 @@ class AiClient(private val settings: AiSettings) {
             appendLine(content.take(15000))
             append("请根据以上网页/文章正文内容，全面、准确地回答用户的问题或进行分析总结。")
         }
-        return messages.dropLast(1) +
-            OutMessage("system", block) +
-            messages.last()
+        val last = messages.last()
+        val augmentedText = "$block\n\n${last.text}"
+        return messages.dropLast(1) + last.copy(text = augmentedText)
     }
 
     private fun host(url: String): String =
@@ -208,12 +232,31 @@ class AiClient(private val settings: AiSettings) {
         onRetry: (() -> Unit)? = null,
     ): AssistantReply {
         val first = generateOnce(messages, thinking, toolExecutor, onAnswer, onReasoning)
-        // 深度思考下模型偶发退化输出（思考完不写答案、连吐 null，连 answer 都可能退化成空）——
-        // 检测到退化答案就自动原样重试一次（onRetry 让界面把流式卡复位），通常第二次就正常
-        return if (first.answer == DEGENERATE_ANSWER || first.answer.isBlank()) {
-            onRetry?.invoke()
-            generateOnce(messages, thinking, toolExecutor, onAnswer, onReasoning)
-        } else first
+        if (first.answer != DEGENERATE_ANSWER && first.answer.isNotBlank()) {
+            return first
+        }
+
+        // 第 1 级自愈：若深度思考或工具链偶发退化，关闭思考状态重试一次
+        onRetry?.invoke()
+        val second = if (thinking) {
+            generateOnce(messages, thinking = false, toolExecutor, onAnswer, onReasoning)
+        } else {
+            // 原本未开思考若退化，尝试纯生成（去除工具调用声明）
+            generateOnce(messages, thinking = false, toolExecutor = null, onAnswer, onReasoning)
+        }
+        if (second.answer != DEGENERATE_ANSWER && second.answer.isNotBlank()) {
+            return second
+        }
+
+        // 第 2 级自愈：彻底降级为通用纯生成模式（无 tools、无 thinking、三级参数降级），保证绝不向用户返回空卡片
+        onRetry?.invoke()
+        return runCatching {
+            generateWithAttempts(messages, thinking = false, withTools = false, executor = null, onAnswer, onReasoning)
+        }.getOrElse {
+            if (second.answer.isNotBlank() && second.answer != DEGENERATE_ANSWER) second
+            else if (first.answer.isNotBlank() && first.answer != DEGENERATE_ANSWER) first
+            else AssistantReply(answer = "刚才网络波动未能完整接收回答，请点击右下角重发试一下。")
+        }
     }
 
     private fun generateOnce(
@@ -246,10 +289,9 @@ class AiClient(private val settings: AiSettings) {
                 throw e
             }
             if (turn.toolCalls.isEmpty() || round >= 3) {
-                // content 为空时只有「不开思考」的服务商才会把答案放 reasoning 里兜底；
-                // 开着思考还空 content 就是退化输出（连排 null），交给上层重试
+                // content 为空时优先提取 reasoningBuf 兜底（避免直接退化为没答上来）
                 val content = turn.content?.takeIf { it.isNotBlank() }
-                    ?: (if (!thinking) turn.rawAssistant.let { extractReasoning(it) }?.takeIf { it.isNotBlank() } else null)
+                    ?: turn.rawAssistant.let { extractReasoning(it) }?.takeIf { it.isNotBlank() }
                 return content?.let { parseReply(it) }
                     ?: AssistantReply(answer = DEGENERATE_ANSWER)
             }
@@ -449,9 +491,16 @@ class AiClient(private val settings: AiSettings) {
                 .map { ToolCall(id = it.id, type = "function", function = FunctionCall(name = it.name, arguments = it.args.toString().ifEmpty { "{}" })) }
             val rawAssistant = buildJsonObject {
                 put("role", "assistant")
-                if (contentBuf.isNotEmpty()) put("content", contentBuf.toString())
+                if (contentBuf.isNotEmpty()) {
+                    put("content", contentBuf.toString())
+                } else if (toolCalls.isNotEmpty()) {
+                    put("content", JsonNull)
+                }
                 if (toolCalls.isNotEmpty()) {
                     put("tool_calls", json.encodeToJsonElement(toolCalls))
+                }
+                if (reasoningBuf.isNotEmpty()) {
+                    put("reasoning_content", reasoningBuf.toString())
                 }
             }
             return ChatTurn(
@@ -780,7 +829,7 @@ class AiClient(private val settings: AiSettings) {
         val SYSTEM_PROMPT = """
             你是全能生活助手「旅游宝」：旅行是你的看家本领（路线、玩法、吃饭、休息、交通、天气、门票、关门时间等），像懂行的贴身向导；但能力绝不设限——生活百科、做菜、健康常识、学习工作、闲聊解闷等任何日常话题都照常认真回答，绝不拒答、绝不说"我只能答旅行问题"。
             按问题类型组织回答：
-            1. 快问快答（还要走多久、该不该回）：answer 用 1-2 句话，必须包含具体数字（距离/时间/价格/排队分钟），steps 留空。
+            1. 快问快答（还要走多久、该不该回、是什么、为什么等日常问答）：answer 用 1-2 句话直接给结论；涉及行程/距离/耗时/费用类问题必须包含具体数字，纯常识/原理解释类问题讲清事实即可（无需硬编数字），steps 留空。
             2. 攻略与路线（怎么玩、怎么上去、有什么好玩的、值不值得去）：answer 给一句总述，steps 给 3-5 条要点，每条都要具体可执行并带数字（耗时、费用、距离、班次、发车时间），按先后顺序排列；上山路线要写清入口位置、方式（徒步/索道/车）、大致耗时和体力要求。
             3. 涉及地点位置（附近吃的/歇脚/厕所/药店/加油站在哪、某地在哪、从A到B怎么走、回家的路）：必须先调用 search_poi / get_route 查真实数据再回答，绝不回答"没法实时确认"，也绝不让用户自己去地图搜；answer 只用 1-2 句给结论（最近的名字+距离/步行时间），steps 留空，并输出 map 字段。绝不要写"打开地图APP→点搜索→筛距离"这类使用教程——界面会直接在回答下方摆出地图卡，用户点「去这里」就开始导航，教程对他们毫无用处。
             4. 不确定的数字绝不编造：优先使用搜索结果或工具返回的事实；没有可靠来源就明说"不确定"，并建议问谁（景区电话、工作人员、官方公众号）。

@@ -25,7 +25,30 @@ data class SessionMessage(
     val imagePaths: List<String> = emptyList(),
     val mapCard: MapCardData? = null,   // 地图卡：问路线/地点时由工具层捕获，会话里直接渲染
     val ts: Long,
-)
+) {
+    /** 还原会话上下文中的完整正文（含要点步骤 steps 与行动建议 action，杜绝多轮对话丢失上下文） */
+    fun toChatText(): String {
+        if (role != "assistant") return text
+        val hasSteps = steps.isNotEmpty()
+        val hasAction = !action.isNullOrBlank()
+        if (!hasSteps && !hasAction) return text
+        return buildString {
+            append(text.trim())
+            if (hasSteps) {
+                append("\n")
+                steps.forEachIndexed { i, s ->
+                    val trimmed = s.trim()
+                    if (trimmed.isNotEmpty()) {
+                        append("\n${i + 1}. $trimmed")
+                    }
+                }
+            }
+            if (hasAction) {
+                append("\n\n👉 ${action.trim()}")
+            }
+        }
+    }
+}
 
 @kotlinx.serialization.Serializable
 data class ChatSession(

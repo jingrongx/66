@@ -421,15 +421,16 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             val historyMessages = selection.kept
             val lastImageTurn = historyMessages.lastOrNull { it.role == "user" && it.imagePaths.isNotEmpty() }
             val history = historyMessages.map { m ->
+                val fullText = m.toChatText()
                 when {
                     m === lastImageTurn -> OutMessage(
                         role = m.role,
-                        text = m.text,
+                        text = fullText,
                         images = m.imagePaths.take(2).mapNotNull { imageFileToDataUrl(it) },
                     )
                     m.role == "user" && m.imagePaths.isNotEmpty() ->
-                        OutMessage(role = m.role, text = m.text + "\n（该轮用户发过图片，图片内容本轮未携带）")
-                    else -> OutMessage(role = m.role, text = m.text)
+                        OutMessage(role = m.role, text = fullText + "\n（该轮用户发过图片，图片内容本轮未携带）")
+                    else -> OutMessage(role = m.role, text = fullText)
                 }
             }
             // 长会话滚动摘要：预算装不下的更早对话，由 AI 在上一轮回答后提前浓缩并持久化——
@@ -568,7 +569,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         var used = 0
         var keptCount = 0
         for (m in prior.asReversed()) {
-            val cost = m.text.length + HISTORY_MSG_OVERHEAD_CHARS + m.imagePaths.size * HISTORY_IMAGE_COST_CHARS
+            val cost = m.toChatText().length + HISTORY_MSG_OVERHEAD_CHARS + m.imagePaths.size * HISTORY_IMAGE_COST_CHARS
             if (keptCount >= HISTORY_MIN_MESSAGES && used + cost > charBudget) break
             used += cost
             keptCount++
@@ -600,7 +601,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 val prompt = if (previousSummary.isNotBlank() && previousDropped in 1 until targetDropped) {
                     val newlyDropped = msgs.subList(previousDropped, targetDropped)
                     val newTranscript = newlyDropped.joinToString("\n") { m ->
-                        (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(if (m.role == "user") 120 else 60)
+                        (if (m.role == "user") "用户" else "助手") + "：" + m.toChatText().take(if (m.role == "user") 120 else 80)
                     }.take(3000)
                     buildString {
                         appendLine("【已有较早对话的摘要】")
@@ -620,7 +621,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     // 会话开头 2 条 + 最近被截掉的消息，按时间正序覆盖
                     val corpus = if (droppedMsgs.size <= 32) droppedMsgs else (droppedMsgs.take(2) + droppedMsgs.takeLast(30)).distinctBy { it.ts }
                     val transcript = corpus.joinToString("\n") { m ->
-                        (if (m.role == "user") "用户" else "助手") + "：" + m.text.take(if (m.role == "user") 120 else 60)
+                        (if (m.role == "user") "用户" else "助手") + "：" + m.toChatText().take(if (m.role == "user") 120 else 80)
                     }.take(4000)
                     buildString {
                         appendLine("【较早对话】")
