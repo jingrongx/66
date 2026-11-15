@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -64,6 +65,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.ProviderPresets
+import com.lvyoubao.app.data.presetById
 import com.lvyoubao.app.ui.SettingsViewModel
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.sync.QrCodeImage
@@ -180,6 +182,35 @@ fun SettingsScreen(
                     },
                     shape = RoundedCornerShape(14.dp),
                 )
+                val currentPreset = presetById(state.draft.presetId)
+                if (currentPreset.apiKeyUrl.isNotBlank() || currentPreset.applyGuide.isNotBlank()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = currentPreset.applyGuide,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f).padding(end = 4.dp),
+                        )
+                        if (currentPreset.apiKeyUrl.isNotBlank()) {
+                            TextButton(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(currentPreset.apiKeyUrl)))
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            ) {
+                                Text("申请 Key ↗", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
                 FieldLabel("模型")
                 OutlinedTextField(
@@ -308,6 +339,30 @@ fun SettingsScreen(
                     },
                     shape = RoundedCornerShape(14.dp),
                 )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "高德开放平台 →「创建新应用」并「添加 Key」。⚠️ 服务平台务必选「Web服务」（选Android平台查不了路线），个人开发完全免费。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f).padding(end = 4.dp),
+                    )
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://console.amap.com/dev/key/app")))
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("申请高德 Key ↗", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
                 FieldLabel("语音识别 Key（手机没有语音识别时，用大模型转文字）")
                 OutlinedTextField(
@@ -323,6 +378,30 @@ fun SettingsScreen(
                     },
                     shape = RoundedCornerShape(14.dp),
                 )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "硅基流动云平台 → 进入「API 密钥」点击「新建」复制。用于免费开源大模型（普通话 SenseVoice / 23种方言 TeleSpeech-ASR，不扣费）与云端朗读兜底。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f).padding(end = 4.dp),
+                    )
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://cloud.siliconflow.cn/account/ak")))
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("免费申请 Key ↗", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
                 FieldLabel("常用地址（家）——问「回家的路」直接导航回家")
                 OutlinedTextField(

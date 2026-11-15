@@ -126,6 +126,10 @@ app/src/main/java/com/lvyoubao/app/
 
 **最近动态**
 
+- **v0.8.58** · API Key 申请全流程指引 + 官方控制台一键直达 + 免费方言 ASR 说明：
+  - ①**全服务商 API Key 申请一键直达**：在 `ProviderPreset` 中内置主流服务商控制台网址与申请步骤（DeepSeek 开放平台 `platform.deepseek.com`、智谱 BigModel `open.bigmodel.cn`、月之暗面 Kimi `platform.moonshot.cn`、阿里云百炼 `bailian.console.aliyun.com`）；设置页随所选服务商动态展示对应的清晰申领步骤与「申请 Key ↗」外链按钮，点击直接调起浏览器直达控制台；
+  - ②**高德与语音 Key 避坑指引与直达链接**：高德 Key 明确标注「创建应用 → 添加 Key → 服务平台务必勾选『Web服务』」的关键避坑点，提供「申请高德 Key ↗」一键跳转；语音识别 Key 明确阐述基于硅基流动（SiliconFlow）托管的开源免费模型（SenseVoiceSmall 普通话 / TeleSpeech-ASR 覆盖 23 种方言口音），提供注册与「免费申请 Key ↗」直达链接；
+  - ③**设置界面排版优化**：输入卡片集成外链指引微件，操作按钮轻量圆角化，适配普通与大字模式下的视觉层级。
 - **v0.8.57** · 多轮追问上下文断层根治 + DeepSeek 官方契约对齐 + 降级自愈与防退化闭环：
   - ①**多轮追问上下文完整性修复**：修复 `ChatViewModel` 在拼接多轮历史时仅取 `m.text`（首段总结）而丢弃执行步骤（`steps`）与行动建议（`action`）的 Bug；`SessionMessage` 规范化实现 `toChatText()`，在会话回传、字符预算计算（`selectHistory`）与后台增量递归摘要中全链路完整携带，彻底终结“接不上上文”的断层感；
   - ②**多轮指代智能改写与防上下文污染**：新增 `buildEffectiveSearchQuery`，对“那如果是女子呢？”、“麻黄的副作用”等短追问/代词省略句自动融合上一轮用户提问意图联合检索，避免孤立搜出无关八卦；将检索背景作为参考信息附着于 `user` 提示前，废弃在多轮中间强插 `system` 消息的非规范做法，解除“强制以搜索结果为准并给数字”的死锁冲突；
