@@ -55,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -117,6 +118,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     val settings by vm.settings.collectAsState()
     val sessionList by vm.sessionList.collectAsState()
     val currentSessionId by vm.currentSessionId.collectAsState()
+    val savedEvidenceTitles by vm.savedEvidenceTitles.collectAsState()
     val context = LocalContext.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val scope = rememberCoroutineScope()
@@ -419,7 +421,8 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                         onToggleSpeak = {
                             TtsPlayer.toggle(context, ChatViewModel.speakableText(message))
                         },
-                        onSaveMemory = { vm.saveToMemory(message) },
+                        savedMemory = vm.evidenceTitle(message) in savedEvidenceTitles,
+                        onToggleMemory = { vm.toggleSaveMemory(message) },
                     )
                 }
             }
@@ -751,7 +754,8 @@ private fun LargeTextAssistantCard(
     app: TravelApp,
     ttsActive: Boolean,
     onToggleSpeak: () -> Unit,
-    onSaveMemory: () -> Unit,
+    savedMemory: Boolean,
+    onToggleMemory: () -> Unit,
 ) {
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         // 文字整体可长按选中、自由复制（按钮不受影响）
@@ -790,11 +794,22 @@ private fun LargeTextAssistantCard(
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
             ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 再读一遍", fontSize = 17.sp, maxLines = 1) }
+            // 收藏切换：已收藏时文字变色加勾，再点恢复并取消收藏
             Button(
-                onClick = onSaveMemory,
+                onClick = onToggleMemory,
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text("收藏", fontSize = 17.sp, maxLines = 1) }
+            ) {
+                if (savedMemory) {
+                    Text("✔ ", fontSize = 17.sp, color = MaterialTheme.colorScheme.tertiary)
+                }
+                Text(
+                    if (savedMemory) "已收藏" else "收藏",
+                    fontSize = 17.sp,
+                    color = if (savedMemory) MaterialTheme.colorScheme.tertiary else Color.Unspecified,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }

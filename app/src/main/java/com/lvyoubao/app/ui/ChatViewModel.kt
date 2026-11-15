@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -75,6 +76,14 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     val memoryFacts
         get() = memory.profileFacts() +
             memory.entries.value.filter { it.kind == MemoryStore.MemoryEntry.EVIDENCE }.map { it.title }
+
+    /** 已收藏证据的标题集：回答卡底部「收藏/已收藏」按钮状态的唯一数据源，收藏/取消收藏实时刷新 */
+    val savedEvidenceTitles: StateFlow<Set<String>> = memory.entries
+        .map { list -> list.filter { it.kind == MemoryStore.MemoryEntry.EVIDENCE }.map { it.title }.toSet() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    /** 回答对应的证据标题（与 MemoryStore.add 落盘时的 take(60) 截断规则一致，用于判断是否已收藏） */
+    fun evidenceTitle(message: SessionMessage): String = message.text.take(60).ifBlank { "无标题" }
 
     val messages: StateFlow<List<SessionMessage>> =
         combine(sessions.sessions, currentSessionId) { list, id ->
@@ -670,15 +679,23 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
-    /** 个人飞轮：把一条有价值的回答收藏为证据 */
-    fun saveToMemory(message: SessionMessage) {
+    /** 个人飞轮：点「收藏」把一条有价值的回答存为证据；已收藏时再点则取消收藏（删掉对应证据） */
+    fun toggleSaveMemory(message: SessionMessage) {
         viewModelScope.launch {
-            memory.add(
-                kind = MemoryStore.MemoryEntry.EVIDENCE,
-                title = message.text.ifBlank { "无标题" },
-                detail = (message.steps.takeIf { it.isNotEmpty() }?.joinToString("；") ?: message.text),
-                source = "AI 回答（用户收藏）",
-            )
+            val title = evidenceTitle(message)
+            val existing = memory.entries.value.firstOrNull {
+                it.kind == MemoryStore.MemoryEntry.EVIDENCE && it.title == title
+            }
+            if (existing != null) {
+                memory.remove(existing.ts)
+            } else {
+                memory.add(
+                    kind = MemoryStore.MemoryEntry.EVIDENCE,
+                    title = title,
+                    detail = (message.steps.takeIf { it.isNotEmpty() }?.joinToString("；") ?: message.text),
+                    source = "AI 回答（用户收藏）",
+                )
+            }
             _ui.update { it.copy(error = null) }
         }
     }

@@ -10,6 +10,11 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- 卡片分享保存到相册：Android 9 及以下写公共 Pictures 需要存储权限（10+ 走 MediaStore 免授权） -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <!-- 扫码同步配置：只有扫码用，无相机的设备（车机）不影响安装与使用 -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
@@ -23,6 +28,8 @@
         </intent>
         <!-- 包可见性：判断高德地图是否安装（会话地图卡「高德地图」按钮跳转需要） -->
         <package android:name="com.autonavi.minimap" />
+        <!-- 包可见性：卡片分享判断微信是否安装（未装则退回系统分享面板） -->
+        <package android:name="com.tencent.mm" />
     </queries>
 
     <!-- usesCleartextTraffic：扫码同步配置走局域网明文 HTTP（http://192.168.x.x），

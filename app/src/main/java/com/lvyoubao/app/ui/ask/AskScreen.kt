@@ -1,6 +1,9 @@
 package com.lvyoubao.app.ui.ask
 
 import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -47,6 +50,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
@@ -60,6 +64,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -81,6 +86,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -88,6 +94,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -109,6 +116,7 @@ import com.lvyoubao.app.ui.update.UpdateReadyDialog
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -140,6 +148,7 @@ fun AskScreen(
     val settings by vm.settings.collectAsState()
     val sessionList by vm.sessionList.collectAsState()
     val currentSessionId by vm.currentSessionId.collectAsState()
+    val savedEvidenceTitles by vm.savedEvidenceTitles.collectAsState()
     val context = LocalContext.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
@@ -556,7 +565,8 @@ fun AskScreen(
                         )
                         else -> AssistantCard(
                             message = message,
-                            onSaveMemory = { vm.saveToMemory(message) },
+                            savedMemory = vm.evidenceTitle(message) in savedEvidenceTitles,
+                            onToggleMemory = { vm.toggleSaveMemory(message) },
                             app = app,
                         )
                     }
@@ -976,12 +986,49 @@ private fun StreamingCard(st: ChatViewModel.StreamState) {
 @Composable
 private fun AssistantCard(
     message: SessionMessage,
-    onSaveMemory: () -> Unit,
+    savedMemory: Boolean,
+    onToggleMemory: () -> Unit,
     app: TravelApp,
 ) {
     val context = LocalContext.current
     val ttsState by TtsPlayer.state.collectAsState()
     val ttsText = remember(message.ts) { ChatViewModel.speakableText(message) }
+    // 分享：把回答生成为卡片图，可发微信或存相册
+    var showShareDialog by remember { mutableStateOf(false) }
+    var sharing by remember { mutableStateOf(false) }
+    val shareScope = rememberCoroutineScope()
+    val accent = MaterialTheme.colorScheme.primary.toArgb()
+    val shareCard: (Boolean) -> Unit = { toWeChat ->
+        if (!sharing) {
+            sharing = true
+            shareScope.launch {
+                val tip = runCatching {
+                    val bitmap = withContext(Dispatchers.Default) { CardSharer.buildCardBitmap(context, message, accent) }
+                    if (toWeChat) {
+                        if (CardSharer.shareToWeChat(context, bitmap)) "" else "没找到微信，已改用系统分享"
+                    } else {
+                        CardSharer.saveToGallery(context, bitmap)?.let { "已保存到相册：$it" } ?: "保存失败，请重试"
+                    }
+                }.getOrElse { "生成卡片图失败" }
+                sharing = false
+                if (tip.isNotEmpty()) Toast.makeText(context, tip, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+    // Android 9 及以下存相册要存储权限（Android 10+ 走 MediaStore 无需授权）
+    val requestStorage = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) shareCard(false) else Toast.makeText(context, "需要存储权限才能保存到相册", Toast.LENGTH_SHORT).show()
+    }
+    val saveToGallery: () -> Unit = {
+        val needLegacyPermission = Build.VERSION.SDK_INT in 23..28 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        if (needLegacyPermission) {
+            requestStorage.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            shareCard(false)
+        }
+    }
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.padding(20.dp)) {
             // 文字整体可长按选中、自由复制（地图卡和按钮不受影响）
@@ -1032,7 +1079,7 @@ private fun AssistantCard(
             message.mapCard?.let { card ->
                 RouteMapCard(card = card, app = app)
             }
-            // 卡片底部操作区：朗读 / 收藏（靠左）
+            // 卡片底部操作区：朗读 / 收藏 / 分享（靠左）
             Spacer(Modifier.height(10.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
             Row(
@@ -1042,9 +1089,39 @@ private fun AssistantCard(
                 TextButton(onClick = { TtsPlayer.toggle(context, ttsText) }) {
                     Text(if (ttsState is TtsPlayer.State.Speaking) "停止朗读" else "朗读")
                 }
-                TextButton(onClick = onSaveMemory) { Text("收藏") }
+                // 收藏切换：已收藏时文字变色加勾，再点恢复并取消收藏
+                TextButton(onClick = onToggleMemory) {
+                    if (savedMemory) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        if (savedMemory) "已收藏" else "收藏",
+                        color = if (savedMemory) MaterialTheme.colorScheme.tertiary else Color.Unspecified,
+                        fontWeight = if (savedMemory) FontWeight.Bold else null,
+                    )
+                }
+                TextButton(onClick = { showShareDialog = true }) { Text("分享") }
             }
         }
+    }
+    if (showShareDialog) {
+        AlertDialog(
+            onDismissRequest = { showShareDialog = false },
+            title = { Text("分享卡片") },
+            text = { Text("把这条回答生成为一张图片") },
+            confirmButton = {
+                Button(onClick = { showShareDialog = false; shareCard(true) }) { Text("分享到微信") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showShareDialog = false; saveToGallery() }) { Text("保存到相册") }
+            },
+        )
     }
     // 卡片下方只留一行极简检查结果
     Row(
