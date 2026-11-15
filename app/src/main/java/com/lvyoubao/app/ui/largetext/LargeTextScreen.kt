@@ -38,6 +38,7 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -316,6 +317,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 modifier = Modifier.weight(1f),
             )
             // 设置：家人帮着配的地方（AI、大字模式开关都在设置里），全屏盖在大字模式上
+            // 次级动作一律浅色（浅青底深字），深青实心只留给「按住说话/发送」主操作——全屏不再满眼深青色块
             Button(
                 onClick = {
                     keyboard?.hide()
@@ -323,6 +325,10 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 },
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
                 contentPadding = PaddingValues(horizontal = 14.dp),
             ) { Text("设置", fontSize = 17.sp, maxLines = 1) }
             Spacer(Modifier.width(8.dp))
@@ -338,7 +344,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 contentPadding = PaddingValues(horizontal = 14.dp),
             ) { Text("退出", fontSize = 17.sp, maxLines = 1) }
         }
-        // 第二行：三个大导航按钮（新对话 / 历史 / 语音通话）
+        // 第二行：三个大导航按钮（新对话 / 历史 / 语音通话）——浅青底深字，与底部深青主操作拉开层级
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -349,20 +355,31 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 onClick = { keyboard?.hide(); vm.newSession() },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
                 contentPadding = PaddingValues(horizontal = 6.dp),
             ) { Text("新对话", fontSize = 17.sp, maxLines = 1) }
             Button(
                 onClick = { keyboard?.hide(); showHistory = true },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
                 contentPadding = PaddingValues(horizontal = 6.dp),
             ) { Text("历史对话", fontSize = 17.sp, maxLines = 1) }
             Button(
                 onClick = { keyboard?.hide(); showCall = true },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
                 contentPadding = PaddingValues(horizontal = 6.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) { Text("通话", fontSize = 17.sp, maxLines = 1) }
         }
 
@@ -445,13 +462,14 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
             )
         }
 
-        // ---------- 底部操作区：固定在下方，独立滚动区域，永远不会被卡片盖住 ----------
+        // ---------- 底部操作区：固定在下方，独立滚动区域，永远不会被卡片盖住。
+        // 浅青灰底与内容区（浅青白背景+白卡片）明确分层，一眼分清「上面是回答、下面是操作」 ----------
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
                 .shadow(elevation = 14.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
             shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            tonalElevation = 3.dp,
+            color = MaterialTheme.colorScheme.surfaceVariant,
         ) {
             Column(
                 modifier = Modifier
@@ -508,6 +526,10 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                         vm.updateQuestion(it.text)
                     },
                     modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    ),
                     placeholder = {
                         // 一行放得下的写法：21sp 大字下原句太长会折行，不好看
                         Text(
@@ -732,10 +754,15 @@ private fun LargeTextUserBubble(message: SessionMessage, onEdit: () -> Unit, onR
             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
             horizontalArrangement = Arrangement.End,
         ) {
+            // 浅青灰底：对已发消息的修补动作，不再与主操作抢深青色
             Button(
                 onClick = onEdit,
                 modifier = Modifier.height(44.dp),
                 shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                ),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
             ) { Text("✏️ 编辑", fontSize = 17.sp) }
             Spacer(Modifier.width(8.dp))
@@ -743,6 +770,10 @@ private fun LargeTextUserBubble(message: SessionMessage, onEdit: () -> Unit, onR
                 onClick = onResend,
                 modifier = Modifier.height(44.dp),
                 shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                ),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
             ) { Text("🔁 重发", fontSize = 17.sp) }
         }
@@ -788,7 +819,8 @@ private fun LargeTextAssistantCard(
             RouteMapCard(card = card, app = app, largeText = true)
         }
         Spacer(Modifier.height(10.dp))
-        // 按钮行与卡片边缘留出与正文一致的内边距；三颗按钮等宽分摊（不换行、分享不再被挤出屏幕）
+        // 按钮行与卡片边缘留出与正文一致的内边距；三颗按钮等宽分摊（不换行、分享不再被挤出屏幕）。
+        // 卡片上的动作一律浅青灰底（surfaceVariant），卡片回归内容主体，深青不再往回答区里扎堆
         Row(
             modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -798,8 +830,12 @@ private fun LargeTextAssistantCard(
                 modifier = Modifier.weight(1f).height(52.dp),
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                ),
             ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 朗读", fontSize = 17.sp, maxLines = 1) }
-            // 收藏切换：已收藏换浅橙底深棕字（大字模式青底绿字看不清），再点恢复青底白字「收藏」
+            // 收藏切换：已收藏换浅橙底深棕字（大字模式青底绿字看不清），再点恢复浅青灰「收藏」
             Button(
                 onClick = onToggleMemory,
                 modifier = Modifier.weight(1f).height(52.dp),
@@ -811,7 +847,10 @@ private fun LargeTextAssistantCard(
                         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     )
                 } else {
-                    ButtonDefaults.buttonColors()
+                    ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 },
             ) {
                 Text(if (savedMemory) "✔ 已收藏" else "收藏", fontSize = 17.sp, maxLines = 1)
@@ -821,6 +860,10 @@ private fun LargeTextAssistantCard(
                 modifier = Modifier.weight(1f).height(52.dp),
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                ),
             ) { Text("分享", fontSize = 17.sp, maxLines = 1) }
         }
     }
