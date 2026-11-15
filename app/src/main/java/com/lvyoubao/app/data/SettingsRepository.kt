@@ -25,6 +25,7 @@ class SettingsRepository(private val context: Context) {
         val model = stringPreferencesKey("model")
         val thinking = booleanPreferencesKey("thinking")
         val search = booleanPreferencesKey("search_enabled")
+        val safetyCheck = booleanPreferencesKey("safety_check_enabled")
         val answerStyle = stringPreferencesKey("answer_style")
         val themeMode = stringPreferencesKey("theme_mode")
         val amapKey = stringPreferencesKey("amap_key")
@@ -48,6 +49,7 @@ class SettingsRepository(private val context: Context) {
             model = p[Keys.model] ?: defaults.model,
             thinking = p[Keys.thinking] ?: false,
             searchEnabled = p[Keys.search] ?: defaults.searchEnabled,
+            safetyCheckEnabled = p[Keys.safetyCheck] ?: true,
             answerStyle = p[Keys.answerStyle] ?: defaults.answerStyle,
             themeMode = p[Keys.themeMode] ?: defaults.themeMode,
             amapKey = p[Keys.amapKey] ?: "",
@@ -73,6 +75,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.model] = settings.model
             p[Keys.thinking] = settings.thinking
             p[Keys.search] = settings.searchEnabled
+            p[Keys.safetyCheck] = settings.safetyCheckEnabled
             p[Keys.answerStyle] = settings.answerStyle
             p[Keys.themeMode] = settings.themeMode
             p[Keys.amapKey] = settings.amapKey

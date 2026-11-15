@@ -473,7 +473,18 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 }
             }
 
-            val payload = listOf(
+            val reminderMsg = if (settingsValue.presetId == "deepseek") {
+                val now = Date()
+                val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).format(now)
+                val weekStr = SimpleDateFormat("EEEE", Locale.CHINA).format(now)
+                val locDesc = if (LocationContext.hasPermission(context)) {
+                    LocationContext.current(context)?.description?.ifBlank { "中国" } ?: "中国"
+                } else "中国"
+                OutMessage("latest_reminder", "$dateStr,$weekStr,$locDesc,Android,中文")
+            } else null
+
+            val payload = listOfNotNull(
+                reminderMsg,
                 OutMessage("system", AiClient.SYSTEM_PROMPT),
                 // 回答详略档（设置页：简洁/中等/详尽），优先级高于基础提示词里的长度要求
                 OutMessage("system", AiClient.answerStyleRule(settingsValue.answerStyle)),
@@ -501,6 +512,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 onReasoning = { d -> _stream.update { cur -> val s = cur ?: StreamState(); s.copy(reasoning = s.reasoning + d) } },
                 // 退化输出自动重试时复位流式卡：重试的内容从头累积，不和上一轮的垃圾拼在一起
                 onRetry = { _stream.value = StreamState() },
+                onTitle = { title ->
+                    viewModelScope.launch {
+                        sessions.updateTitle(sessionId, title)
+                    }
+                },
             ).fold(
                 onSuccess = { reply ->
                     // 地图卡三级来源：工具捕获 > AI 输出的地图意图 > 关键词兜底
@@ -875,6 +891,54 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                         null,
                     )
                 }
+            } else if (lowerName.endsWith(".docx")) {
+                val text = runCatching {
+                    resolver.openInputStream(uri)?.use { extractDocxText(it) }
+                }.getOrNull()
+                if (text.isNullOrBlank()) {
+                    Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = null), "「$name」未提取到文本内容")
+                } else {
+                    val clipped = text.take(60 * 1024) + if (text.length > 60 * 1024) "\n（Word 文档内容过长，已截断）" else ""
+                    Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = clipped), null)
+                }
+            } else if (lowerName.endsWith(".pptx")) {
+                val text = runCatching {
+                    resolver.openInputStream(uri)?.use { extractPptxText(it) }
+                }.getOrNull()
+                if (text.isNullOrBlank()) {
+                    Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = null), "「$name」未提取到演示文稿文本")
+                } else {
+                    val clipped = text.take(60 * 1024) + if (text.length > 60 * 1024) "\n（PPT 文档内容过长，已截断）" else ""
+                    Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = clipped), null)
+                }
+            } else if (lowerName.endsWith(".pdf") || mime.contains("pdf")) {
+                // PDF 处理：优先使用系统 PdfRenderer 渲染首页图片供视觉识别，同时尝试提取文本
+                val rendered = renderPdfFirstPage(context, uri)
+                if (rendered != null) {
+                    Pair(
+                        PendingAttachment(
+                            uri = uri,
+                            name = name,
+                            isImage = true,
+                            dataUrl = rendered.first,
+                            localPath = saveSentImage(context, rendered.second),
+                        ),
+                        null,
+                    )
+                } else {
+                    val text = runCatching {
+                        resolver.openInputStream(uri)?.use { input ->
+                            val bytes = input.readBytes()
+                            val head = bytes.take(60 * 1024).toByteArray()
+                            String(head, Charsets.UTF_8).takeIf { isMostlyPrintable(it) }
+                        }
+                    }.getOrNull()
+                    if (text.isNullOrBlank()) {
+                        Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = null), "「$name」PDF 解析失败")
+                    } else {
+                        Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = text), null)
+                    }
+                }
             } else {
                 val text = runCatching {
                     resolver.openInputStream(uri)?.use { input ->
@@ -887,13 +951,69 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 if (printable == null) {
                     Pair(
                         PendingAttachment(uri = uri, name = name, isImage = false, textContent = null),
-                        "「$name」读不出文本内容（目前支持图片和文本文件），先带着附件试试",
+                        "「$name」读不出文本内容（目前支持图片、PDF、Word、PPT 和文本文件），先带着附件试试",
                     )
                 } else {
                     Pair(PendingAttachment(uri = uri, name = name, isImage = false, textContent = printable), null)
                 }
             }
         }
+
+        private fun extractDocxText(input: java.io.InputStream): String? = runCatching {
+            val zis = java.util.zip.ZipInputStream(input)
+            val sb = StringBuilder()
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                if (entry.name == "word/document.xml") {
+                    val xml = zis.reader(Charsets.UTF_8).readText()
+                    val textRegex = Regex("<w:t[^>]*>(.*?)</w:t>")
+                    textRegex.findAll(xml).forEach { m ->
+                        sb.append(m.groupValues[1])
+                    }
+                }
+                zis.closeEntry()
+            }
+            sb.toString().takeIf { it.isNotBlank() }
+        }.getOrNull()
+
+        private fun extractPptxText(input: java.io.InputStream): String? = runCatching {
+            val zis = java.util.zip.ZipInputStream(input)
+            val sb = StringBuilder()
+            var slideIdx = 1
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                if (entry.name.startsWith("ppt/slides/slide") && entry.name.endsWith(".xml")) {
+                    val xml = zis.reader(Charsets.UTF_8).readText()
+                    val textRegex = Regex("<a:t[^>]*>(.*?)</a:t>")
+                    val slideText = textRegex.findAll(xml).joinToString(" ") { it.groupValues[1] }
+                    if (slideText.isNotBlank()) {
+                        sb.appendLine("【第 ${slideIdx++} 页幻灯片】 $slideText")
+                    }
+                }
+                zis.closeEntry()
+            }
+            sb.toString().takeIf { it.isNotBlank() }
+        }.getOrNull()
+
+        private fun renderPdfFirstPage(context: Context, uri: Uri): Pair<String, ByteArray>? = runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                val renderer = android.graphics.pdf.PdfRenderer(pfd)
+                if (renderer.pageCount <= 0) {
+                    renderer.close()
+                    return@use null
+                }
+                val page = renderer.openPage(0)
+                val bitmap = Bitmap.createBitmap(page.width, page.height, Bitmap.Config.ARGB_8888)
+                page.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+                renderer.close()
+                val stream = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+                val bytes = stream.toByteArray()
+                val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                Pair("data:image/jpeg;base64,$base64", bytes)
+            }
+        }.getOrNull()
 
         private fun isMostlyPrintable(text: String): Boolean {
             if (text.isEmpty()) return false

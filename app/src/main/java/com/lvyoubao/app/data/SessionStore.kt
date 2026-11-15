@@ -98,6 +98,35 @@ class SessionStore(private val context: Context, private val repo: SettingsRepos
         session
     }
 
+    suspend fun updateTitle(sessionId: String, newTitle: String) = mutex.withLock {
+        val clean = newTitle.trim().lines().firstOrNull()?.trim()?.take(30).orEmpty()
+        if (clean.isBlank()) return@withLock
+        _sessions.value = _sessions.value.map { s ->
+            if (s.id == sessionId) s.copy(title = clean, updatedAt = System.currentTimeMillis())
+            else s
+        }.sortedByDescending { it.updatedAt }
+        persist()
+    }
+
+    suspend fun exportToZip(destFile: File): File = mutex.withLock {
+        SessionBackup.exportToZip(context, _sessions.value, destFile)
+    }
+
+    suspend fun importFromStream(inputStream: java.io.InputStream): Int = mutex.withLock {
+        val imported = SessionBackup.importFromStream(context, inputStream)
+        if (imported.isEmpty()) return@withLock 0
+        val existingMap = _sessions.value.associateBy { it.id }.toMutableMap()
+        imported.forEach { s ->
+            val prev = existingMap[s.id]
+            if (prev == null || s.messages.size >= prev.messages.size) {
+                existingMap[s.id] = s
+            }
+        }
+        _sessions.value = existingMap.values.sortedByDescending { it.updatedAt }.take(MAX_SESSIONS)
+        persist()
+        imported.size
+    }
+
     suspend fun setCurrent(id: String) {
         repo.setCurrentSession(id)
     }

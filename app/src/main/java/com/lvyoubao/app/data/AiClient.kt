@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -58,6 +59,7 @@ class AiClient(private val settings: AiSettings) {
         onAnswer: ((String) -> Unit)? = null,
         onReasoning: ((String) -> Unit)? = null,
         onRetry: (() -> Unit)? = null,
+        onTitle: ((String) -> Unit)? = null,
     ): Result<AssistantReply> = withContext(Dispatchers.IO) {
         guard {
             val lastUser = messages.lastOrNull { it.role == "user" }?.text.orEmpty()
@@ -68,7 +70,7 @@ class AiClient(private val settings: AiSettings) {
                 val explicitUrl = FreeWebSearch.extractFirstUrl(lastUser)
                 if (explicitUrl != null) tryUrlInject(explicitUrl, messages) else messages
             }
-            generate(effective, thinking, toolExecutor, onAnswer, onReasoning, onRetry)
+            generate(effective, thinking, toolExecutor, onAnswer, onReasoning, onRetry, onTitle)
         }
     }
 
@@ -114,6 +116,12 @@ class AiClient(private val settings: AiSettings) {
     /** 搜索与链接正文注入：失败时静默降级为无搜索（不阻断回答） */
     private suspend fun trySearchInject(query: String, messages: List<OutMessage>): List<OutMessage> {
         if (query.isBlank() || messages.isEmpty()) return messages
+
+        // 若是 DeepSeek 官方且配置了 Key，已声明原生服务端 deepseek_web_search / deepseek_read_url 工具，
+        // 由模型在思考中自主发起多步检索与阅读，不再在客户端强行粗暴拼接大段文本；非 DeepSeek 走本地抓取兜底
+        if (isDeepSeek && settings.apiKey.isNotBlank()) {
+            return messages
+        }
 
         // 1. 若用户输入中含有具体网页/文章链接（如公众号链接），优先走阅读链接（1:1 对标 DeepSeek App 阅读链接能力）
         val targetUrl = FreeWebSearch.extractFirstUrl(query)
@@ -230,8 +238,9 @@ class AiClient(private val settings: AiSettings) {
         onAnswer: ((String) -> Unit)?,
         onReasoning: ((String) -> Unit)?,
         onRetry: (() -> Unit)? = null,
+        onTitle: ((String) -> Unit)? = null,
     ): AssistantReply {
-        val first = generateOnce(messages, thinking, toolExecutor, onAnswer, onReasoning)
+        val first = generateOnce(messages, thinking, toolExecutor, onAnswer, onReasoning, onTitle)
         if (first.answer != DEGENERATE_ANSWER && first.answer.isNotBlank()) {
             return first
         }
@@ -239,10 +248,10 @@ class AiClient(private val settings: AiSettings) {
         // 第 1 级自愈：若深度思考或工具链偶发退化，关闭思考状态重试一次
         onRetry?.invoke()
         val second = if (thinking) {
-            generateOnce(messages, thinking = false, toolExecutor, onAnswer, onReasoning)
+            generateOnce(messages, thinking = false, toolExecutor, onAnswer, onReasoning, onTitle)
         } else {
             // 原本未开思考若退化，尝试纯生成（去除工具调用声明）
-            generateOnce(messages, thinking = false, toolExecutor = null, onAnswer, onReasoning)
+            generateOnce(messages, thinking = false, toolExecutor = null, onAnswer, onReasoning, onTitle)
         }
         if (second.answer != DEGENERATE_ANSWER && second.answer.isNotBlank()) {
             return second
@@ -251,7 +260,7 @@ class AiClient(private val settings: AiSettings) {
         // 第 2 级自愈：彻底降级为通用纯生成模式（无 tools、无 thinking、三级参数降级），保证绝不向用户返回空卡片
         onRetry?.invoke()
         return runCatching {
-            generateWithAttempts(messages, thinking = false, withTools = false, executor = null, onAnswer, onReasoning)
+            generateWithAttempts(messages, thinking = false, withTools = false, executor = null, onAnswer, onReasoning, onTitle)
         }.getOrElse {
             if (second.answer.isNotBlank() && second.answer != DEGENERATE_ANSWER) second
             else if (first.answer.isNotBlank() && first.answer != DEGENERATE_ANSWER) first
@@ -265,10 +274,11 @@ class AiClient(private val settings: AiSettings) {
         toolExecutor: ToolExecutor?,
         onAnswer: ((String) -> Unit)?,
         onReasoning: ((String) -> Unit)?,
+        onTitle: ((String) -> Unit)? = null,
     ): AssistantReply {
         logOutgoing(messages)
         val useTools = toolExecutor != null && isDeepSeek
-        if (!useTools) return generateWithAttempts(messages, thinking, withTools = false, executor = null, onAnswer, onReasoning)
+        if (!useTools) return generateWithAttempts(messages, thinking, withTools = false, executor = null, onAnswer, onReasoning, onTitle)
 
         // 回答字段增量提取器：模型输出的是 JSON 信封，把 "answer" 的值剥出来流给界面
         val streamer = AnswerFieldStreamer(onAnswer)
@@ -283,9 +293,10 @@ class AiClient(private val settings: AiSettings) {
                     withTools = true,
                     onContent = { streamer.feed(it) },
                     onReasoning = onReasoning,
+                    onTitle = onTitle,
                 )
             } catch (e: ApiException) {
-                if (e.code == 400) return generateWithAttempts(messages, thinking, withTools = false, executor = null, onAnswer, onReasoning)
+                if (e.code == 400) return generateWithAttempts(messages, thinking, withTools = false, executor = null, onAnswer, onReasoning, onTitle)
                 throw e
             }
             if (turn.toolCalls.isEmpty() || round >= 3) {
@@ -333,6 +344,7 @@ class AiClient(private val settings: AiSettings) {
         executor: ToolExecutor?,
         onAnswer: ((String) -> Unit)?,
         onReasoning: ((String) -> Unit)?,
+        onTitle: ((String) -> Unit)? = null,
     ): AssistantReply {
         val attempts = listOf(
             Attempt(withJson = true, withThinking = true, withTools = false),
@@ -351,6 +363,7 @@ class AiClient(private val settings: AiSettings) {
                     withTools = false,
                     onContent = streamer?.let { s -> { d: String -> s.feed(d) } },
                     onReasoning = onReasoning,
+                    onTitle = onTitle,
                 )
                 turn.content?.takeIf { it.isNotBlank() }?.let { return parseReply(it) }
                 // content 为空白时视为本次没生成出内容，继续下一次尝试（避免返回空卡片）
@@ -382,11 +395,26 @@ class AiClient(private val settings: AiSettings) {
             }
             if (isDeepSeek) {
                 put("thinking", json.encodeToJsonElement(ThinkingMode(if (thinking) "enabled" else "disabled")))
+                put("title", buildJsonObject { put("enabled", true) })
+                if (settings.safetyCheckEnabled) {
+                    put("safety_check", buildJsonObject { put("level", "high") })
+                }
             }
-            if (withTools) {
-                put("tools", json.encodeToJsonElement(AppTools.definitions.map {
-                    ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))
-                }))
+            if (withTools || (isDeepSeek && settings.searchEnabled)) {
+                val toolList = buildJsonArray {
+                    if (isDeepSeek && settings.searchEnabled) {
+                        add(buildJsonObject { put("type", "deepseek_web_search") })
+                        add(buildJsonObject { put("type", "deepseek_read_url") })
+                    }
+                    if (withTools) {
+                        AppTools.definitions.forEach {
+                            add(json.encodeToJsonElement(ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))))
+                        }
+                    }
+                }
+                if (toolList.isNotEmpty()) {
+                    put("tools", toolList)
+                }
             }
             // 思考模型偶发退化：连吐 null 的重复循环——提前掐断，别让垃圾流满整屏
             put("stop", buildJsonArray { add("nullnull") })
@@ -399,6 +427,21 @@ class AiClient(private val settings: AiSettings) {
         client.newCall(request).execute().use { response ->
             val bodyText = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw ApiException(mapError(response.code, bodyText), response.code)
+            val parsedObj = json.parseToJsonElement(bodyText).jsonObject
+            val firstChoice = (parsedObj["choices"] as? JsonArray)?.firstOrNull()?.jsonObject
+            val finishReason = (firstChoice?.get("finish_reason") as? JsonPrimitive)?.content
+            val stopReason = (parsedObj["stop_reason"] as? JsonPrimitive)?.content
+            if (finishReason == "refusal" || stopReason == "refusal") {
+                val refusalMsg = "⚠️ 该提问涉及内容安全风控限制，模型已拦截并拒答。"
+                return ChatTurn(
+                    content = refusalMsg,
+                    toolCalls = emptyList(),
+                    rawAssistant = buildJsonObject {
+                        put("role", "assistant")
+                        put("content", refusalMsg)
+                    },
+                )
+            }
             val message = json.decodeFromString<ChatResponse>(bodyText)
                 .choices.firstOrNull()?.message
                 ?: throw ApiException("这次没有生成出回答内容，请重试一次或换个问法。")
@@ -421,6 +464,7 @@ class AiClient(private val settings: AiSettings) {
         withTools: Boolean,
         onContent: ((String) -> Unit)?,
         onReasoning: ((String) -> Unit)?,
+        onTitle: ((String) -> Unit)? = null,
     ): ChatTurn {
         val body = buildJsonObject {
             put("model", settings.model)
@@ -431,11 +475,26 @@ class AiClient(private val settings: AiSettings) {
             put("stream", true)
             if (isDeepSeek) {
                 put("thinking", json.encodeToJsonElement(ThinkingMode(if (thinking) "enabled" else "disabled")))
+                put("title", buildJsonObject { put("enabled", true) })
+                if (settings.safetyCheckEnabled) {
+                    put("safety_check", buildJsonObject { put("level", "high") })
+                }
             }
-            if (withTools) {
-                put("tools", json.encodeToJsonElement(AppTools.definitions.map {
-                    ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))
-                }))
+            if (withTools || (isDeepSeek && settings.searchEnabled)) {
+                val toolList = buildJsonArray {
+                    if (isDeepSeek && settings.searchEnabled) {
+                        add(buildJsonObject { put("type", "deepseek_web_search") })
+                        add(buildJsonObject { put("type", "deepseek_read_url") })
+                    }
+                    if (withTools) {
+                        AppTools.definitions.forEach {
+                            add(json.encodeToJsonElement(ToolDefinition(type = "function", function = ToolFunction(it.name, it.description, it.parameters))))
+                        }
+                    }
+                }
+                if (toolList.isNotEmpty()) {
+                    put("tools", toolList)
+                }
             }
             // 思考模型偶发退化：连吐 null 的重复循环——提前掐断，别让垃圾流满整屏
             put("stop", buildJsonArray { add("nullnull") })
@@ -456,6 +515,7 @@ class AiClient(private val settings: AiSettings) {
             val reasoningBuf = StringBuilder()
             class ToolAcc { var id = ""; var name = ""; var args = StringBuilder() }
             val toolAccs = linkedMapOf<Int, ToolAcc>()
+            var isRefused = false
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (line.isBlank() || !line.startsWith("data:")) continue
@@ -464,6 +524,28 @@ class AiClient(private val settings: AiSettings) {
                 val obj = runCatching { json.parseToJsonElement(payload).jsonObject }.getOrNull() ?: continue
                 val choice = (obj["choices"] as? JsonArray)?.firstOrNull()?.jsonObject ?: continue
                 val delta = choice["delta"] as? JsonObject ?: continue
+
+                // 标题回调（DeepSeek title: enabled）
+                val titleCandidate = (delta["title"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (choice["title"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (obj["title"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                if (!titleCandidate.isNullOrBlank()) {
+                    onTitle?.invoke(titleCandidate.trim())
+                }
+
+                // 内容安全风控拦截（finish_reason 或 stop_reason 为 refusal）
+                val finishReason = (choice["finish_reason"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                val stopReason = (obj["stop_reason"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                val refusal = (delta["refusal"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                if (finishReason == "refusal" || stopReason == "refusal" || !refusal.isNullOrBlank()) {
+                    isRefused = true
+                    val refusalMsg = "⚠️ 该提问涉及内容安全风控限制，模型已拦截并拒答。"
+                    contentBuf.clear()
+                    contentBuf.append(refusalMsg)
+                    onContent?.invoke(refusalMsg)
+                    break
+                }
+
                 (delta["reasoning_content"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { r ->
                     if (r.isNotEmpty()) {
                         reasoningBuf.append(r)
@@ -567,29 +649,38 @@ class AiClient(private val settings: AiSettings) {
 
     private fun buildMessagesJson(messages: List<OutMessage>) = buildJsonArray {
         messages.forEach { m ->
-            add(
-                buildJsonObject {
-                    put("role", m.role)
-                    if (m.images.isEmpty() || m.role != "user") {
+            if (m.role == "latest_reminder") {
+                add(
+                    buildJsonObject {
+                        put("role", "latest_reminder")
                         put("content", m.text)
-                    } else {
-                        put(
-                            "content",
-                            buildJsonArray {
-                                add(buildJsonObject { put("type", "text"); put("text", m.text) })
-                                m.images.forEach { url ->
-                                    add(
-                                        buildJsonObject {
-                                            put("type", "image_url")
-                                            put("image_url", json.encodeToJsonElement(ImageUrlPart(url)))
-                                        }
-                                    )
-                                }
-                            },
-                        )
-                    }
-                }
-            )
+                    },
+                )
+            } else {
+                add(
+                    buildJsonObject {
+                        put("role", m.role)
+                        if (m.images.isEmpty() || m.role != "user") {
+                            put("content", m.text)
+                        } else {
+                            put(
+                                "content",
+                                buildJsonArray {
+                                    add(buildJsonObject { put("type", "text"); put("text", m.text) })
+                                    m.images.forEach { url ->
+                                        add(
+                                            buildJsonObject {
+                                                put("type", "image_url")
+                                                put("image_url", json.encodeToJsonElement(ImageUrlPart(url)))
+                                            },
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                    },
+                )
+            }
         }
     }
 

@@ -74,6 +74,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -108,6 +111,54 @@ fun SettingsScreen(
     // 纠正记录条数：打开/关闭管理页时刷新（页内删除后回来数字要变）
     val fixCount = remember(showVoiceFix) {
         com.lvyoubao.app.data.HotwordCorrector.learnedFixList(app.applicationContext).size
+    }
+
+    val scope = rememberCoroutineScope()
+    var dataManageMsg by remember { mutableStateOf<String?>(null) }
+    val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                dataManageMsg = "正在导入对话记录…"
+                val count = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            app.sessionStore.importFromStream(stream)
+                        }
+                    }.getOrNull() ?: 0
+                }
+                dataManageMsg = if (count > 0) "成功导入 $count 个会话 ✓" else "未识别到有效的对话记录"
+            }
+        }
+    }
+    val exportSessions = {
+        scope.launch {
+            runCatching {
+                dataManageMsg = "正在生成备份 ZIP…"
+                val exportDir = File(context.filesDir, "exports").apply { mkdirs() }
+                val timeTag = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA).format(Date())
+                val exportFile = File(exportDir, "deepseek_data_$timeTag.zip")
+                withContext(Dispatchers.IO) {
+                    app.sessionStore.exportToZip(exportFile)
+                }
+                val uri = FileProvider.getUriForFile(
+                    context, "${context.packageName}.fileprovider", exportFile,
+                )
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/zip"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(
+                    Intent.createChooser(intent, "导出会话记录")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                dataManageMsg = "备份生成完成，请选择保存或分享途径"
+            }.onFailure {
+                dataManageMsg = "导出失败：${it.message}"
+            }
+        }
     }
 
     val versionLabel = remember {
@@ -244,6 +295,26 @@ fun SettingsScreen(
                         result,
                         style = MaterialTheme.typography.bodySmall,
                         color = if (state.testFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("内容安全风控", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "开启 DeepSeek 官方安全校验与风控审核，自动拦截过滤违规敏感内容（默认开启）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.safetyCheckEnabled,
+                        onCheckedChange = { checked ->
+                            vm.updateDraft { it.copy(safetyCheckEnabled = checked) }
+                        },
                     )
                 }
                 Spacer(Modifier.height(16.dp))
@@ -576,6 +647,41 @@ fun SettingsScreen(
         }
         Text(
             "语音识别的稿子你手动改对再发送，就会记下「识别稿 → 发送稿」的差异；AI 智能纠错据此把同类错误越改越准。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+
+        // ---------- 数据管理 ----------
+        SectionLabel("数据管理")
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                SettingRow(
+                    title = "导出对话备份",
+                    value = "ZIP / 互通格式",
+                    onClick = { exportSessions() },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                SettingRow(
+                    title = "导入对话记录",
+                    value = "支持 DeepSeek 格式",
+                    onClick = {
+                        importLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/json", "*/*"))
+                    },
+                )
+            }
+        }
+        if (dataManageMsg != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                dataManageMsg!!,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
+        Text(
+            "导出产物为标准 ZIP 格式，与 DeepSeek 官方网页端/Demo 完全互通；支持导入电脑端导出的攻略继续在手机上聊。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),

@@ -9,6 +9,7 @@ data class AiSettings(
     val model: String = ProviderPresets.first().defaultModel,
     val thinking: Boolean = false,
     val searchEnabled: Boolean = true,
+    val safetyCheckEnabled: Boolean = true, // 内容安全风控：开启 DeepSeek 官方安全审核，默认开启
     val answerStyle: String = "concise", // 回答风格：concise 简洁（默认）/ medium 中等 / detailed 详尽；提问里明确要详细时仍会给详细
     val themeMode: String = "system",
     val amapKey: String = "",
