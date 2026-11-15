@@ -70,7 +70,16 @@ class AiClient(private val settings: AiSettings) {
                 val explicitUrl = FreeWebSearch.extractFirstUrl(lastUser)
                 if (explicitUrl != null) tryUrlInject(explicitUrl, messages) else messages
             }
-            generate(effective, thinking, toolExecutor, onAnswer, onReasoning, onRetry, onTitle)
+            try {
+                generate(effective, thinking, toolExecutor, onAnswer, onReasoning, onRetry, onTitle)
+            } catch (e: ApiException) {
+                // DeepSeek 服务端会校验 latest_reminder 契约头（platform/language 枚举随版本收紧，
+                // v0.8.59 就因 platform=Android 整条请求 400）。头只是情境装饰，问答不依赖它——
+                // 被拒时剥掉重试一次，其余 400 原样抛出
+                if (e.code == 400 && effective.any { it.role == "latest_reminder" }) {
+                    generate(effective.filter { it.role != "latest_reminder" }, thinking, toolExecutor, onAnswer, onReasoning, onRetry, onTitle)
+                } else throw e
+            }
         }
     }
 

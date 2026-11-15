@@ -480,7 +480,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 val locDesc = if (LocationContext.hasPermission(context)) {
                     LocationContext.current(context)?.description?.ifBlank { "中国" } ?: "中国"
                 } else "中国"
-                OutMessage("latest_reminder", "$dateStr,$weekStr,$locDesc,Android,中文")
+                // DeepSeek 契约头 <date>,<weekday>,<location>,<platform>,<language>：
+                // platform 只认 App/Web（"Android" 被服务端 400 拒绝）；location 含逗号会把
+                // 5 字段挤成 6 字段（描述里"坐标 114.70, 23.74"），逗号一律换成空格
+                val locSafe = locDesc.replace(",", " ").replace("，", " ")
+                OutMessage("latest_reminder", "$dateStr,$weekStr,$locSafe,App,中文")
             } else null
 
             val payload = listOfNotNull(
