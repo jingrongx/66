@@ -30,6 +30,8 @@
         <package android:name="com.autonavi.minimap" />
         <!-- 包可见性：卡片分享判断微信是否安装（未装则退回系统分享面板） -->
         <package android:name="com.tencent.mm" />
+        <!-- 包可见性：卓易通环境检测（鸿蒙 NEXT 的安卓容器里微信拉不起，直接走系统分享面板） -->
+        <package android:name="com.zhuoyi.appstore.lite" />
     </queries>
 
     <!-- usesCleartextTraffic：扫码同步配置走局域网明文 HTTP（http://192.168.x.x），

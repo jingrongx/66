@@ -3,6 +3,7 @@ package com.lvyoubao.app.ui.ask
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -40,6 +41,7 @@ import kotlinx.coroutines.withContext
 object CardSharer {
 
     private const val WECHAT_PACKAGE = "com.tencent.mm"
+    private const val ZHUOYI_STORE_PACKAGE = "com.zhuoyi.appstore.lite"
 
     // 配色与 app 主题呼应：近黑正文、浅灰辅助、白色卡面
     private const val CARD_BG = 0xFFFFFFFF.toInt()
@@ -166,9 +168,26 @@ object CardSharer {
         }
 
     /**
+     * 是否运行在鸿蒙 NEXT 的卓易通安卓容器里。Build.*（MANUFACTURER/BRAND/MODEL）全被容器伪装，
+     * 只能靠容器特征判断：①安装来源是卓易通内置商店（出境易等同系商店按 com.zhuoyi. 前缀一起命中）；
+     * ②商店本体跑在容器里、安卓层可直接看到其包名（应用内更新等侧载路径的兜底信号）。
+     */
+    fun isZhuoyiContainer(context: Context): Boolean = runCatching {
+        val pm = context.packageManager
+        val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            pm.getInstallSourceInfo(context.packageName).installingPackageName
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getInstallerPackageName(context.packageName)
+        }
+        if (installer?.startsWith("com.zhuoyi.") == true) return@runCatching true
+        runCatching { pm.getPackageInfo(ZHUOYI_STORE_PACKAGE, 0) }.isSuccess
+    }.getOrDefault(false)
+
+    /**
      * 分享图片到微信：先探测微信能否被安卓层拉起——
-     * 鸿蒙卓易通里微信是原生应用，安卓层解析不到，硬闯 setPackage 会被拦并提示「不支持」，
-     * 这种情况直接走系统分享面板（卓易通会把面板桥接到鸿蒙分享，里面有微信）。
+     * 鸿蒙卓易通里微信是原生应用，安卓层够不着，硬闯 setPackage 会被容器拦下并弹「卓易通内暂不支持此功能」，
+     * 检测到容器环境不试探，直接走系统分享面板（卓易通会把面板桥接到鸿蒙分享，里面有微信）。
      * 返回 true=已拉起微信；false=走了系统分享面板。
      */
     fun shareToWeChat(context: Context, bitmap: Bitmap): Boolean {
@@ -176,6 +195,10 @@ object CardSharer {
             type = "image/*"
             putExtra(Intent.EXTRA_STREAM, writeCacheImage(context, bitmap))
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        if (isZhuoyiContainer(context)) {
+            openChooser(context, base)
+            return false
         }
         val wechatReady = runCatching {
             Intent(Intent.ACTION_SEND).apply {

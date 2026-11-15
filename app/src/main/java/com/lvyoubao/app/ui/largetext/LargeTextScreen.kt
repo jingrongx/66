@@ -74,6 +74,7 @@ import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.common.CardShareDialog
+import com.lvyoubao.app.ui.common.CardShareTipDialog
 import com.lvyoubao.app.ui.common.rememberCardShareState
 import com.lvyoubao.app.ui.map.RouteMapCard
 import com.lvyoubao.app.ui.settings.SettingsScreen
@@ -787,20 +788,22 @@ private fun LargeTextAssistantCard(
             RouteMapCard(card = card, app = app, largeText = true)
         }
         Spacer(Modifier.height(10.dp))
-        // 按钮行与卡片边缘留出与正文一致的内边距，不再贴着圆角边
+        // 按钮行与卡片边缘留出与正文一致的内边距；三颗按钮等宽分摊（不换行、分享不再被挤出屏幕）
         Row(
             modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Button(
                 onClick = onToggleSpeak,
-                modifier = Modifier.height(52.dp),
+                modifier = Modifier.weight(1f).height(52.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 再读一遍", fontSize = 17.sp, maxLines = 1) }
+            ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 朗读", fontSize = 17.sp, maxLines = 1) }
             // 收藏切换：已收藏换浅橙底深棕字（大字模式青底绿字看不清），再点恢复青底白字「收藏」
             Button(
                 onClick = onToggleMemory,
-                modifier = Modifier.height(52.dp),
+                modifier = Modifier.weight(1f).height(52.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = if (savedMemory) {
                     ButtonDefaults.buttonColors(
@@ -815,12 +818,14 @@ private fun LargeTextAssistantCard(
             }
             Button(
                 onClick = { shareState.open() },
-                modifier = Modifier.height(52.dp),
+                modifier = Modifier.weight(1f).height(52.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp),
                 shape = RoundedCornerShape(14.dp),
             ) { Text("分享", fontSize = 17.sp, maxLines = 1) }
         }
     }
     CardShareDialog(shareState)
+    CardShareTipDialog(shareState)
 }
 
 /** 生成中的回答：实时流式正文，超大字，可选中复制 */

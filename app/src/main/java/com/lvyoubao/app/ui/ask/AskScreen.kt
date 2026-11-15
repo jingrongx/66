@@ -104,6 +104,7 @@ import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.RichContent
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.CardShareDialog
+import com.lvyoubao.app.ui.common.CardShareTipDialog
 import com.lvyoubao.app.ui.common.rememberCardShareState
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
@@ -1071,6 +1072,7 @@ private fun AssistantCard(
         }
     }
     CardShareDialog(shareState)
+    CardShareTipDialog(shareState)
     // 卡片下方只留一行极简检查结果
     Row(
         verticalAlignment = Alignment.CenterVertically,
