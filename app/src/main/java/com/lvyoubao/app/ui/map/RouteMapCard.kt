@@ -705,9 +705,15 @@ fun RouteMapCard(
     // ---- 信息面板（标题/方式/方案/指引/操作），内嵌与全屏共用 ----
     // compact=true（全屏默认收起态）：只留标题/摘要/方式/错误/操作，
     // 候选点列表、方案切换、分步指引这些"长内容"展开后才出现——不再一进全屏就占半屏
+    // onOpenInAmap 非空（内嵌态）时整面板可点直达高德（route=路线规划 / place=周边搜索）——
+    // 「看+去」分工：面板内子按钮各自消费点击不冒泡，空白处点击即走
     @Composable
-    fun InfoPanel(modifier: Modifier, compact: Boolean = false) {
-        Column(modifier) {
+    fun InfoPanel(modifier: Modifier, compact: Boolean = false, onOpenInAmap: (() -> Unit)? = null) {
+        Column(
+            modifier.then(
+                if (onOpenInAmap != null) Modifier.clickable { onOpenInAmap() } else Modifier,
+            ),
+        ) {
             // 导航横幅（全屏时顶部另有精简横幅，这里导航中只显示操作行）
             if (!(expanded && navigating && nav != null)) {
                 if (navigating && nav != null) {
@@ -740,7 +746,7 @@ fun RouteMapCard(
                 }
             }
 
-            // 标题 + 摘要
+            // 标题 + 摘要（+ 去高德提示：内嵌态整面板可点直达，导航中不提示）
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     if (card.kind == "place") "「${AmapClient.cleanPlaceName(card.title)}」附近" else AmapClient.cleanPlaceName(card.title),
@@ -756,6 +762,16 @@ fun RouteMapCard(
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold,
                 )
+                if (onOpenInAmap != null && !navigating) {
+                    Text(
+                        "去高德 ›",
+                        fontSize = if (big) 17.sp else 12.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
             }
 
             // 地点卡候选点列表：默认最多露 3 条，多则折叠（此前一进全屏就被整列占半屏且收不起来）
@@ -1032,7 +1048,14 @@ fun RouteMapCard(
                 }
             }
             Spacer(Modifier.height(8.dp))
-            InfoPanel(Modifier.fillMaxWidth())
+            // 「看+去」：点信息区直达高德——route 卡路线规划 / place 卡周边搜索（行动全交高德）
+            InfoPanel(
+                Modifier.fillMaxWidth(),
+                onOpenInAmap = {
+                    if (card.kind == "place") openAroundInAmap(context, card.title, card.fromLon to card.fromLat)
+                    else openInAmapApp(context, card, mode, dest, selectedPoi?.name)
+                },
+            )
         }
     }
 
@@ -1333,14 +1356,16 @@ private object CompassSensor {
  * 1) amapuri://route/plan（新版深链，参数直达规划页，目的地已填好）
  * 2) androidamap://route（官方 URI API，老版高德）
  * 3) uri.amap.com 网页导航链接（没装高德时开网页；callnative=1 装了高德会自动拉起）
- * 目的地名过一遍 cleanPlaceName：历史会话的卡片标题可能是整句话（"大会岭有什么特色"），
- * 原样传给高德会填满目的地输入框；地点卡选中的候选点优先用它的正式名称。
+ * 「看+去」分工：行动一律交给高德（交通方式/限行限速/实时路况都是高德本职）。
+ * 目的地坐标缺失（历史卡片/数据不全）时退纯关键词版：深链只带 dname，高德自行搜索填充，
+ * 网页兜底退搜索页。目的地名过一遍 cleanPlaceName：历史会话的卡片标题可能是整句话
+ * （"大会岭有什么特色"），原样传给高德会填满目的地输入框；地点卡选中的候选点优先用它的正式名称。
  */
 private fun openInAmapApp(
     context: android.content.Context,
     card: MapCardData,
     mode: RouteMode,
-    dest: Pair<Double, Double>,
+    dest: Pair<Double, Double>?,
     destName: String? = null,
 ) {
     val t = when (mode) {
@@ -1351,13 +1376,15 @@ private fun openInAmapApp(
     }
     val enc = { s: String -> runCatching { java.net.URLEncoder.encode(s, "UTF-8") }.getOrDefault(s) }
     val dname = enc(AmapClient.cleanPlaceName(destName ?: card.title.ifBlank { "目的地" }))
+    val hasDest = dest != null && (dest.first != 0.0 || dest.second != 0.0)
     // App 内坐标统一是 WGS-84（离线底图/GPS），高德 App 要 GCJ-02（dev=0）
-    val g = Gcj02.fromWgs(dest.second, dest.first)
-    val dlat = g.first
-    val dlon = g.second
-    val deepLinks = listOf(
-        "amapuri://route/plan?sourceApplication=lvyoubao&dlat=$dlat&dlon=$dlon&dname=$dname&dev=0&m=0&t=$t",
-        "androidamap://route?sourceApplication=lvyoubao&lat=$dlat&lon=$dlon&dname=$dname&dev=0&m=0&t=$t&sname=${enc("我的位置")}",
+    val g = dest?.takeIf { hasDest }?.let { Gcj02.fromWgs(it.second, it.first) }
+    val deepLinks = if (g != null) listOf(
+        "amapuri://route/plan?sourceApplication=lvyoubao&dlat=${g.first}&dlon=${g.second}&dname=$dname&dev=0&m=0&t=$t",
+        "androidamap://route?sourceApplication=lvyoubao&lat=${g.first}&lon=${g.second}&dname=$dname&dev=0&m=0&t=$t&sname=${enc("我的位置")}",
+    ) else listOf(
+        "amapuri://route/plan?sourceApplication=lvyoubao&dname=$dname&dev=0&m=0&t=$t",
+        "androidamap://route?sourceApplication=lvyoubao&dname=$dname&dev=0&m=0&t=$t&sname=${enc("我的位置")}",
     )
     for (link in deepLinks) {
         if (runCatching {
@@ -1370,17 +1397,63 @@ private fun openInAmapApp(
             return
         }
     }
-    val webMode = when (mode) {
-        RouteMode.DRIVE -> "car"
-        RouteMode.RIDE -> "ride"
-        RouteMode.BUS -> "bus"
-        RouteMode.WALK -> "walk"
+    val web = if (g != null) {
+        val webMode = when (mode) {
+            RouteMode.DRIVE -> "car"
+            RouteMode.RIDE -> "ride"
+            RouteMode.BUS -> "bus"
+            RouteMode.WALK -> "walk"
+        }
+        "https://uri.amap.com/navigation?to=${g.second},${g.first},$dname&mode=$webMode&policy=1&src=lvyoubao&coordinate=gaode&callnative=1"
+    } else {
+        "https://uri.amap.com/search?keyword=$dname&src=lvyoubao&callnative=1"
     }
-    val web = "https://uri.amap.com/navigation?to=$dlon,$dlat,$dname&mode=$webMode&policy=1&src=lvyoubao&coordinate=gaode&callnative=1"
     runCatching {
         context.startActivity(
             android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(web))
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }.onFailure {
+        android.widget.Toast.makeText(context, "没有找到高德地图，网页版也打不开", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * 周边搜索交给高德：arroundpoi 深链直达高德的周边列表（筛选/排序/地图浏览是高德本职）。
+ * 失败退 uri.amap.com 网页搜索页，再失败 toast。中心坐标缺失时省略 lat/lon，高德用自身定位补中心。
+ */
+private fun openAroundInAmap(
+    context: android.content.Context,
+    keyword: String,
+    centerLonLat: Pair<Double, Double>?,
+) {
+    val enc = { s: String -> runCatching { java.net.URLEncoder.encode(s, "UTF-8") }.getOrDefault(s) }
+    val kw = enc(AmapClient.cleanPlaceName(keyword).ifBlank { "周边" })
+    val g = centerLonLat
+        ?.takeIf { it.first != 0.0 || it.second != 0.0 }
+        // App 内坐标统一 WGS-84，高德要 GCJ-02（dev=0）
+        ?.let { Gcj02.fromWgs(it.second, it.first) }
+    val deepLinks = buildList {
+        if (g != null) add("androidamap://arroundpoi?sourceApplication=lvyoubao&keywords=$kw&lat=${g.first}&lon=${g.second}&dev=0")
+        add("androidamap://arroundpoi?sourceApplication=lvyoubao&keywords=$kw&dev=0")
+    }
+    for (link in deepLinks) {
+        if (runCatching {
+                context.startActivity(
+                    android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(link))
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }.isSuccess
+        ) {
+            return
+        }
+    }
+    runCatching {
+        context.startActivity(
+            android.content.Intent(
+                android.content.Intent.ACTION_VIEW,
+                android.net.Uri.parse("https://uri.amap.com/search?keyword=$kw&src=lvyoubao&callnative=1"),
+            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }.onFailure {
         android.widget.Toast.makeText(context, "没有找到高德地图，网页版也打不开", android.widget.Toast.LENGTH_SHORT).show()
