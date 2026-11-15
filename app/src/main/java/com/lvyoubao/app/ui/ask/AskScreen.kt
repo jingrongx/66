@@ -1,9 +1,6 @@
 package com.lvyoubao.app.ui.ask
 
 import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -50,7 +47,6 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
@@ -64,7 +60,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -86,7 +81,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -94,7 +88,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -110,13 +103,14 @@ import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.RichContent
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.CardShareDialog
+import com.lvyoubao.app.ui.common.rememberCardShareState
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.map.RouteMapCard
 import com.lvyoubao.app.ui.update.UpdateReadyDialog
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -993,42 +987,8 @@ private fun AssistantCard(
     val context = LocalContext.current
     val ttsState by TtsPlayer.state.collectAsState()
     val ttsText = remember(message.ts) { ChatViewModel.speakableText(message) }
-    // 分享：把回答生成为卡片图，可发微信或存相册
-    var showShareDialog by remember { mutableStateOf(false) }
-    var sharing by remember { mutableStateOf(false) }
-    val shareScope = rememberCoroutineScope()
-    val accent = MaterialTheme.colorScheme.primary.toArgb()
-    val shareCard: (Boolean) -> Unit = { toWeChat ->
-        if (!sharing) {
-            sharing = true
-            shareScope.launch {
-                val tip = runCatching {
-                    val bitmap = withContext(Dispatchers.Default) { CardSharer.buildCardBitmap(context, message, accent) }
-                    if (toWeChat) {
-                        if (CardSharer.shareToWeChat(context, bitmap)) "" else "没找到微信，已改用系统分享"
-                    } else {
-                        CardSharer.saveToGallery(context, bitmap)?.let { "已保存到相册：$it" } ?: "保存失败，请重试"
-                    }
-                }.getOrElse { "生成卡片图失败" }
-                sharing = false
-                if (tip.isNotEmpty()) Toast.makeText(context, tip, Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-    // Android 9 及以下存相册要存储权限（Android 10+ 走 MediaStore 无需授权）
-    val requestStorage = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) shareCard(false) else Toast.makeText(context, "需要存储权限才能保存到相册", Toast.LENGTH_SHORT).show()
-    }
-    val saveToGallery: () -> Unit = {
-        val needLegacyPermission = Build.VERSION.SDK_INT in 23..28 &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
-            PackageManager.PERMISSION_GRANTED
-        if (needLegacyPermission) {
-            requestStorage.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        } else {
-            shareCard(false)
-        }
-    }
+    // 分享：卡片图生成/微信/相册/权限，统一在 CardShareUi 收口
+    val shareState = rememberCardShareState(message)
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column(Modifier.padding(20.dp)) {
             // 文字整体可长按选中、自由复制（地图卡和按钮不受影响）
@@ -1106,23 +1066,11 @@ private fun AssistantCard(
                         fontWeight = if (savedMemory) FontWeight.Bold else null,
                     )
                 }
-                TextButton(onClick = { showShareDialog = true }) { Text("分享") }
+                TextButton(onClick = { shareState.open() }) { Text("分享") }
             }
         }
     }
-    if (showShareDialog) {
-        AlertDialog(
-            onDismissRequest = { showShareDialog = false },
-            title = { Text("分享卡片") },
-            text = { Text("把这条回答生成为一张图片") },
-            confirmButton = {
-                Button(onClick = { showShareDialog = false; shareCard(true) }) { Text("分享到微信") }
-            },
-            dismissButton = {
-                OutlinedButton(onClick = { showShareDialog = false; saveToGallery() }) { Text("保存到相册") }
-            },
-        )
-    }
+    CardShareDialog(shareState)
     // 卡片下方只留一行极简检查结果
     Row(
         verticalAlignment = Alignment.CenterVertically,

@@ -59,6 +59,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import com.lvyoubao.app.data.RichBlocks
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -366,11 +367,11 @@ private fun tableToCsv(t: RichBlocks.Block.Table): String = buildString {
 }
 
 /**
- * 表格 → 位图（导出图片用）：android.graphics 手绘整表，单元格长文本用 StaticLayout 自动换行，
+ * 表格 → 位图（导出图片/回答卡分享用）：android.graphics 手绘整表，单元格长文本用 StaticLayout 自动换行，
  * 绝不省略号截断——全貌都在。方向跟随当前查看：竖屏查看导竖版（1080 宽），横屏查看导横版（1920 宽）。
  * 表头主色底白字、斑马行、细网格；总高超 14000px 时按比例缩小字号重排（防极端大表撑爆内存）。
  */
-private fun drawTableBitmap(table: RichBlocks.Block.Table, landscape: Boolean): Bitmap {
+internal fun drawTableBitmap(table: RichBlocks.Block.Table, landscape: Boolean): Bitmap {
     val targetWidth = if (landscape) 1920 else 1080
     val padH = 26f
     val padV = 22f
@@ -651,6 +652,47 @@ private fun captureWebView(webView: WebView): Bitmap {
     webView.draw(Canvas(bmp))
     return bmp
 }
+
+/**
+ * 图表（mermaid）→ 位图：离屏 WebView 离线渲染后整页截图（与图表卡「存图片」同一套软件层方案）。
+ * 供回答卡「分享」生成卡片图用：宽度对齐传入的 widthPx，高度按内容自适应；
+ * 页面加载失败或 8 秒渲染超时返回 null，调用方给占位提示，不让分享卡崩掉。
+ */
+suspend fun renderDiagramBitmap(context: Context, code: String, widthPx: Int): Bitmap? =
+    withContext(Dispatchers.Main) {
+        runCatching {
+            val holder = MermaidHolder(WebView(context))
+            try {
+                // 离屏布局：宽度精确对齐，高度给足；截图按实际内容高度裁
+                holder.webView.measure(
+                    View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(8_000, View.MeasureSpec.EXACTLY),
+                )
+                holder.webView.layout(0, 0, widthPx, 8_000)
+                holder.render(code)
+                // 轮询等渲染完成：内容高度连续两次不变视为稳定，8 秒超时
+                val density = context.resources.displayMetrics.density
+                var last = -1
+                var stable = 0
+                val deadline = System.currentTimeMillis() + 8_000
+                while (System.currentTimeMillis() < deadline) {
+                    delay(150)
+                    val h = (holder.webView.contentHeight * density).toInt()
+                    if (h > 50 && h == last) {
+                        stable++
+                        if (stable >= 2) break
+                    } else {
+                        stable = 0
+                    }
+                    last = h
+                }
+                if (last <= 50) return@runCatching null
+                captureWebView(holder.webView)
+            } finally {
+                holder.webView.destroy()
+            }
+        }.getOrNull()
+    }
 
 /* ================================ 导出分享 ================================ */
 

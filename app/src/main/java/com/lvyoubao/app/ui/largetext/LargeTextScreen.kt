@@ -55,7 +55,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +73,8 @@ import com.lvyoubao.app.ui.SentImageThumbnails
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.common.rememberDraftValue
+import com.lvyoubao.app.ui.common.CardShareDialog
+import com.lvyoubao.app.ui.common.rememberCardShareState
 import com.lvyoubao.app.ui.map.RouteMapCard
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import com.lvyoubao.app.ui.update.UpdateReadyDialog
@@ -757,6 +758,8 @@ private fun LargeTextAssistantCard(
     savedMemory: Boolean,
     onToggleMemory: () -> Unit,
 ) {
+    // 分享：卡片图生成/微信/相册/权限，统一在 CardShareUi 收口
+    val shareState = rememberCardShareState(message)
     ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         // 文字整体可长按选中、自由复制（按钮不受影响）
         androidx.compose.foundation.text.selection.SelectionContainer {
@@ -794,24 +797,30 @@ private fun LargeTextAssistantCard(
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
             ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 再读一遍", fontSize = 17.sp, maxLines = 1) }
-            // 收藏切换：已收藏时文字变色加勾，再点恢复并取消收藏
+            // 收藏切换：已收藏换浅橙底深棕字（大字模式青底绿字看不清），再点恢复青底白字「收藏」
             Button(
                 onClick = onToggleMemory,
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
+                colors = if (savedMemory) {
+                    ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                } else {
+                    ButtonDefaults.buttonColors()
+                },
             ) {
-                if (savedMemory) {
-                    Text("✔ ", fontSize = 17.sp, color = MaterialTheme.colorScheme.tertiary)
-                }
-                Text(
-                    if (savedMemory) "已收藏" else "收藏",
-                    fontSize = 17.sp,
-                    color = if (savedMemory) MaterialTheme.colorScheme.tertiary else Color.Unspecified,
-                    maxLines = 1,
-                )
+                Text(if (savedMemory) "✔ 已收藏" else "收藏", fontSize = 17.sp, maxLines = 1)
             }
+            Button(
+                onClick = { shareState.open() },
+                modifier = Modifier.height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+            ) { Text("分享", fontSize = 17.sp, maxLines = 1) }
         }
     }
+    CardShareDialog(shareState)
 }
 
 /** 生成中的回答：实时流式正文，超大字，可选中复制 */
