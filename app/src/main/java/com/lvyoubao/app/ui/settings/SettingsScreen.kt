@@ -107,6 +107,7 @@ fun SettingsScreen(
     }
     var themeDialog by remember { mutableStateOf(false) }
     var styleDialog by remember { mutableStateOf(false) }
+    var asrSendDialog by remember { mutableStateOf(false) }
     var showVoiceFix by remember { mutableStateOf(false) }
     // 纠正记录条数：打开/关闭管理页时刷新（页内删除后回来数字要变）
     val fixCount = remember(showVoiceFix) {
@@ -634,10 +635,22 @@ fun SettingsScreen(
             }
         }
 
-        // ---------- 语音纠错 ----------
-        SectionLabel("语音纠错")
+        // ---------- 语音输入 ----------
+        SectionLabel("语音输入")
         ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
             Column(Modifier.padding(vertical = 4.dp)) {
+                SettingRow(
+                    title = "语音后自动发送",
+                    value = when (state.draft.asrAutoSendSeconds) {
+                        0 -> "立即"
+                        1 -> "1 秒"
+                        3 -> "3 秒"
+                        5 -> "5 秒"
+                        else -> "关"
+                    },
+                    onClick = { asrSendDialog = true },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                 SettingRow(
                     title = "纠正记录",
                     value = if (fixCount > 0) "$fixCount 条" else "还没有",
@@ -845,6 +858,55 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { styleDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (asrSendDialog) {
+        AlertDialog(
+            onDismissRequest = { asrSendDialog = false },
+            title = { Text("语音后自动发送") },
+            text = {
+                Column {
+                    Text(
+                        "按住说话松手、识别（含智能纠错）完成后，等一会儿自动把这条发出去。" +
+                            "点一下输入框、再次按住说话或手动编辑都会取消。想连说几段再发，选 3 秒或 5 秒。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    listOf(
+                        -1 to "关 · 识别完停在输入框，自己点发送（默认）",
+                        0 to "立即 · 识别完马上发送",
+                        1 to "1 秒后发送",
+                        3 to "3 秒后发送",
+                        5 to "5 秒后发送",
+                    ).forEach { (value, label) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { vm.updateDraft { it.copy(asrAutoSendSeconds = value) } }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = state.draft.asrAutoSendSeconds == value,
+                                onClick = { vm.updateDraft { it.copy(asrAutoSendSeconds = value) } },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(label)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    vm.save(onSaved = {})
+                    asrSendDialog = false
+                }) { Text("确认") }
+            },
+            dismissButton = {
+                TextButton(onClick = { asrSendDialog = false }) { Text("取消") }
             },
         )
     }

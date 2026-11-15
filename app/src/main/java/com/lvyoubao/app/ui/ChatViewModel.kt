@@ -35,6 +35,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -55,6 +57,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     private val sessions = app.sessionStore
     private val memory = app.memoryStore
     private val noteStore = app.noteStore
+    // 语音自动发送用应用级 Context 调 send（定位/工具/存储都用得着，不需要 Activity）
+    private val appContext: Context = app.applicationContext
 
     init {
         // 纠错飞轮：加载用户纠正记录（语音稿 vs 用户实际发送的差异对），AI 纠错时注入提示词
@@ -119,7 +123,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
-    fun updateQuestion(value: String) = _ui.update { it.copy(question = value) }
+    fun updateQuestion(value: String) {
+        // 手动改动草稿（打字/清掉重写）就别再自动发了——用户显然想自己控制
+        cancelAutoSend()
+        _ui.update { it.copy(question = value) }
+    }
 
     /**
      * 按住说话的多段累积：松手一次就往草稿里追加一段，想分几句说都行，
@@ -147,7 +155,57 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         appendQuestion(HotwordCorrector.correct(text))
         // 记下「语音稿版本」：用户发送前若手动改过，发送稿与它的差异就是识别错在哪（纠错飞轮）
         lastVoiceText = _ui.value.question
-        if (polish) polishDraftWithAi()
+        if (polish) {
+            polishDraftWithAi()
+            // 识别落定后按设置倒计时自动发送（设置：关/立即/1/3/5 秒）；
+            // 连说几段时每段松手都会重新调度，上一次倒计时作废，最后一段说完才开始数
+            scheduleAutoSendAfterVoice()
+        }
+    }
+
+    // ---------- 语音识别后自动发送（设置 asrAutoSendSeconds：-1 关 /0 立即 /1/3/5 秒） ----------
+    // 取消路径：点输入框（聚焦）、手动编辑草稿、清空、再次按住说话、手动/自动发送本身。
+
+    private var autoSendJob: Job? = null
+
+    /** 倒计时剩余秒数；null=没在倒计时（界面显示「N 秒后自动发送」） */
+    private val _autoSendCountdown = MutableStateFlow<Int?>(null)
+    val autoSendCountdown: StateFlow<Int?> = _autoSendCountdown.asStateFlow()
+
+    /** 取消自动发送：任何用户介入（点输入框/打字/再按住/清空/手动发送）都走这里 */
+    fun cancelAutoSend() {
+        autoSendJob?.cancel()
+        autoSendJob = null
+        _autoSendCountdown.value = null
+    }
+
+    /**
+     * 每段语音落定后（重新）调度：先等 AI 纠错结束（纠错中发送本来就禁用，最多等 10 秒兜底），
+     * 再按设置倒数。倒计时里再来一段语音/用户点输入框，job 被取消重来。
+     */
+    private fun scheduleAutoSendAfterVoice() {
+        autoSendJob?.cancel()
+        autoSendJob = viewModelScope.launch {
+            val delaySec = repo.settings.firstOrNull()?.asrAutoSendSeconds ?: -1
+            if (delaySec < 0) return@launch   // 关闭（默认）：什么都不做
+            var waited = 0
+            // polishInFlight 在纠错协程启动那一刻就同步置位（viewModelScope 是 Main.immediate），
+            // 只看 polishing 会漏掉「纠错刚起步还没来得及标 polishing」的窗口
+            while ((polishInFlight.get() || _ui.value.polishing) && waited < 10_000) {
+                delay(200)
+                waited += 200
+            }
+            if (polishInFlight.get() || _ui.value.polishing) return@launch   // 纠错卡了 10 秒（极端网络），放弃自动发送
+            if (delaySec > 0) {
+                for (i in delaySec downTo 1) {
+                    _autoSendCountdown.value = i
+                    delay(1_000)
+                }
+            }
+            _autoSendCountdown.value = null
+            autoSendJob = null
+            send(appContext)
+        }
     }
 
     private val polishInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -249,6 +307,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     /** 清空草稿（语音/拍照重新开始） */
     fun clearQuestion() {
+        cancelAutoSend()
         lastVoiceText = null
         _ui.update { it.copy(question = "") }
     }
@@ -314,6 +373,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     fun send(context: Context) {
+        // 发送即停倒计时（自动发送路径到这里时 job 已自己置空，不会误杀正在执行的协程）
+        autoSendJob?.cancel()
+        autoSendJob = null
+        _autoSendCountdown.value = null
         val state = _ui.value
         val question = state.question.trim()
         // 纠错中禁发：发出去的就是没改对的稿子；等改完回填或 8 秒超时放行

@@ -80,6 +80,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -144,6 +145,7 @@ fun AskScreen(
     val sessionList by vm.sessionList.collectAsState()
     val currentSessionId by vm.currentSessionId.collectAsState()
     val savedEvidenceTitles by vm.savedEvidenceTitles.collectAsState()
+    val autoSendIn by vm.autoSendCountdown.collectAsState()
     val context = LocalContext.current
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
@@ -219,6 +221,8 @@ fun AskScreen(
 
     fun startVoice() {
         if (listening || recording != null) return
+        // 再说话=上一段的自动发送倒计时作废，说完这段重新算
+        vm.cancelAutoSend()
         if (settings.asrKey.isNotBlank()) {
             // 配了大模型 Key 就走云端转文字：不依赖手机自带识别（很多 ROM 缺失或常年报忙）
             if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
@@ -650,6 +654,15 @@ fun AskScreen(
                             modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
                         )
                     }
+                    // 语音自动发送倒计时（设置里开启后才出现）：点输入框/再说话/手动编辑都会取消
+                    autoSendIn?.let { sec ->
+                        Text(
+                            "⏳ $sec 秒后自动发送，点一下输入框可取消",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
+                        )
+                    }
                     val draftValue = rememberDraftValue(state.question)
                     OutlinedTextField(
                         value = draftValue.value,
@@ -657,7 +670,10 @@ fun AskScreen(
                             draftValue.value = it
                             vm.updateQuestion(it.text)
                         },
-                        modifier = Modifier.fillMaxWidth(),
+                        // 点输入框（获得焦点）= 用户要自己接管，取消语音自动发送
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { if (it.isFocused) vm.cancelAutoSend() },
                         placeholder = {
                             Text(
                                 if (recording != null) "正在听你说…" else "发消息，或说说你想去哪…",

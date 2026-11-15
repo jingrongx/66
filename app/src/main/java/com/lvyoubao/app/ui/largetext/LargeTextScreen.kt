@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -30,6 +32,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -119,6 +122,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     val streamState by vm.stream.collectAsState()
     val messages by vm.messages.collectAsState()
     val settings by vm.settings.collectAsState()
+    val autoSendIn by vm.autoSendCountdown.collectAsState()
     val sessionList by vm.sessionList.collectAsState()
     val currentSessionId by vm.currentSessionId.collectAsState()
     val savedEvidenceTitles by vm.savedEvidenceTitles.collectAsState()
@@ -181,6 +185,8 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     /** 按下：开始录音（配了转写 Key 走录音+云端转字；没有就用系统识别点一下说） */
     fun startHoldTalk() {
         if (recording != null || listening) return
+        // 再按住说话=上一段的自动发送倒计时作废，说完这段重新算
+        vm.cancelAutoSend()
         if (settings.asrKey.isNotBlank()) {
             if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
             else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -301,9 +307,18 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing),
+            .background(MaterialTheme.colorScheme.background),
     ) {
-        // ---------- 头部：标题 + 设置 + 退出 ----------
+        // ---------- 顶部操作带：浅青灰底 + 圆角下缘 + 投影，把「操作」和「会话」隔成两个房间 ----------
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .shadow(elevation = 10.dp, shape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
+            shape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+        ) {
+        Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
+        // 头部：标题 + 设置 + 退出
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -317,7 +332,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 modifier = Modifier.weight(1f),
             )
             // 设置：家人帮着配的地方（AI、大字模式开关都在设置里），全屏盖在大字模式上
-            // 次级动作一律浅色（浅青底深字），深青实心只留给「按住说话/发送」主操作——全屏不再满眼深青色块
+            // 顶部导航一律白底深字（浅蓝只留给用户气泡，深青只留给按住说话/发送）
             Button(
                 onClick = {
                     keyboard?.hide()
@@ -326,8 +341,8 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
                 contentPadding = PaddingValues(horizontal = 14.dp),
             ) { Text("设置", fontSize = 17.sp, maxLines = 1) }
@@ -344,7 +359,7 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 contentPadding = PaddingValues(horizontal = 14.dp),
             ) { Text("退出", fontSize = 17.sp, maxLines = 1) }
         }
-        // 第二行：三个大导航按钮（新对话 / 历史 / 语音通话）——浅青底深字，与底部深青主操作拉开层级
+        // 第二行：三个大导航按钮（新对话 / 历史 / 语音通话）——白底深字浮在浅青灰操作带上
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -356,8 +371,8 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
                 contentPadding = PaddingValues(horizontal = 6.dp),
             ) { Text("新对话", fontSize = 17.sp, maxLines = 1) }
@@ -366,8 +381,8 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
                 contentPadding = PaddingValues(horizontal = 6.dp),
             ) { Text("历史对话", fontSize = 17.sp, maxLines = 1) }
@@ -376,11 +391,13 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
                 contentPadding = PaddingValues(horizontal = 6.dp),
             ) { Text("通话", fontSize = 17.sp, maxLines = 1) }
+        }
+        }
         }
 
         // ---------- 会话流：整个对话从头到尾 ----------
@@ -463,10 +480,11 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
         }
 
         // ---------- 底部操作区：固定在下方，独立滚动区域，永远不会被卡片盖住。
-        // 浅青灰底与内容区（浅青白背景+白卡片）明确分层，一眼分清「上面是回答、下面是操作」 ----------
+        // 浅青灰底与顶部操作带同色呼应——上下两条「操作带」夹着中间的会话区 ----------
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars)
                 .shadow(elevation = 14.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
             shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
@@ -515,6 +533,17 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                         modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
                     )
                 }
+                // 语音自动发送倒计时（设置里开启后才出现）：点输入框/再按住说话/手动编辑都会取消
+                autoSendIn?.let { sec ->
+                    Text(
+                        "⏳ $sec 秒后自动发送，点一下输入框可取消",
+                        fontSize = 16.sp,
+                        lineHeight = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+                    )
+                }
                 // 草稿输入框：语音按段累积进这里，也可以直接打字。
                 // 光标交给 TextFieldValue 托管：语音从外面追加文字时把光标放到末尾，
                 // 不然识别结果停在原光标处，看着像「跑到最前面」
@@ -525,7 +554,10 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                         draftValue.value = it
                         vm.updateQuestion(it.text)
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    // 点输入框（获得焦点）= 用户要自己接管，取消语音自动发送
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { if (it.isFocused) vm.cancelAutoSend() },
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = MaterialTheme.colorScheme.surface,
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface,

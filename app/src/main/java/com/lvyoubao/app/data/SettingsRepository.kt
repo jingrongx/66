@@ -3,6 +3,7 @@ package com.lvyoubao.app.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -33,6 +34,7 @@ class SettingsRepository(private val context: Context) {
         val mapMirrorUrl = stringPreferencesKey("map_mirror_url")
         val deviceName = stringPreferencesKey("device_name")
         val dialectMode = booleanPreferencesKey("dialect_mode")
+        val asrAutoSendSeconds = intPreferencesKey("asr_auto_send_seconds")
         // 存储键沿用旧名 elder_mode：应用内叫法已改「大字模式」，但用户已保存的开关不丢
         val largeTextMode = booleanPreferencesKey("elder_mode")
         val homeAddress = stringPreferencesKey("home_address")
@@ -57,6 +59,7 @@ class SettingsRepository(private val context: Context) {
             mapMirrorUrl = p[Keys.mapMirrorUrl] ?: "",
             deviceName = p[Keys.deviceName] ?: "",
             dialectMode = p[Keys.dialectMode] ?: false,
+            asrAutoSendSeconds = p[Keys.asrAutoSendSeconds] ?: defaults.asrAutoSendSeconds,
             largeTextMode = p[Keys.largeTextMode] ?: false,
             homeAddress = p[Keys.homeAddress] ?: "",
             autoSpeak = p[Keys.autoSpeak] ?: false,
@@ -83,6 +86,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.mapMirrorUrl] = settings.mapMirrorUrl
             p[Keys.deviceName] = settings.deviceName
             p[Keys.dialectMode] = settings.dialectMode
+            p[Keys.asrAutoSendSeconds] = settings.asrAutoSendSeconds
             p[Keys.largeTextMode] = settings.largeTextMode
             p[Keys.homeAddress] = settings.homeAddress
             p[Keys.autoSpeak] = settings.autoSpeak
