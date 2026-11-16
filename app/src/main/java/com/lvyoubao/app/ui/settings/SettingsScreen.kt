@@ -632,6 +632,31 @@ fun SettingsScreen(
                         },
                     )
                 }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("灵动屏模式", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "小屏/手表适配 · 极简萌眼 · 点击唤醒 · 双击按需视觉识图",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.sparkMode,
+                        onCheckedChange = { checked ->
+                            vm.updateDraft {
+                                it.copy(sparkMode = checked)
+                            }
+                            vm.save(onSaved = {})
+                        },
+                    )
+                }
             }
         }
 

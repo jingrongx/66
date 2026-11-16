@@ -19,6 +19,7 @@ data class AiSettings(
     val dialectMode: Boolean = false, // 方言口音识别：赣语抚州话等本地说法（TeleSpeech-ASR 免费模型）
     val asrAutoSendSeconds: Int = -1, // 语音识别后自动发送：-1 关（默认）/0 立即/1/3/5 秒；点输入框、再次按住说话或手动编辑即取消
     val largeTextMode: Boolean = false, // 大字模式：打开则启动直接进大字模式，关闭则进普通模式
+    val sparkMode: Boolean = false, // 灵动屏模式：专为手表/小屏打造，极简可爱双眼，唤醒即对话，按需视觉识别
     val homeAddress: String = "",     // 常用地址（家）：问「回家的路」直接导航回家，不用每次问地址
     val autoSpeak: Boolean = false,   // 顶部开关：新回答自动朗读
     val savedProviders: Map<String, ProviderCredentials> = emptyMap(), // 每个供应商各自记住的接口配置，切换时恢复自己的，互不带Key

@@ -37,6 +37,7 @@ class SettingsRepository(private val context: Context) {
         val asrAutoSendSeconds = intPreferencesKey("asr_auto_send_seconds")
         // 存储键沿用旧名 elder_mode：应用内叫法已改「大字模式」，但用户已保存的开关不丢
         val largeTextMode = booleanPreferencesKey("elder_mode")
+        val sparkMode = booleanPreferencesKey("spark_mode")
         val homeAddress = stringPreferencesKey("home_address")
         val autoSpeak = booleanPreferencesKey("auto_speak")
         val savedProviders = stringPreferencesKey("saved_providers")
@@ -61,6 +62,7 @@ class SettingsRepository(private val context: Context) {
             dialectMode = p[Keys.dialectMode] ?: false,
             asrAutoSendSeconds = p[Keys.asrAutoSendSeconds] ?: defaults.asrAutoSendSeconds,
             largeTextMode = p[Keys.largeTextMode] ?: false,
+            sparkMode = p[Keys.sparkMode] ?: false,
             homeAddress = p[Keys.homeAddress] ?: "",
             autoSpeak = p[Keys.autoSpeak] ?: false,
             savedProviders = p[Keys.savedProviders]?.let { s ->
@@ -88,6 +90,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.dialectMode] = settings.dialectMode
             p[Keys.asrAutoSendSeconds] = settings.asrAutoSendSeconds
             p[Keys.largeTextMode] = settings.largeTextMode
+            p[Keys.sparkMode] = settings.sparkMode
             p[Keys.homeAddress] = settings.homeAddress
             p[Keys.autoSpeak] = settings.autoSpeak
             p[Keys.savedProviders] = providerJson.encodeToString(settings.savedProviders)
