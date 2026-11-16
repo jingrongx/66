@@ -110,6 +110,14 @@ fun SparkModeScreen(
         }
     }
 
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            vm.handlePickedImage(context, uri)
+        }
+    }
+
     // 返回键退出灵动屏模式回到普通界面
     BackHandler {
         vm.exitSparkMode(onExit)
@@ -225,19 +233,19 @@ fun SparkModeScreen(
             }
         }
 
-        // ---------- 底部操作区（高度 ~42dp）：相机按钮 + 按住说话大按钮 ----------
+        // ---------- 底部操作区（高度 ~42dp）：相机按钮 + 相册按钮 + 按住说话大按钮 ----------
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(44.dp)
                 .padding(horizontal = 8.dp, vertical = 3.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // 📷 拍照提问按钮
             Box(
                 modifier = Modifier
-                    .size(width = 46.dp, height = 38.dp)
+                    .size(width = 38.dp, height = 38.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(MaterialTheme.colorScheme.secondaryContainer)
                     .clickable {
@@ -249,7 +257,25 @@ fun SparkModeScreen(
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                Text("📷", fontSize = 20.sp)
+                Text("📷", fontSize = 18.sp)
+            }
+
+            // 🖼️ 相册选图提问按钮
+            Box(
+                modifier = Modifier
+                    .size(width = 38.dp, height = 38.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .clickable {
+                        galleryLauncher.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                ActivityResultContracts.PickVisualMedia.ImageOnly,
+                            ),
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("🖼", fontSize = 18.sp)
             }
 
             // 🎙️ 按住说话按钮（操作逻辑同常规/大字模式：按住即录，松手即发，按住时显示萌眼）

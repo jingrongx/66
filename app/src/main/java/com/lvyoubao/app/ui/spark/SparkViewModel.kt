@@ -239,6 +239,56 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /**
+     * 选择相册图片识别：
+     * 读取 Uri 解码 Bitmap 供界面展示 -> 切换为会话框 -> 提交 DeepSeek 视觉解析
+     */
+    fun handlePickedImage(context: Context, uri: android.net.Uri) {
+        TtsPlayer.stop()
+        _statusHint.value = "正在读取相册…"
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolver = context.contentResolver
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+
+            var sample = 1
+            while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) {
+                sample *= 2
+            }
+
+            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            val bitmap = resolver.openInputStream(uri)?.use {
+                android.graphics.BitmapFactory.decodeStream(it, null, opts)
+            }
+
+            if (bitmap == null) {
+                _statusHint.value = "图片读取失败"
+                return@launch
+            }
+
+            val out = java.io.ByteArrayOutputStream()
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, out)
+            val bytes = out.toByteArray()
+            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            val dataUrl = "data:image/jpeg;base64,$base64"
+
+            _lastCapturedBitmap.value = bitmap
+            _userQuestion.value = "🖼 请帮我看看这张相册照片，简要说明是什么。"
+            _aiAnswer.value = "小源正在观察相册图片…"
+            _showEyes.value = false // 切换为会话框
+
+            _eyeState.value = SparkEyeState.THINKING
+            _statusHint.value = "小源正在观察…"
+
+            sendAiRequest(
+                context = context,
+                userText = "请结合这张选自相册的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
+                imageDataUrls = listOf(dataUrl),
+            )
+        }
+    }
+
     private fun sendAiRequest(
         context: Context,
         userText: String,
