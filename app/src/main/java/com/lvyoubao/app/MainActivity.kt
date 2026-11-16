@@ -71,7 +71,8 @@ class MainActivity : ComponentActivity() {
                             appSettings.sparkMode -> {
                                 com.lvyoubao.app.ui.spark.SparkModeScreen(
                                     app = app,
-                                    onExit = {},
+                                    // 退出 = 退出应用（对齐大字模式）；模式切换只认设置页开关
+                                    onExitApp = { finishAffinity() },
                                 )
                             }
                             appSettings.largeTextMode -> {

@@ -395,17 +395,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         return all.takeLast(count)
     }
 
-    fun exitSparkMode(onExit: () -> Unit) {
+    /**
+     * 退出灵动屏 = 退出应用（对齐大字模式）：
+     * 模式切换只认设置页开关，这里只做收尾（停朗读、停录音），退出交给调用方 finishAffinity
+     */
+    fun exitApp() {
         TtsPlayer.stop()
         activeRecording?.let {
             SpeechInput.cancelRecording(it)
             activeRecording = null
-        }
-        viewModelScope.launch {
-            // 从仓库读实时配置再落盘，绝不回写 settings.value（防把未加载/过期值覆盖整库）
-            val cur = repo.settings.firstOrNull() ?: settings.value
-            repo.save(cur.copy(sparkMode = false))
-            onExit()
         }
     }
 

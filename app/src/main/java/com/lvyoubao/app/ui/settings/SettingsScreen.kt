@@ -625,8 +625,13 @@ fun SettingsScreen(
                         checked = state.draft.largeTextMode,
                         onCheckedChange = { checked ->
                             // 打开时联动打开自动播报（语音优先）；关闭不动自动播报，尊重用户特意关过的选择
+                            // 模式互斥：大字模式与灵动屏只能开一个，开的顺手关掉另一个（模式切换只认设置页）
                             vm.updateDraft {
-                                it.copy(largeTextMode = checked, autoSpeak = if (checked) true else it.autoSpeak)
+                                it.copy(
+                                    largeTextMode = checked,
+                                    autoSpeak = if (checked) true else it.autoSpeak,
+                                    sparkMode = if (checked) false else it.sparkMode,
+                                )
                             }
                             vm.save(onSaved = {})
                         },
@@ -650,8 +655,9 @@ fun SettingsScreen(
                     androidx.compose.material3.Switch(
                         checked = state.draft.sparkMode,
                         onCheckedChange = { checked ->
+                            // 模式互斥：灵动屏与大字模式只能开一个，开的顺手关掉另一个（模式切换只认设置页）
                             vm.updateDraft {
-                                it.copy(sparkMode = checked)
+                                it.copy(sparkMode = checked, largeTextMode = if (checked) false else it.largeTextMode)
                             }
                             vm.save(onSaved = {})
                         },

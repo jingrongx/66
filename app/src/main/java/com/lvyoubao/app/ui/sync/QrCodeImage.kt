@@ -38,18 +38,21 @@ private fun generateQrBitmap(content: String, px: Int): Bitmap {
     }
 }
 
-/** 二维码展示组件：白底圆角卡片内嵌码图 */
+/** 二维码展示组件：白底圆角卡片内嵌码图；小屏放不下默认尺寸时按可用宽度等比缩小 */
 @Composable
 fun QrCodeImage(content: String, size: Dp = 260.dp, modifier: Modifier = Modifier) {
     val bitmap = remember(content) { generateQrBitmap(content, 620) }
-    Image(
-        bitmap = bitmap.asImageBitmap(),
-        contentDescription = "同步二维码",
-        contentScale = ContentScale.FillWidth,
-        modifier = modifier
-            .size(size + 12.dp)
-            .background(Color.White, RoundedCornerShape(16.dp))
-            .padding(6.dp)
-            .size(size),
-    )
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
+        val effective = minOf(size, maxWidth - 24.dp).coerceAtLeast(120.dp)
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "同步二维码",
+            contentScale = ContentScale.FillWidth,
+            modifier = Modifier
+                .size(effective + 12.dp)
+                .background(Color.White, RoundedCornerShape(16.dp))
+                .padding(6.dp)
+                .size(effective),
+        )
+    }
 }

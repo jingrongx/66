@@ -49,7 +49,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -73,12 +75,13 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.ui.settings.SettingsScreen
 import kotlinx.coroutines.delay
 
 @Composable
 fun SparkModeScreen(
     app: TravelApp,
-    onExit: () -> Unit,
+    onExitApp: () -> Unit,
 ) {
     val context = LocalContext.current
     val vm: SparkViewModel = viewModel(
@@ -93,6 +96,15 @@ fun SparkModeScreen(
     val userQuestion by vm.userQuestion.collectAsState()
     val aiAnswer by vm.aiAnswer.collectAsState()
     val statusHint by vm.statusHint.collectAsState()
+
+    // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
+    var showSettings by remember { mutableStateOf(false) }
+
+    // 退出 = 退出应用（对齐大字模式：停朗读停录音后 finishAffinity）
+    val exitApp = {
+        vm.exitApp()
+        onExitApp()
+    }
 
     val recordPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -122,9 +134,9 @@ fun SparkModeScreen(
         }
     }
 
-    // 返回键退出灵动屏模式回到普通界面
+    // 返回键 = 退出应用（模式切换只认设置页开关）
     BackHandler {
-        vm.exitSparkMode(onExit)
+        exitApp()
     }
 
     BoxWithConstraints(
@@ -171,14 +183,14 @@ fun SparkModeScreen(
                         else -> "会话内容"
                     },
                     color = Color.White.copy(alpha = 0.85f),
-                    fontSize = (11 * scale).sp,
-                    fontWeight = FontWeight.Medium,
+                    fontSize = (13 * scale).sp,
+                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
 
-            // 右侧操作：切换视图 + 显眼退出按钮
+            // 右侧操作：切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // 切换眼睛 / 会话文字
                 Box(
@@ -192,25 +204,45 @@ fun SparkModeScreen(
                     Text(
                         text = if (showEyes) "看文字" else "看眼睛",
                         color = Color.White.copy(alpha = 0.9f),
-                        fontSize = (10 * scale).sp,
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Bold,
                     )
                 }
 
                 Spacer(Modifier.width((6 * scale).dp))
 
-                // 显眼的退出按钮
+                // 设置：进设置页（大字/灵动屏开关在这里，互斥）
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape((8 * scale).dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable { vm.exitSparkMode(onExit) }
+                        .background(Color.White.copy(alpha = 0.12f))
+                        .clickable { showSettings = true }
+                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "设置",
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+
+                Spacer(Modifier.width((6 * scale).dp))
+
+                // 退出：红色，直接退出应用回桌面（参考大字模式，模式切换只认设置页开关）
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape((8 * scale).dp))
+                        .background(MaterialTheme.colorScheme.error)
+                        .clickable { exitApp() }
                         .padding(horizontal = (10 * scale).dp, vertical = (4 * scale).dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "‹ 退出",
+                        text = "退出",
                         color = Color.White,
-                        fontSize = (11 * scale).sp,
+                        fontSize = (13 * scale).sp,
                         fontWeight = FontWeight.Bold,
                     )
                 }
@@ -325,12 +357,21 @@ fun SparkModeScreen(
             ) {
                 Text(
                     text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
-                    fontSize = (15 * scale).sp,
+                    fontSize = (16 * scale).sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,
                 )
             }
         }
+        }
+
+        // ---------- 设置页覆盖层：右上角「设置」进入；大字/灵动屏开关互斥，退出灵动屏只认这里 ----------
+        if (showSettings) {
+            SettingsScreen(
+                onClose = { showSettings = false },
+                onOpenUpdate = {},
+                app = app,
+            )
         }
     }
 }
@@ -390,7 +431,8 @@ private fun ConversationCard(
                     Text(
                         text = "已拍摄画面",
                         color = Color.White.copy(alpha = 0.6f),
-                        fontSize = (11 * scale).sp,
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Bold,
                     )
                 }
                 Spacer(Modifier.height((6 * scale).dp))
@@ -401,8 +443,8 @@ private fun ConversationCard(
                 Text(
                     text = "问：$userQuestion",
                     color = Color(0xFF80D8FF),
-                    fontSize = (12 * scale).sp,
-                    fontWeight = FontWeight.Medium,
+                    fontSize = (14 * scale).sp,
+                    fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.height((4 * scale).dp))
             }
@@ -411,8 +453,9 @@ private fun ConversationCard(
             Text(
                 text = aiAnswer.takeUnless { it.isNullOrBlank() } ?: "小源思考中…",
                 color = Color.White,
-                fontSize = (14 * scale).sp,
-                lineHeight = (20 * scale).sp,
+                fontSize = (15 * scale).sp,
+                lineHeight = (21 * scale).sp,
+                fontWeight = FontWeight.Bold,
             )
         }
     }
