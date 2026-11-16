@@ -126,6 +126,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     fun updateQuestion(value: String) {
         // 手动改动草稿（打字/清掉重写）就别再自动发了——用户显然想自己控制
         cancelAutoSend()
+        userEverEditedQuestion = true
         _ui.update { it.copy(question = value) }
     }
 
@@ -152,6 +153,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
      * 或已发送则不覆盖，绝不抢用户的编辑。
      */
     fun appendVoiceTranscript(text: String, polish: Boolean = true) {
+        userEverEditedQuestion = false
         appendQuestion(HotwordCorrector.correct(text))
         // 记下「语音稿版本」：用户发送前若手动改过，发送稿与它的差异就是识别错在哪（纠错飞轮）
         lastVoiceText = _ui.value.question
@@ -212,6 +214,8 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     /** 语音稿版本（本地热词纠完、AI 未动时的整段草稿）：发送时与用户认可稿对比，喂纠错飞轮 */
     private var lastVoiceText: String? = null
+    /** 用户是否在语音识别之后亲自手动编辑过草稿（只有用户亲手改的才被视为黄金样本存入纠错飞轮） */
+    private var userEverEditedQuestion = false
 
     /**
      * AI 智能纠错：结合最近对话与记忆画像修语音稿的识别错误（同音字、数字混写、断句粘连）。
@@ -240,6 +244,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     }
                     .orEmpty()
                 val facts = memory.profileFacts().take(8).joinToString("；")
+                val isDialect = settingsValue.dialectMode
                 val prompt = buildString {
                     appendLine("【最近对话】（专有名词写法的参考来源）")
                     appendLine(recent.ifBlank { "（无）" })
@@ -249,16 +254,23 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                         appendLine()
                         append(learned)
                     }
+                    if (isDialect) {
+                        appendLine()
+                        appendLine("【特别说明】用户开启了方言口音识别（TeleSpeech-ASR），语音稿可能包含方言口音发音偏差或方言通假字；允许修正明显的发音错别字，但严禁根据上下文无端篡改提问主题！")
+                    }
                     appendLine()
                     appendLine("【刚识别出的语音稿】$draft")
                     append(
-                        "任务：语音识别纠错。只把语音稿里明显的识别错误改掉：同音错字、数字混写" +
-                            "（如「酒石」被识别成「90」）、粘连断句、多余标点；专有名词（地名/药名/人名/景点）" +
-                            "优先采用最近对话里出现过的写法。\n" +
-                            "铁律：1.只输出纠正后的语音稿原文，一个字都不能多、一个字都不能少；" +
-                            "2.绝不回答问题、绝不补充任何内容、绝不解释；" +
-                            "3.拿不准的一律保持原样（宁可不改，不可改错）；" +
-                            "4.改动幅度必须很小（只动个别字词），长度基本不变。",
+                        "任务：语音识别纠错。只把语音稿里明显的识别错误改掉：同音错字、近音错字、数字混写" +
+                            "（如「90酸」改「酒石酸」）、粘连断句、多余标点；专有名词（地名/药名/人名/景点）" +
+                            "优先参考最近对话里出现的正确字形写法。\n" +
+                            "【铁律原则】\n" +
+                            "1.严禁语义篡改：你只是听觉纠错器，绝对不能顺着上下文话题脑补或改变用户的提问主旨！" +
+                            "严禁把原句里的词汇替换为上一轮对话中讨论的词汇（例如上一轮在讨论颜色，绝不能把本句涉及味道、酸甜的词改成颜色）；\n" +
+                            "2.只输出纠正后的语音稿原文，一个字都不能多、一个字都不能少；\n" +
+                            "3.绝不回答问题、绝不补充任何内容、绝不解释；\n" +
+                            "4.拿不准的一律保持原样（宁可不改，不可改错）；\n" +
+                            "5.改动幅度必须很小，且改动后的词在发音上必须与原稿高度相近（同音或近音）。",
                     )
                 }
                 val reply = try {
@@ -281,11 +293,19 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 }
                 val polished = reply?.trim()?.trimMatching('「', '」', '“', '”', '"') ?: return@launch
                 if (polished.isEmpty() || polished == draft) return@launch
-                // 机械护栏：改动必须是"小修"——长度基本一致、原文的词基本都还在
+                // 机械护栏 1：改动必须是"小修"——长度基本一致、原文的词基本都还在
                 val lengthOk = polished.length >= draft.length * 0.6 && polished.length <= draft.length * 1.4
                 val grams = draft.windowed(2).toSet()
                 val keptRatio = if (grams.isEmpty()) 1f else grams.count { polished.contains(it) } * 1f / grams.size
                 if (!lengthOk || keptRatio < 0.5) return@launch
+                // 机械护栏 2（声学拼音护栏）：纠错前后的模糊拼音相似度必须达标；
+                // 普通话模式下严格执行 ≥75%，坚决拦截「酸奶也有甜」篡改为「红的也有白的」这类发音完全无关的语义漂移；
+                // 方言口音模式（TeleSpeech）下自适应调整至 ≥70%，既为方言特有音系保留容错空间，又守住语义不被颠覆的底线
+                val phoneticThreshold = if (isDialect) 0.70f else 0.75f
+                if (!com.lvyoubao.app.data.PhoneticGuard.isPhoneticallyPlausible(draft, polished, threshold = phoneticThreshold)) {
+                    android.util.Log.w("lvyoubao.ai", "AI 智能纠错被拼音护栏否决：原稿「$draft」 vs 纠错稿「$polished」（方言模式=$isDialect, 阈值=$phoneticThreshold）")
+                    return@launch
+                }
                 // 用户没动过输入框、也还没发送才回填；动过就尊重用户的版本
                 if (_ui.value.question == draft && !_ui.value.sending) {
                     _ui.update { it.copy(question = polished) }
@@ -308,6 +328,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     /** 清空草稿（语音/拍照重新开始） */
     fun clearQuestion() {
         cancelAutoSend()
+        userEverEditedQuestion = false
         lastVoiceText = null
         _ui.update { it.copy(question = "") }
     }
@@ -382,11 +403,14 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         // 纠错中禁发：发出去的就是没改对的稿子；等改完回填或 8 秒超时放行
         if ((question.isBlank() && state.attachments.isEmpty()) || state.sending || state.polishing) return
 
-        // 纠错飞轮：语音稿版本 vs 用户认可发送稿——差异就是识别错在哪，成对记下来，
-        // 下次 AI 纠错时注入提示词直接照改；用户没改（语音稿=发送稿）不记
+        // 纠错飞轮：语音稿版本 vs 用户【亲自手动修改认可】的发送稿——
+        // 差异就是识别错在哪，成对记下来，下次 AI 纠错时注入提示词直接照改；
+        // 只有用户亲手改过的才记，如果是 AI 自动纠错回填或者用户没动过，绝不能记入飞轮，防止 AI 幻觉反向投毒！
         val voiceVersion = lastVoiceText
         lastVoiceText = null
-        if (voiceVersion != null && question.isNotBlank() && voiceVersion.trim() != question) {
+        val wasUserManualEdit = userEverEditedQuestion
+        userEverEditedQuestion = false
+        if (wasUserManualEdit && voiceVersion != null && question.isNotBlank() && voiceVersion.trim() != question) {
             runCatching { HotwordCorrector.learnFix(context, voiceVersion, question) }
         }
 

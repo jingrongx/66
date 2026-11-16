@@ -156,8 +156,20 @@ object SpeechInput {
         Recording(recorder, file)
     }
 
-    /** 停止录音并上传大模型转文字；成功返回识别文本。方言开关切换到方言口音模型 */
-    suspend fun stopAndTranscribe(recording: Recording, asrKey: String, dialect: Boolean = false): Result<String> {
+    /**
+     * 停止录音并上传大模型转文字；成功返回识别文本。方言开关切换到方言口音模型。
+     * postRollMs: 松手后延时毫秒数（默认 400ms）。用户往往刚吐完最后一个字就松手甚至发音未尽，
+     * 后台多录 400ms 留足尾音衰减包络再真正 stop，从源头上消灭句末吞字（如「呢/吗/酸的」）。
+     */
+    suspend fun stopAndTranscribe(
+        recording: Recording,
+        asrKey: String,
+        dialect: Boolean = false,
+        postRollMs: Long = 400L,
+    ): Result<String> {
+        if (postRollMs > 0) {
+            kotlinx.coroutines.delay(postRollMs)
+        }
         // stop() 抛错有两种情况：压根没录进去（文件极小）或到时长上限被自动停了（文件是好的），
         // 所以只看文件大小判断，别误伤长录音
         runCatching { recording.recorder.stop() }
