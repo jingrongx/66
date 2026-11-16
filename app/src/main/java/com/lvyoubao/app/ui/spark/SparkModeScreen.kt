@@ -25,15 +25,19 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -123,31 +127,42 @@ fun SparkModeScreen(
         vm.exitSparkMode(onExit)
     }
 
-    Column(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0D1117)), // 深邃科技黑底色
+            .background(Color(0xFF0D1117)) // 深邃科技黑底色（铺满含系统栏区域）
+            // 接管系统栏/刘海 insets：与普通/大字模式同口径，内容不再和
+            // 状态栏横幅、虚拟导航键、手势条重叠（手机横竖屏、手表均适配）
+            .windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
-        // ---------- 顶部状态与退出栏（高度 ~28dp，专为 308x240 小屏适配） ----------
+        // 布局按 308x240 手表小屏设计；在手机等大屏上以可用短边为基准等比放大，
+        // 保持与设计稿一致的构图与可点面积（小屏恒为 1，观感不变）
+        val scale = (minOf(maxWidth, maxHeight) / 240.dp).coerceIn(1f, 1.9f)
+
+        Column(modifier = Modifier.fillMaxSize()) {
+        // ---------- 顶部状态与退出栏（随屏幕等比放大，不挤不裁） ----------
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(30.dp)
-                .padding(horizontal = 8.dp, vertical = 2.dp),
+                .height((30 * scale).dp)
+                .padding(horizontal = (8 * scale).dp, vertical = (2 * scale).dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             // 左侧状态指示
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f),
+            ) {
                 Box(
                     modifier = Modifier
-                        .size(6.dp)
+                        .size((6 * scale).dp)
                         .background(
                             if (isRecording) Color(0xFFFF5252) else Color(0xFF00E5FF),
                             shape = CircleShape,
                         ),
                 )
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width((4 * scale).dp))
                 Text(
                     text = when {
                         isRecording -> "录音中 ${recordTick}s"
@@ -156,11 +171,10 @@ fun SparkModeScreen(
                         else -> "会话内容"
                     },
                     color = Color.White.copy(alpha = 0.85f),
-                    fontSize = 11.sp,
+                    fontSize = (11 * scale).sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.width(160.dp),
                 )
             }
 
@@ -169,34 +183,34 @@ fun SparkModeScreen(
                 // 切换眼睛 / 会话文字
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape((8 * scale).dp))
                         .background(Color.White.copy(alpha = 0.12f))
                         .clickable { vm.toggleShowEyes() }
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = if (showEyes) "看文字" else "看眼睛",
                         color = Color.White.copy(alpha = 0.9f),
-                        fontSize = 10.sp,
+                        fontSize = (10 * scale).sp,
                     )
                 }
 
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width((6 * scale).dp))
 
                 // 显眼的退出按钮
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape((8 * scale).dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .clickable { vm.exitSparkMode(onExit) }
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                        .padding(horizontal = (10 * scale).dp, vertical = (4 * scale).dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = "‹ 退出",
                         color = Color.White,
-                        fontSize = 11.sp,
+                        fontSize = (11 * scale).sp,
                         fontWeight = FontWeight.Bold,
                     )
                 }
@@ -208,7 +222,7 @@ fun SparkModeScreen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp),
+                .padding(horizontal = (8 * scale).dp),
             contentAlignment = Alignment.Center,
         ) {
             AnimatedContent(
@@ -220,6 +234,7 @@ fun SparkModeScreen(
                     // 眼睛动画展示
                     CuteEyesCanvas(
                         eyeState = eyeState,
+                        scale = scale,
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
@@ -228,26 +243,30 @@ fun SparkModeScreen(
                         photo = lastCapturedBitmap,
                         userQuestion = userQuestion,
                         aiAnswer = aiAnswer,
+                        scale = scale,
                     )
                 }
             }
         }
 
-        // ---------- 底部操作区（高度 ~42dp）：相机按钮 + 相册按钮 + 按住说话大按钮 ----------
+        // ---------- 底部操作区：相机 + 相册 + 按住说话 ----------
+        // 三颗按钮同高同圆角、随屏幕等比放大（手机上约 57dp 高，远超 48dp 可点下限），
+        // 侧按钮改半透明白与顶部胶囊同语言，主按钮保持品牌青色，视觉左轻右重层次分明
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(44.dp)
-                .padding(horizontal = 8.dp, vertical = 3.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                .height((46 * scale).dp)
+                .padding(horizontal = (8 * scale).dp, vertical = (3 * scale).dp),
+            horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // 📷 拍照提问按钮
             Box(
                 modifier = Modifier
-                    .size(width = 38.dp, height = 38.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .size((40 * scale).dp)
+                    .clip(RoundedCornerShape((12 * scale).dp))
+                    .background(Color.White.copy(alpha = 0.10f))
+                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape((12 * scale).dp))
                     .clickable {
                         if (CameraSnapshotHelper.hasCameraPermission(context)) {
                             vm.captureAndAnalyze(context)
@@ -257,15 +276,16 @@ fun SparkModeScreen(
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                Text("📷", fontSize = 18.sp)
+                Text("📷", fontSize = (20 * scale).sp)
             }
 
             // 🖼️ 相册选图提问按钮
             Box(
                 modifier = Modifier
-                    .size(width = 38.dp, height = 38.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .size((40 * scale).dp)
+                    .clip(RoundedCornerShape((12 * scale).dp))
+                    .background(Color.White.copy(alpha = 0.10f))
+                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape((12 * scale).dp))
                     .clickable {
                         galleryLauncher.launch(
                             androidx.activity.result.PickVisualMediaRequest(
@@ -275,15 +295,15 @@ fun SparkModeScreen(
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                Text("🖼", fontSize = 18.sp)
+                Text("🖼️", fontSize = (20 * scale).sp)
             }
 
             // 🎙️ 按住说话按钮（操作逻辑同常规/大字模式：按住即录，松手即发，按住时显示萌眼）
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .height(38.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .height((40 * scale).dp)
+                    .clip(RoundedCornerShape((12 * scale).dp))
                     .background(
                         if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary,
                     )
@@ -304,12 +324,13 @@ fun SparkModeScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = if (isRecording) "松手发送 (${recordTick}s)" else "按住说话",
-                    fontSize = 14.sp,
+                    text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
+                    fontSize = (15 * scale).sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,
                 )
             }
+        }
         }
     }
 }
@@ -325,6 +346,7 @@ private fun ConversationCard(
     photo: Bitmap?,
     userQuestion: String?,
     aiAnswer: String?,
+    scale: Float,
 ) {
     val scrollState = rememberScrollState()
 
@@ -335,13 +357,13 @@ private fun ConversationCard(
 
     Surface(
         modifier = Modifier.fillMaxSize(),
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape((12 * scale).dp),
         color = Color(0xFF161B22),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(8.dp)
+                .padding((8 * scale).dp)
                 .verticalScroll(scrollState),
         ) {
             // 拍摄的照片展示（直观看到摄像头抓拍的画面）
@@ -352,9 +374,9 @@ private fun ConversationCard(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(width = 72.dp, height = 54.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                            .size(width = (72 * scale).dp, height = (54 * scale).dp)
+                            .clip(RoundedCornerShape((6 * scale).dp))
+                            .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape((6 * scale).dp))
                             .background(Color.Black),
                     ) {
                         Image(
@@ -364,14 +386,14 @@ private fun ConversationCard(
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width((8 * scale).dp))
                     Text(
                         text = "已拍摄画面",
                         color = Color.White.copy(alpha = 0.6f),
-                        fontSize = 11.sp,
+                        fontSize = (11 * scale).sp,
                     )
                 }
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height((6 * scale).dp))
             }
 
             // 用户的问题
@@ -379,18 +401,18 @@ private fun ConversationCard(
                 Text(
                     text = "问：$userQuestion",
                     color = Color(0xFF80D8FF),
-                    fontSize = 12.sp,
+                    fontSize = (12 * scale).sp,
                     fontWeight = FontWeight.Medium,
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height((4 * scale).dp))
             }
 
             // AI 的回答
             Text(
                 text = aiAnswer.takeUnless { it.isNullOrBlank() } ?: "小源思考中…",
                 color = Color.White,
-                fontSize = 14.sp,
-                lineHeight = 20.sp,
+                fontSize = (14 * scale).sp,
+                lineHeight = (20 * scale).sp,
             )
         }
     }
@@ -402,6 +424,7 @@ private fun ConversationCard(
 @Composable
 private fun CuteEyesCanvas(
     eyeState: SparkEyeState,
+    scale: Float,
     modifier: Modifier = Modifier,
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "breath")
@@ -416,8 +439,8 @@ private fun CuteEyesCanvas(
     )
 
     val speakingBounce by infiniteTransition.animateFloat(
-        initialValue = -4f,
-        targetValue = 4f,
+        initialValue = -4f * scale,
+        targetValue = 4f * scale,
         animationSpec = infiniteRepeatable(
             animation = tween(280, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse,
@@ -471,9 +494,9 @@ private fun CuteEyesCanvas(
             SparkEyeState.IDLE -> Color(0xFF4EE2EC)
         }
 
-        val baseWidth = (size.width * 0.20f).coerceIn(44f, 75f)
-        val baseHeight = (size.height * 0.44f).coerceIn(55f, 90f)
-        val eyeSpacing = (size.width * 0.10f).coerceIn(20f, 38f)
+        val baseWidth = (size.width * 0.20f).coerceIn(44f * scale, 75f * scale)
+        val baseHeight = (size.height * 0.44f).coerceIn(55f * scale, 90f * scale)
+        val eyeSpacing = (size.width * 0.10f).coerceIn(20f * scale, 38f * scale)
 
         val dynamicScale = when (eyeState) {
             SparkEyeState.LISTENING -> 1.12f
@@ -490,11 +513,11 @@ private fun CuteEyesCanvas(
         val rightEyeCenter = Offset(cx + eyeSpacing + curWidth / 2f + lookOffsetX.value, cy + offsetY + lookOffsetY.value)
 
         if (eyeState == SparkEyeState.MUTED) {
-            drawSleepyEye(leftEyeCenter, curWidth)
-            drawSleepyEye(rightEyeCenter, curWidth)
+            drawSleepyEye(leftEyeCenter, curWidth, scale)
+            drawSleepyEye(rightEyeCenter, curWidth, scale)
         } else {
-            drawSingleEye(leftEyeCenter, curWidth, curHeight, eyeColor, eyeState)
-            drawSingleEye(rightEyeCenter, curWidth, curHeight, eyeColor, eyeState)
+            drawSingleEye(leftEyeCenter, curWidth, curHeight, eyeColor, eyeState, scale)
+            drawSingleEye(rightEyeCenter, curWidth, curHeight, eyeColor, eyeState, scale)
         }
     }
 }
@@ -505,6 +528,7 @@ private fun DrawScope.drawSingleEye(
     height: Float,
     color: Color,
     state: SparkEyeState,
+    scale: Float,
 ) {
     val left = center.x - width / 2f
     val top = center.y - height / 2f
@@ -523,10 +547,10 @@ private fun DrawScope.drawSingleEye(
     if (state == SparkEyeState.LISTENING) {
         drawRoundRect(
             color = Color.White.copy(alpha = 0.5f),
-            topLeft = Offset(left - 3f, top - 3f),
-            size = Size(width + 6f, height + 6f),
-            cornerRadius = CornerRadius((width + 6f) / 2f, (width + 6f) / 2f),
-            style = Stroke(width = 2.5f),
+            topLeft = Offset(left - 3f * scale, top - 3f * scale),
+            size = Size(width + 6f * scale, height + 6f * scale),
+            cornerRadius = CornerRadius((width + 6f * scale) / 2f, (width + 6f * scale) / 2f),
+            style = Stroke(width = 2.5f * scale),
         )
     }
 
@@ -549,7 +573,7 @@ private fun DrawScope.drawSingleEye(
     }
 }
 
-private fun DrawScope.drawSleepyEye(center: Offset, width: Float) {
+private fun DrawScope.drawSleepyEye(center: Offset, width: Float, scale: Float) {
     val path = Path().apply {
         moveTo(center.x - width / 2f, center.y)
         quadraticTo(
@@ -562,6 +586,6 @@ private fun DrawScope.drawSleepyEye(center: Offset, width: Float) {
     drawPath(
         path = path,
         color = Color(0xFF78909C),
-        style = Stroke(width = 5.5f, cap = androidx.compose.ui.graphics.StrokeCap.Round),
+        style = Stroke(width = 5.5f * scale, cap = androidx.compose.ui.graphics.StrokeCap.Round),
     )
 }

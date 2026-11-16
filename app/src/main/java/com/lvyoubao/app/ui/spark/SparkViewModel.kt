@@ -38,8 +38,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     private val repo = app.settingsRepository
 
+    // 必须 Eagerly：灵动屏界面从不收集这个流，WhileSubscribed 会让上游永不启动，
+    // settings.value 永远停在默认空配置——曾导致退出灵动屏把默认空配置整体写回、
+    // 清空用户全部配置，以及误报「未配置语音识别 Key」
     val settings: StateFlow<AiSettings> = repo.settings
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, AiSettings())
 
     private val _eyeState = MutableStateFlow(SparkEyeState.IDLE)
     val eyeState: StateFlow<SparkEyeState> = _eyeState.asStateFlow()
@@ -167,7 +170,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         _statusHint.value = "正在识别语音…"
 
         viewModelScope.launch {
-            val curSettings = settings.value
+            // 与 sendAiRequest 同口径：读仓库实时配置，不依赖界面是否订阅过 settings 流
+            val curSettings = repo.settings.firstOrNull() ?: settings.value
             val asrKey = curSettings.asrKey.trim()
 
             if (asrKey.isBlank()) {
@@ -398,7 +402,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             activeRecording = null
         }
         viewModelScope.launch {
-            repo.save(settings.value.copy(sparkMode = false))
+            // 从仓库读实时配置再落盘，绝不回写 settings.value（防把未加载/过期值覆盖整库）
+            val cur = repo.settings.firstOrNull() ?: settings.value
+            repo.save(cur.copy(sparkMode = false))
             onExit()
         }
     }
