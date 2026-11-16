@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -68,6 +69,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -92,9 +94,7 @@ fun SparkModeScreen(
     val showEyes by vm.showEyes.collectAsState()
     val isRecording by vm.isRecording.collectAsState()
     val recordTick by vm.recordTick.collectAsState()
-    val lastCapturedBitmap by vm.lastCapturedBitmap.collectAsState()
-    val userQuestion by vm.userQuestion.collectAsState()
-    val aiAnswer by vm.aiAnswer.collectAsState()
+    val messages by vm.messages.collectAsState()
     val statusHint by vm.statusHint.collectAsState()
 
     // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
@@ -180,7 +180,7 @@ fun SparkModeScreen(
                         isRecording -> "录音中 ${recordTick}s"
                         !statusHint.isNullOrBlank() -> statusHint.orEmpty()
                         showEyes -> "灵动屏"
-                        else -> "会话内容"
+                        else -> "聊天"
                     },
                     color = Color.White.copy(alpha = 0.85f),
                     fontSize = (13 * scale).sp,
@@ -202,7 +202,7 @@ fun SparkModeScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = if (showEyes) "看文字" else "看眼睛",
+                        text = if (showEyes) "💬 聊天" else "👀 萌眼",
                         color = Color.White.copy(alpha = 0.9f),
                         fontSize = (12 * scale).sp,
                         fontWeight = FontWeight.Bold,
@@ -270,13 +270,8 @@ fun SparkModeScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
-                    // 会话框展示（含拍照缩略图与文字）
-                    ConversationCard(
-                        photo = lastCapturedBitmap,
-                        userQuestion = userQuestion,
-                        aiAnswer = aiAnswer,
-                        scale = scale,
-                    )
+                    // 会话流展示（完整历史回看：用户问题/拍照轮在右，小源回答在左）
+                    ChatStream(messages = messages, scale = scale)
                 }
             }
         }
@@ -377,23 +372,21 @@ fun SparkModeScreen(
 }
 
 /**
- * 会话框展示：
- * - 顶部若有拍照，显示拍照缩略图（满足"界面能看出拍了什么"的需求）；
- * - 用户提问简述；
- * - AI 回答滚屏与朗读同步展示。
+ * 会话流展示（参考普通/大字模式的消息流）：
+ * - 完整历史可回看：用户问题在右（浅蓝气泡），小源回答在左（深色气泡）；
+ * - 照片只挂在拍照/选图那一轮的消息上，随消息流滚走，不再常驻顶部；
+ * - AI 回答流式追加，新内容到达自动滚到底部。
  */
 @Composable
-private fun ConversationCard(
-    photo: Bitmap?,
-    userQuestion: String?,
-    aiAnswer: String?,
+private fun ChatStream(
+    messages: List<SparkMessage>,
     scale: Float,
 ) {
     val scrollState = rememberScrollState()
 
-    // 内容增加时自动滚到底部
-    LaunchedEffect(aiAnswer) {
-        scrollState.animateScrollTo(scrollState.maxValue)
+    // 新内容到达自动滚到底部
+    LaunchedEffect(messages) {
+        if (messages.isNotEmpty()) scrollState.animateScrollTo(scrollState.maxValue)
     }
 
     Surface(
@@ -406,57 +399,68 @@ private fun ConversationCard(
                 .fillMaxSize()
                 .padding((8 * scale).dp)
                 .verticalScroll(scrollState),
+            verticalArrangement = Arrangement.spacedBy((6 * scale).dp),
         ) {
-            // 拍摄的照片展示（直观看到摄像头抓拍的画面）
-            if (photo != null) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(width = (72 * scale).dp, height = (54 * scale).dp)
-                            .clip(RoundedCornerShape((6 * scale).dp))
-                            .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape((6 * scale).dp))
-                            .background(Color.Black),
+            if (messages.isEmpty()) {
+                Text(
+                    text = "还没有对话～\n按住下方按钮说说话\n或拍张照让小源看看 👀",
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = (13 * scale).sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = (24 * scale).dp),
+                )
+            }
+
+            messages.forEach { msg ->
+                if (msg.role == "user") {
+                    // 用户消息：靠右浅蓝气泡，拍照轮带缩略图
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.End,
                     ) {
-                        Image(
-                            bitmap = photo.asImageBitmap(),
-                            contentDescription = "拍摄的照片",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
+                        msg.photo?.let { photo ->
+                            Image(
+                                bitmap = photo.asImageBitmap(),
+                                contentDescription = "本轮照片",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(width = (72 * scale).dp, height = (54 * scale).dp)
+                                    .clip(RoundedCornerShape((8 * scale).dp))
+                                    .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape((8 * scale).dp)),
+                            )
+                            Spacer(Modifier.height((4 * scale).dp))
+                        }
+                        Text(
+                            text = msg.text,
+                            color = Color(0xFFB3E5FC),
+                            fontSize = (14 * scale).sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .widthIn(max = (250 * scale).dp)
+                                .clip(RoundedCornerShape((10 * scale).dp))
+                                .background(Color(0xFF80D8FF).copy(alpha = 0.16f))
+                                .padding(horizontal = (8 * scale).dp, vertical = (5 * scale).dp),
                         )
                     }
-                    Spacer(Modifier.width((8 * scale).dp))
+                } else {
+                    // 小源回答：靠左深色气泡，流式更新中先显示占位
                     Text(
-                        text = "已拍摄画面",
-                        color = Color.White.copy(alpha = 0.6f),
-                        fontSize = (12 * scale).sp,
+                        text = msg.text.ifBlank { "小源思考中…" },
+                        color = Color.White,
+                        fontSize = (15 * scale).sp,
+                        lineHeight = (21 * scale).sp,
                         fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .widthIn(max = (250 * scale).dp)
+                            .clip(RoundedCornerShape((10 * scale).dp))
+                            .background(Color.White.copy(alpha = 0.07f))
+                            .padding(horizontal = (8 * scale).dp, vertical = (5 * scale).dp),
                     )
                 }
-                Spacer(Modifier.height((6 * scale).dp))
             }
-
-            // 用户的问题
-            if (!userQuestion.isNullOrBlank()) {
-                Text(
-                    text = "问：$userQuestion",
-                    color = Color(0xFF80D8FF),
-                    fontSize = (14 * scale).sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(Modifier.height((4 * scale).dp))
-            }
-
-            // AI 的回答
-            Text(
-                text = aiAnswer.takeUnless { it.isNullOrBlank() } ?: "小源思考中…",
-                color = Color.White,
-                fontSize = (15 * scale).sp,
-                lineHeight = (21 * scale).sp,
-                fontWeight = FontWeight.Bold,
-            )
         }
     }
 }

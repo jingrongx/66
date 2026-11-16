@@ -34,6 +34,13 @@ enum class SparkEyeState {
     MUTED,       // 静默安睡模式，月牙眯眼
 }
 
+/** 会话流中的一条消息：photo 仅在拍照/选图那一轮携带，随消息滚走，不再常驻顶部 */
+data class SparkMessage(
+    val role: String, // "user" / "assistant"
+    val text: String,
+    val photo: Bitmap? = null,
+)
+
 class SparkViewModel(app: TravelApp) : ViewModel() {
 
     private val repo = app.settingsRepository
@@ -61,16 +68,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private val _recordTick = MutableStateFlow(0)
     val recordTick: StateFlow<Int> = _recordTick.asStateFlow()
 
-    // 最近拍摄的照片缩略图（供界面显示，让用户清晰看到拍了什么）
-    private val _lastCapturedBitmap = MutableStateFlow<Bitmap?>(null)
-    val lastCapturedBitmap: StateFlow<Bitmap?> = _lastCapturedBitmap.asStateFlow()
-
-    // 最近一轮的用户问题与 AI 回答文本（流式更新）
-    private val _userQuestion = MutableStateFlow<String?>(null)
-    val userQuestion: StateFlow<String?> = _userQuestion.asStateFlow()
-
-    private val _aiAnswer = MutableStateFlow<String?>(null)
-    val aiAnswer: StateFlow<String?> = _aiAnswer.asStateFlow()
+    // 完整会话流（流式滚动展示，上下文可回看）；上限 40 条防图片占内存
+    private val _messages = MutableStateFlow<List<SparkMessage>>(emptyList())
+    val messages: StateFlow<List<SparkMessage>> = _messages.asStateFlow()
 
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
@@ -105,6 +105,20 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     fun setShowEyes(show: Boolean) {
         _showEyes.value = show
+    }
+
+    /** 追加一条会话消息（超上限丢最旧的，防图片占内存） */
+    private fun appendMessage(msg: SparkMessage) {
+        _messages.value = (_messages.value + msg).takeLast(40)
+    }
+
+    /** 流式更新最后一条 assistant 消息 */
+    private fun updateLastAssistant(text: String) {
+        val list = _messages.value.toMutableList()
+        if (list.isNotEmpty() && list.last().role == "assistant") {
+            list[list.lastIndex] = list.last().copy(text = text)
+            _messages.value = list
+        }
     }
 
     /**
@@ -177,9 +191,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             if (asrKey.isBlank()) {
                 // 没有配置 ASR Key
                 _eyeState.value = SparkEyeState.IDLE
+                appendMessage(SparkMessage("user", "（未配置语音识别 Key）"))
+                appendMessage(
+                    SparkMessage("assistant", "请先在「设置」中配置语音识别 Key（硅基流动 SenseVoice 免费），即可畅享毫秒级语音对话。"),
+                )
                 _showEyes.value = false
-                _userQuestion.value = "（未配置语音识别 Key）"
-                _aiAnswer.value = "请先在「设置」中配置语音识别 Key（硅基流动 SenseVoice 免费），即可畅享毫秒级语音对话。"
                 _statusHint.value = "请在设置中配置语音识别 Key"
                 SpeechInput.cancelRecording(rec)
                 return@launch
@@ -189,9 +205,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 onSuccess = { spoken ->
                     val clean = HotwordCorrector.correct(spoken.trim())
                     if (clean.isNotBlank()) {
-                        _userQuestion.value = clean
-                        _aiAnswer.value = ""
-                        _showEyes.value = false // 提问完成，自动切换为会话文字框显示
+                        appendMessage(SparkMessage("user", clean))
+                        _showEyes.value = false // 提问完成，自动切换为会话流展示
                         sendAiRequest(context, clean, emptyList())
                     } else {
                         _eyeState.value = SparkEyeState.IDLE
@@ -200,9 +215,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 },
                 onFailure = { err ->
                     _eyeState.value = SparkEyeState.IDLE
+                    appendMessage(SparkMessage("user", "（识别未完成）"))
+                    appendMessage(SparkMessage("assistant", err.message ?: "语音转文字失败，请稍后重试"))
                     _showEyes.value = false
-                    _userQuestion.value = "（识别未完成）"
-                    _aiAnswer.value = err.message ?: "语音转文字失败，请稍后重试"
                     _statusHint.value = err.message
                 },
             )
@@ -226,11 +241,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 return@launch
             }
 
-            // 保存拍摄到的照片 Bitmap，界面立即呈现清晰缩略图！
-            _lastCapturedBitmap.value = result.bitmap
-            _userQuestion.value = "📷 请帮我看看这是什么，简要描述一下。"
-            _aiAnswer.value = "小源正在观察画面…"
-            _showEyes.value = false // 切换为会话框，露出刚刚拍到的照片和回答
+            // 照片只属于拍照这一轮：随消息进会话流，说话的新一轮不会再带着旧照片
+            appendMessage(SparkMessage("user", "📷 帮我看看拍到了什么", result.bitmap))
+            appendMessage(SparkMessage("assistant", "小源正在观察画面…"))
+            _showEyes.value = false // 切换为会话流，露出刚刚拍到的照片和回答
 
             _eyeState.value = SparkEyeState.THINKING
             _statusHint.value = "小源正在观察…"
@@ -277,10 +291,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
             val dataUrl = "data:image/jpeg;base64,$base64"
 
-            _lastCapturedBitmap.value = bitmap
-            _userQuestion.value = "🖼 请帮我看看这张相册照片，简要说明是什么。"
-            _aiAnswer.value = "小源正在观察相册图片…"
-            _showEyes.value = false // 切换为会话框
+            appendMessage(SparkMessage("user", "🖼 帮我看看这张相册照片", bitmap))
+            appendMessage(SparkMessage("assistant", "小源正在观察相册图片…"))
+            _showEyes.value = false // 切换为会话流
 
             _eyeState.value = SparkEyeState.THINKING
             _statusHint.value = "小源正在观察…"
@@ -299,12 +312,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         imageDataUrls: List<String>,
     ) {
         aiRequestJob?.cancel()
+        // 先占一条 assistant 消息，后续流式/结果/出错都更新它
+        appendMessage(SparkMessage("assistant", ""))
         aiRequestJob = viewModelScope.launch(Dispatchers.IO) {
             val curSettings = repo.settings.firstOrNull() ?: AiSettings()
             if (curSettings.apiKey.isBlank()) {
                 _eyeState.value = SparkEyeState.IDLE
                 _isStreaming.value = false
-                _aiAnswer.value = "未配置 API Key，请去「设置」选择服务商并填写 Key。"
+                updateLastAssistant("未配置 API Key，请去「设置」选择服务商并填写 Key。")
                 _statusHint.value = "未配置 API Key"
                 return@launch
             }
@@ -350,7 +365,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 searchEnabled = false,
                 onAnswer = { chunk ->
                     speechBuffer.append(chunk)
-                    _aiAnswer.value = speechBuffer.toString()
+                    updateLastAssistant(speechBuffer.toString())
 
                     if (!hasStartedTts && speechBuffer.length >= 6) {
                         hasStartedTts = true
@@ -362,7 +377,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             ).fold(
                 onSuccess = { reply ->
                     val finalAnswer = reply.answer.trim()
-                    _aiAnswer.value = finalAnswer
+                    updateLastAssistant(finalAnswer)
                     _isStreaming.value = false
 
                     conversationHistory.add(currentUserMsg)
@@ -375,7 +390,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 onFailure = { err ->
                     _eyeState.value = SparkEyeState.IDLE
                     _isStreaming.value = false
-                    _aiAnswer.value = "请求出错啦：${err.message ?: "网络超时"}"
+                    updateLastAssistant("请求出错啦：${err.message ?: "网络超时"}")
                     _statusHint.value = "请求失败"
                 },
             )
