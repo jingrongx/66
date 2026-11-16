@@ -35,16 +35,23 @@ object CameraSnapshotHelper {
 
     private const val TAG = "SparkCamera"
 
+    data class SnapshotResult(
+        val dataUrl: String,
+        val bitmap: Bitmap,
+    )
+
     fun hasCameraPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
 
-    suspend fun takeSnapshotDataUrl(context: Context): String? = withTimeoutOrNull(7_000) {
+    suspend fun takeSnapshot(context: Context): SnapshotResult? = withTimeoutOrNull(7_000) {
         val rawBytes = captureSingleFrame(context) ?: return@withTimeoutOrNull null
         withContext(Dispatchers.IO) {
-            compressToDataUrl(rawBytes)
+            processSnapshot(rawBytes)
         }
     }
+
+    suspend fun takeSnapshotDataUrl(context: Context): String? = takeSnapshot(context)?.dataUrl
 
     @SuppressLint("MissingPermission")
     private suspend fun captureSingleFrame(context: Context): ByteArray? = suspendCancellableCoroutine { cont ->
@@ -213,8 +220,8 @@ object CameraSnapshotHelper {
         }
     }
 
-    /** 降采样并压缩为高质量紧凑的 JPEG Base64 Data URL */
-    private fun compressToDataUrl(rawBytes: ByteArray): String? = runCatching {
+    /** 降采样并压缩为高质量紧凑的 JPEG Base64 Data URL 以及用于界面预览的 Bitmap */
+    private fun processSnapshot(rawBytes: ByteArray): SnapshotResult? = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
 
@@ -228,10 +235,11 @@ object CameraSnapshotHelper {
 
         val out = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, 75, out)
-        bitmap.recycle()
 
         val compressedBytes = out.toByteArray()
         val base64 = Base64.encodeToString(compressedBytes, Base64.NO_WRAP)
-        "data:image/jpeg;base64,$base64"
+        val dataUrl = "data:image/jpeg;base64,$base64"
+
+        SnapshotResult(dataUrl = dataUrl, bitmap = bitmap)
     }.getOrNull()
 }

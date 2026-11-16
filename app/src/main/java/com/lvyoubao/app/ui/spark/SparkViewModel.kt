@@ -1,6 +1,7 @@
 package com.lvyoubao.app.ui.spark
 
 import android.content.Context
+import android.graphics.Bitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lvyoubao.app.TravelApp
@@ -14,6 +15,7 @@ import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -35,7 +37,6 @@ enum class SparkEyeState {
 class SparkViewModel(app: TravelApp) : ViewModel() {
 
     private val repo = app.settingsRepository
-    private val appContext: Context = app.applicationContext
 
     val settings: StateFlow<AiSettings> = repo.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings())
@@ -43,15 +44,40 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private val _eyeState = MutableStateFlow(SparkEyeState.IDLE)
     val eyeState: StateFlow<SparkEyeState> = _eyeState.asStateFlow()
 
+    // 界面显示切换：true 显示可爱大眼动画；false 显示会话文字与照片框
+    private val _showEyes = MutableStateFlow(true)
+    val showEyes: StateFlow<Boolean> = _showEyes.asStateFlow()
+
     private val _statusHint = MutableStateFlow<String?>(null)
     val statusHint: StateFlow<String?> = _statusHint.asStateFlow()
 
-    // 内存中维护完整对话历史（最大字符预算截取，不硬限制轮数）
+    // 按住说话录音状态
+    private val _isRecording = MutableStateFlow(false)
+    val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+
+    private val _recordTick = MutableStateFlow(0)
+    val recordTick: StateFlow<Int> = _recordTick.asStateFlow()
+
+    // 最近拍摄的照片缩略图（供界面显示，让用户清晰看到拍了什么）
+    private val _lastCapturedBitmap = MutableStateFlow<Bitmap?>(null)
+    val lastCapturedBitmap: StateFlow<Bitmap?> = _lastCapturedBitmap.asStateFlow()
+
+    // 最近一轮的用户问题与 AI 回答文本（流式更新）
+    private val _userQuestion = MutableStateFlow<String?>(null)
+    val userQuestion: StateFlow<String?> = _userQuestion.asStateFlow()
+
+    private val _aiAnswer = MutableStateFlow<String?>(null)
+    val aiAnswer: StateFlow<String?> = _aiAnswer.asStateFlow()
+
+    private val _isStreaming = MutableStateFlow(false)
+    val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
+
+    // 完整对话历史（48,000 字符最大预算）
     private val conversationHistory = mutableListOf<OutMessage>()
 
-    // 云端按键录音中状态
-    private var cloudRecording: SpeechInput.Recording? = null
-    private var activeJob: Job? = null
+    private var activeRecording: SpeechInput.Recording? = null
+    private var recordTimerJob: Job? = null
+    private var aiRequestJob: Job? = null
 
     init {
         // 监听 TTS 状态：播报完毕自动复位为 IDLE
@@ -70,246 +96,238 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         _statusHint.value = msg
     }
 
-    /** 单击眼部：如果正在说话则打断静音；静默则唤醒；否则开始自然聆听 */
-    fun onEyeClicked(context: Context, onRequestRecordPermission: () -> Unit) {
-        when (_eyeState.value) {
-            SparkEyeState.MUTED -> {
-                // 静默中点一下唤醒
-                _eyeState.value = SparkEyeState.IDLE
-                _statusHint.value = "已唤醒"
-            }
-            SparkEyeState.SPEAKING -> {
-                // 打断播报
-                TtsPlayer.stop()
-                _eyeState.value = SparkEyeState.IDLE
-            }
-            SparkEyeState.LISTENING -> {
-                // 再次点按：停止录音并发送
-                finishListening(context)
-            }
-            SparkEyeState.THINKING, SparkEyeState.CAPTURING -> {
-                // 正在处理中，忽略单按
-            }
-            SparkEyeState.IDLE -> {
-                startListening(context, onRequestRecordPermission)
-            }
-        }
+    fun toggleShowEyes() {
+        _showEyes.value = !_showEyes.value
     }
 
-    /** 长按：静默模式切换 */
-    fun toggleMute() {
-        if (_eyeState.value == SparkEyeState.MUTED) {
-            _eyeState.value = SparkEyeState.IDLE
-            _statusHint.value = "已退出静默"
-        } else {
-            TtsPlayer.stop()
-            cloudRecording?.let {
-                SpeechInput.cancelRecording(it)
-                cloudRecording = null
-            }
-            _eyeState.value = SparkEyeState.MUTED
-            _statusHint.value = "静默模式 (长按恢复)"
-        }
+    fun setShowEyes(show: Boolean) {
+        _showEyes.value = show
     }
 
-    /** 双击：触发摄像头识别当前画面 */
-    fun onDoubleClicked(context: Context, onRequestCameraPermission: () -> Unit) {
-        if (_eyeState.value == SparkEyeState.MUTED) return
-        if (!CameraSnapshotHelper.hasCameraPermission(context)) {
-            onRequestCameraPermission()
-            return
-        }
-        captureAndAnalyze(context, "请帮我看看这是什么，用两三句话简洁描述。")
-    }
-
-    private fun startListening(context: Context, onRequestRecordPermission: () -> Unit) {
+    /**
+     * 按住说话：按下开始录音
+     * 操作逻辑完全对齐主模式与大字模式：按住录音、松手即问
+     * 按下时显示大眼睛动画（对应需求：按住按钮说话的时候就显示眼睛动画）
+     */
+    fun startHoldTalk(context: Context, onRequestRecordPermission: () -> Unit) {
         if (!SpeechInput.hasRecordPermission(context)) {
             onRequestRecordPermission()
             return
         }
 
+        // 停止之前的朗读
         TtsPlayer.stop()
         _eyeState.value = SparkEyeState.LISTENING
-        _statusHint.value = "请说话…"
+        _showEyes.value = true // 按下时立刻呈现大眼睛动画
+        _statusHint.value = "正在听你说，松手发送…"
 
         val curSettings = settings.value
-        // 若支持系统识别且未配 ASR key，走系统内置断句识别
-        if (curSettings.asrKey.isBlank() && SpeechInput.isAvailable(context)) {
-            activeJob?.cancel()
-            activeJob = viewModelScope.launch {
-                val res = SpeechInput.listen(context, "请说话")
-                res.fold(
-                    onSuccess = { rawText ->
-                        val clean = HotwordCorrector.correct(rawText.trim())
-                        if (clean.isNotBlank()) {
-                            sendQuestion(context, clean)
-                        } else {
-                            _eyeState.value = SparkEyeState.IDLE
-                            _statusHint.value = null
-                        }
-                    },
-                    onFailure = { err ->
-                        _eyeState.value = SparkEyeState.IDLE
-                        _statusHint.value = err.message
-                    },
-                )
+
+        // 如果未配置 ASR Key，提示填写
+        if (curSettings.asrKey.isBlank()) {
+            _statusHint.value = "提示：可在设置里填入语音识别Key（硅基流动免费）"
+        }
+
+        SpeechInput.startRecording(context).fold(
+            onSuccess = { rec ->
+                activeRecording = rec
+                _isRecording.value = true
+                _recordTick.value = 0
+                recordTimerJob?.cancel()
+                recordTimerJob = viewModelScope.launch {
+                    while (_isRecording.value) {
+                        delay(1000)
+                        _recordTick.value += 1
+                    }
+                }
+            },
+            onFailure = { err ->
+                _eyeState.value = SparkEyeState.IDLE
+                _statusHint.value = err.message ?: "麦克风启动失败"
+            },
+        )
+    }
+
+    /**
+     * 按住说话：松手发送
+     * 停止录音 -> 转写文字 -> 切换为会话框显示文字 -> DeepSeek 回答 + TTS
+     */
+    fun endHoldTalk(context: Context) {
+        val rec = activeRecording
+        activeRecording = null
+        _isRecording.value = false
+        recordTimerJob?.cancel()
+
+        if (rec == null) {
+            _eyeState.value = SparkEyeState.IDLE
+            return
+        }
+
+        _eyeState.value = SparkEyeState.THINKING
+        _statusHint.value = "正在识别语音…"
+
+        viewModelScope.launch {
+            val curSettings = settings.value
+            val asrKey = curSettings.asrKey.trim()
+
+            if (asrKey.isBlank()) {
+                // 没有配置 ASR Key
+                _eyeState.value = SparkEyeState.IDLE
+                _showEyes.value = false
+                _userQuestion.value = "（未配置语音识别 Key）"
+                _aiAnswer.value = "请先在「设置」中配置语音识别 Key（硅基流动 SenseVoice 免费），即可畅享毫秒级语音对话。"
+                _statusHint.value = "请在设置中配置语音识别 Key"
+                SpeechInput.cancelRecording(rec)
+                return@launch
             }
-        } else {
-            // 走 SenseVoice 录音
-            SpeechInput.startRecording(context).fold(
-                onSuccess = { rec ->
-                    cloudRecording = rec
+
+            SpeechInput.stopAndTranscribe(rec, asrKey, curSettings.dialectMode).fold(
+                onSuccess = { spoken ->
+                    val clean = HotwordCorrector.correct(spoken.trim())
+                    if (clean.isNotBlank()) {
+                        _userQuestion.value = clean
+                        _aiAnswer.value = ""
+                        _showEyes.value = false // 提问完成，自动切换为会话文字框显示
+                        sendAiRequest(context, clean, emptyList())
+                    } else {
+                        _eyeState.value = SparkEyeState.IDLE
+                        _statusHint.value = "没听清你说什么，可以再试一次"
+                    }
                 },
-                onFailure = { e ->
+                onFailure = { err ->
                     _eyeState.value = SparkEyeState.IDLE
-                    _statusHint.value = e.message ?: "麦克风启动失败"
+                    _showEyes.value = false
+                    _userQuestion.value = "（识别未完成）"
+                    _aiAnswer.value = err.message ?: "语音转文字失败，请稍后重试"
+                    _statusHint.value = err.message
                 },
             )
         }
     }
 
-    private fun finishListening(context: Context) {
-        val rec = cloudRecording
-        if (rec != null) {
-            cloudRecording = null
-            _eyeState.value = SparkEyeState.THINKING
-            _statusHint.value = "正在识别…"
-            viewModelScope.launch {
-                val curSettings = settings.value
-                SpeechInput.stopAndTranscribe(rec, curSettings.asrKey, curSettings.dialectMode)
-                    .fold(
-                        onSuccess = { spoken ->
-                            val clean = HotwordCorrector.correct(spoken.trim())
-                            if (clean.isNotBlank()) {
-                                sendQuestion(context, clean)
-                            } else {
-                                _eyeState.value = SparkEyeState.IDLE
-                                _statusHint.value = null
-                            }
-                        },
-                        onFailure = { err ->
-                            _eyeState.value = SparkEyeState.IDLE
-                            _statusHint.value = err.message
-                        },
-                    )
-            }
-        }
-    }
-
-    fun captureAndAnalyze(context: Context, prompt: String = "请简洁描述画面内容") {
+    /**
+     * 按需拍照识别：
+     * 抓拍单帧图片 -> 保存 Bitmap 供界面展示缩略图 -> 切换为会话框 -> 提交 DeepSeek 视觉解析
+     */
+    fun captureAndAnalyze(context: Context) {
         TtsPlayer.stop()
         _eyeState.value = SparkEyeState.CAPTURING
         _statusHint.value = "正在拍照…"
 
         viewModelScope.launch {
-            val dataUrl = CameraSnapshotHelper.takeSnapshotDataUrl(context)
-            if (dataUrl.isNullOrBlank()) {
+            val result = CameraSnapshotHelper.takeSnapshot(context)
+            if (result == null) {
                 _eyeState.value = SparkEyeState.IDLE
-                _statusHint.value = "拍照失败，请重试"
+                _statusHint.value = "拍照失败，请检查摄像头权限"
                 return@launch
             }
+
+            // 保存拍摄到的照片 Bitmap，界面立即呈现清晰缩略图！
+            _lastCapturedBitmap.value = result.bitmap
+            _userQuestion.value = "📷 请帮我看看这是什么，简要描述一下。"
+            _aiAnswer.value = "小源正在观察画面…"
+            _showEyes.value = false // 切换为会话框，露出刚刚拍到的照片和回答
 
             _eyeState.value = SparkEyeState.THINKING
             _statusHint.value = "小源正在观察…"
 
             sendAiRequest(
                 context = context,
-                userText = prompt,
-                imageDataUrls = listOf(dataUrl),
+                userText = "请结合这张刚刚拍摄的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
+                imageDataUrls = listOf(result.dataUrl),
             )
         }
     }
 
-    fun sendQuestion(context: Context, question: String) {
-        _eyeState.value = SparkEyeState.THINKING
-        _statusHint.value = "思考中…"
-
-        viewModelScope.launch {
-            sendAiRequest(context = context, userText = question, imageDataUrls = emptyList())
-        }
-    }
-
-    private suspend fun sendAiRequest(
+    private fun sendAiRequest(
         context: Context,
         userText: String,
         imageDataUrls: List<String>,
-    ) = withContext(Dispatchers.IO) {
-        val curSettings = repo.settings.firstOrNull() ?: AiSettings()
-        if (curSettings.apiKey.isBlank()) {
-            _eyeState.value = SparkEyeState.IDLE
-            _statusHint.value = "未配置 API Key，请去设置填写"
-            return@withContext
-        }
-
-        // 组装简练情境
-        val contextInfo = buildString {
-            val cal = CalendarContext.block()
-            if (!cal.isNullOrBlank()) appendLine(cal)
-            if (LocationContext.hasPermission(context)) {
-                LocationContext.current(context)?.description?.let { appendLine("位置：$it") }
+    ) {
+        aiRequestJob?.cancel()
+        aiRequestJob = viewModelScope.launch(Dispatchers.IO) {
+            val curSettings = repo.settings.firstOrNull() ?: AiSettings()
+            if (curSettings.apiKey.isBlank()) {
+                _eyeState.value = SparkEyeState.IDLE
+                _isStreaming.value = false
+                _aiAnswer.value = "未配置 API Key，请去「设置」选择服务商并填写 Key。"
+                _statusHint.value = "未配置 API Key"
+                return@launch
             }
-        }
 
-        val systemPrompt = """
-            你是灵动屏智能伴侣「小源」，搭载于便携横屏小设备上。
-            【交互特点】你的回应将直接转换为语音播放，屏幕上只有一双可爱的眼睛。
-            【表达原则】
-            1. 语气亲切、自然可爱、生动活泼；
-            2. 回答要极其简练扼要，直接说出答案或重点，一般控制在1至3句话以内；
-            3. 坚决不要输出任何 Markdown 格式（如加粗**、标题#、列表项、代码块等），全部使用自然口语；
-            4. 若涉及视觉看图，直接生动说出图中是什么或关键信息。
-        """.trimIndent()
+            val contextInfo = buildString {
+                val cal = CalendarContext.block()
+                if (!cal.isNullOrBlank()) appendLine(cal)
+                if (LocationContext.hasPermission(context)) {
+                    LocationContext.current(context)?.description?.let { appendLine("位置：$it") }
+                }
+            }
 
-        // 按字符预算裁剪历史，保持最大有效上下文（同主工程 48,000 字符预算）
-        val historyPayload = selectHistoryBudget(conversationHistory, 48_000)
+            val systemPrompt = """
+                你是灵动屏智能伴侣「小源」，搭载于小屏随身智能设备。
+                你的回应将直接转换为语音播放，并显示在屏幕会话框中。
+                【表达原则】
+                1. 语气亲切生动、自然口语化，适合小屏阅读与语音朗读；
+                2. 回答要极其简练扼要，直接说出答案或关键要点，通常在2至4句话以内；
+                3. 严禁输出任何 Markdown 标记（如加粗**、标题#、列表项、代码块等），全部使用自然口语排版；
+                4. 若涉及视觉看图，生动具体地告诉用户拍到了什么。
+            """.trimIndent()
 
-        val currentUserMsg = OutMessage(
-            role = "user",
-            text = userText,
-            images = imageDataUrls,
-        )
+            val historyPayload = selectHistoryBudget(conversationHistory, 48_000)
 
-        val fullPayload = listOfNotNull(
-            OutMessage("system", systemPrompt),
-            if (contextInfo.isNotBlank()) OutMessage("system", "【情境】\n$contextInfo") else null,
-        ) + historyPayload + listOf(currentUserMsg)
+            val currentUserMsg = OutMessage(
+                role = "user",
+                text = userText,
+                images = imageDataUrls,
+            )
 
-        val speechBuffer = StringBuilder()
-        var hasStartedTts = false
+            val fullPayload = listOfNotNull(
+                OutMessage("system", systemPrompt),
+                if (contextInfo.isNotBlank()) OutMessage("system", "【情境】\n$contextInfo") else null,
+            ) + historyPayload + listOf(currentUserMsg)
 
-        AiClient(curSettings).chat(
-            messages = fullPayload,
-            thinking = false,
-            searchEnabled = false,
-            onAnswer = { chunk ->
-                speechBuffer.append(chunk)
-                // 收到首段文字后迅速启动流式语音朗读
-                if (!hasStartedTts && speechBuffer.length >= 6) {
-                    hasStartedTts = true
+            val speechBuffer = StringBuilder()
+            var hasStartedTts = false
+            _isStreaming.value = true
+
+            AiClient(curSettings).chat(
+                messages = fullPayload,
+                thinking = false,
+                searchEnabled = false,
+                onAnswer = { chunk ->
+                    speechBuffer.append(chunk)
+                    _aiAnswer.value = speechBuffer.toString()
+
+                    if (!hasStartedTts && speechBuffer.length >= 6) {
+                        hasStartedTts = true
+                        _eyeState.value = SparkEyeState.SPEAKING
+                        _statusHint.value = null
+                        TtsPlayer.speak(context, speechBuffer.toString())
+                    }
+                },
+            ).fold(
+                onSuccess = { reply ->
+                    val finalAnswer = reply.answer.trim()
+                    _aiAnswer.value = finalAnswer
+                    _isStreaming.value = false
+
+                    conversationHistory.add(currentUserMsg)
+                    conversationHistory.add(OutMessage("assistant", finalAnswer))
+
                     _eyeState.value = SparkEyeState.SPEAKING
                     _statusHint.value = null
-                    TtsPlayer.speak(context, speechBuffer.toString())
-                }
-            },
-        ).fold(
-            onSuccess = { reply ->
-                val finalAnswer = reply.answer.trim()
-                conversationHistory.add(currentUserMsg)
-                conversationHistory.add(OutMessage("assistant", finalAnswer))
-
-                // 播放完整最终文本（若之前没触发，或补全最后文本）
-                _eyeState.value = SparkEyeState.SPEAKING
-                _statusHint.value = null
-                TtsPlayer.speak(context, finalAnswer)
-            },
-            onFailure = { err ->
-                _eyeState.value = SparkEyeState.IDLE
-                _statusHint.value = "出错啦：${err.message ?: "网络超时"}"
-            },
-        )
+                    TtsPlayer.speak(context, finalAnswer)
+                },
+                onFailure = { err ->
+                    _eyeState.value = SparkEyeState.IDLE
+                    _isStreaming.value = false
+                    _aiAnswer.value = "请求出错啦：${err.message ?: "网络超时"}"
+                    _statusHint.value = "请求失败"
+                },
+            )
+        }
     }
 
-    /** 48,000 字符预算的历史连续装入 */
     private fun selectHistoryBudget(all: List<OutMessage>, budget: Int): List<OutMessage> {
         if (all.isEmpty()) return emptyList()
         var used = 0
@@ -325,9 +343,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     fun exitSparkMode(onExit: () -> Unit) {
         TtsPlayer.stop()
-        cloudRecording?.let {
+        activeRecording?.let {
             SpeechInput.cancelRecording(it)
-            cloudRecording = null
+            activeRecording = null
         }
         viewModelScope.launch {
             repo.save(settings.value.copy(sparkMode = false))
@@ -337,9 +355,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
-        cloudRecording?.let {
+        activeRecording?.let {
             SpeechInput.cancelRecording(it)
-            cloudRecording = null
+            activeRecording = null
         }
         TtsPlayer.stop()
     }

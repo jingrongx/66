@@ -1,9 +1,11 @@
 package com.lvyoubao.app.ui.spark
 
 import android.Manifest
+import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -12,36 +14,55 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -49,7 +70,6 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 @Composable
 fun SparkModeScreen(
@@ -62,16 +82,21 @@ fun SparkModeScreen(
     )
 
     val eyeState by vm.eyeState.collectAsState()
+    val showEyes by vm.showEyes.collectAsState()
+    val isRecording by vm.isRecording.collectAsState()
+    val recordTick by vm.recordTick.collectAsState()
+    val lastCapturedBitmap by vm.lastCapturedBitmap.collectAsState()
+    val userQuestion by vm.userQuestion.collectAsState()
+    val aiAnswer by vm.aiAnswer.collectAsState()
     val statusHint by vm.statusHint.collectAsState()
-    val scope = rememberCoroutineScope()
 
     val recordPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            vm.onEyeClicked(context) {}
+            vm.startHoldTalk(context) {}
         } else {
-            vm.setTransientHint("需要麦克风权限才能语音对话")
+            vm.setTransientHint("需要麦克风权限才能录音")
         }
     }
 
@@ -85,85 +110,274 @@ fun SparkModeScreen(
         }
     }
 
-    // 按返回键退出灵动屏模式回到主界面
+    // 返回键退出灵动屏模式回到普通界面
     BackHandler {
         vm.exitSparkMode(onExit)
     }
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0A0D14)) // 深邃沉稳的暗夜底色，适配小屏 OLED/LCD
-            .pointerInput(eyeState) {
-                detectTapGestures(
-                    onTap = {
-                        vm.onEyeClicked(context) {
-                            recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                    },
-                    onDoubleTap = {
-                        vm.onDoubleClicked(context) {
-                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                        }
-                    },
-                    onLongPress = {
-                        vm.toggleMute()
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
+            .background(Color(0xFF0D1117)), // 深邃科技黑底色
     ) {
-        // 双眼动画核心画板
-        CuteEyesCanvas(
-            eyeState = eyeState,
-            modifier = Modifier.fillMaxSize(),
-        )
-
-        // 底部极简状态与提示浮层
-        if (!statusHint.isNullOrBlank()) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 12.dp)
-                    .background(Color(0x77000000), shape = CircleShape)
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
-            ) {
+        // ---------- 顶部状态与退出栏（高度 ~28dp，专为 308x240 小屏适配） ----------
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(30.dp)
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            // 左侧状态指示
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .background(
+                            if (isRecording) Color(0xFFFF5252) else Color(0xFF00E5FF),
+                            shape = CircleShape,
+                        ),
+                )
+                Spacer(Modifier.width(4.dp))
                 Text(
-                    text = statusHint.orEmpty(),
+                    text = when {
+                        isRecording -> "录音中 ${recordTick}s"
+                        !statusHint.isNullOrBlank() -> statusHint.orEmpty()
+                        showEyes -> "灵动屏"
+                        else -> "会话内容"
+                    },
                     color = Color.White.copy(alpha = 0.85f),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(160.dp),
                 )
+            }
+
+            // 右侧操作：切换视图 + 显眼退出按钮
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 切换眼睛 / 会话文字
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.White.copy(alpha = 0.12f))
+                        .clickable { vm.toggleShowEyes() }
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (showEyes) "看文字" else "看眼睛",
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = 10.sp,
+                    )
+                }
+
+                Spacer(Modifier.width(6.dp))
+
+                // 显眼的退出按钮
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { vm.exitSparkMode(onExit) }
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "‹ 退出",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
         }
 
-        // 右上角退出小按钮
-        IconButton(
-            onClick = { vm.exitSparkMode(onExit) },
+        // ---------- 中间主呈现区（权重 1f）：按住说话显示眼睛动画，回答时显示会话框 ----------
+        Box(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(6.dp)
-                .size(32.dp),
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center,
         ) {
+            AnimatedContent(
+                targetState = showEyes,
+                transitionSpec = { fadeIn(tween(200)).togetherWith(fadeOut(tween(200))) },
+                label = "MainContent",
+            ) { isEyesMode ->
+                if (isEyesMode) {
+                    // 眼睛动画展示
+                    CuteEyesCanvas(
+                        eyeState = eyeState,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    // 会话框展示（含拍照缩略图与文字）
+                    ConversationCard(
+                        photo = lastCapturedBitmap,
+                        userQuestion = userQuestion,
+                        aiAnswer = aiAnswer,
+                    )
+                }
+            }
+        }
+
+        // ---------- 底部操作区（高度 ~42dp）：相机按钮 + 按住说话大按钮 ----------
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // 📷 拍照提问按钮
+            Box(
+                modifier = Modifier
+                    .size(width = 46.dp, height = 38.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .clickable {
+                        if (CameraSnapshotHelper.hasCameraPermission(context)) {
+                            vm.captureAndAnalyze(context)
+                        } else {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("📷", fontSize = 20.sp)
+            }
+
+            // 🎙️ 按住说话按钮（操作逻辑同常规/大字模式：按住即录，松手即发，按住时显示萌眼）
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(38.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary,
+                    )
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onPress = {
+                                vm.startHoldTalk(context) {
+                                    recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                                try {
+                                    tryAwaitRelease()
+                                } finally {
+                                    vm.endHoldTalk(context)
+                                }
+                            },
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (isRecording) "松手发送 (${recordTick}s)" else "按住说话",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 会话框展示：
+ * - 顶部若有拍照，显示拍照缩略图（满足"界面能看出拍了什么"的需求）；
+ * - 用户提问简述；
+ * - AI 回答滚屏与朗读同步展示。
+ */
+@Composable
+private fun ConversationCard(
+    photo: Bitmap?,
+    userQuestion: String?,
+    aiAnswer: String?,
+) {
+    val scrollState = rememberScrollState()
+
+    // 内容增加时自动滚到底部
+    LaunchedEffect(aiAnswer) {
+        scrollState.animateScrollTo(scrollState.maxValue)
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF161B22),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp)
+                .verticalScroll(scrollState),
+        ) {
+            // 拍摄的照片展示（直观看到摄像头抓拍的画面）
+            if (photo != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(width = 72.dp, height = 54.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                            .background(Color.Black),
+                    ) {
+                        Image(
+                            bitmap = photo.asImageBitmap(),
+                            contentDescription = "拍摄的照片",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "已拍摄画面",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+
+            // 用户的问题
+            if (!userQuestion.isNullOrBlank()) {
+                Text(
+                    text = "问：$userQuestion",
+                    color = Color(0xFF80D8FF),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(4.dp))
+            }
+
+            // AI 的回答
             Text(
-                text = "✕",
-                color = Color.White.copy(alpha = 0.28f),
+                text = aiAnswer.takeUnless { it.isNullOrBlank() } ?: "小源思考中…",
+                color = Color.White,
                 fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
+                lineHeight = 20.sp,
             )
         }
     }
 }
 
 /**
- * 极简、可爱、充满灵气的动态机器人双眼绘制
+ * 极简可爱的动态机器人双眼绘制
  */
 @Composable
 private fun CuteEyesCanvas(
     eyeState: SparkEyeState,
     modifier: Modifier = Modifier,
 ) {
-    // 基础呼吸循环动画（0.96f ~ 1.04f）
     val infiniteTransition = rememberInfiniteTransition(label = "breath")
     val breathScale by infiniteTransition.animateFloat(
         initialValue = 0.96f,
@@ -175,10 +389,9 @@ private fun CuteEyesCanvas(
         label = "breathScale",
     )
 
-    // 说话时的欢快律动
     val speakingBounce by infiniteTransition.animateFloat(
-        initialValue = -5f,
-        targetValue = 5f,
+        initialValue = -4f,
+        targetValue = 4f,
         animationSpec = infiniteRepeatable(
             animation = tween(280, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse,
@@ -186,18 +399,14 @@ private fun CuteEyesCanvas(
         label = "speakingBounce",
     )
 
-    // 眨眼动画（高度缩放 1f -> 0.08f -> 1f）
     val blinkAnim = remember { Animatable(1f) }
-    // 眼球朝向偏移（用于思考时的左右上方转动）
     val lookOffsetX = remember { Animatable(0f) }
     val lookOffsetY = remember { Animatable(0f) }
 
-    // 随机眨眼协程
     LaunchedEffect(eyeState) {
         while (true) {
             if (eyeState != SparkEyeState.MUTED) {
                 delay((2500..5500).random().toLong())
-                // 快速眨眼
                 blinkAnim.animateTo(0.08f, tween(110))
                 blinkAnim.animateTo(1f, tween(130))
             } else {
@@ -206,16 +415,13 @@ private fun CuteEyesCanvas(
         }
     }
 
-    // 状态切换时的眼神朝向变化
     LaunchedEffect(eyeState) {
         when (eyeState) {
             SparkEyeState.THINKING -> {
-                // 思考时眼神望向右上
-                lookOffsetX.animateTo(12f, tween(300))
-                lookOffsetY.animateTo(-10f, tween(300))
+                lookOffsetX.animateTo(10f, tween(300))
+                lookOffsetY.animateTo(-8f, tween(300))
             }
             SparkEyeState.LISTENING -> {
-                // 倾听时直视前方且微动
                 lookOffsetX.animateTo(0f, tween(200))
                 lookOffsetY.animateTo(2f, tween(200))
             }
@@ -230,20 +436,18 @@ private fun CuteEyesCanvas(
         val cx = size.width / 2f
         val cy = size.height / 2f
 
-        // 眼睛主色调：灵动冰青蓝，聆听时更亮微偏青白，静默时为温和紫蓝
         val eyeColor = when (eyeState) {
-            SparkEyeState.LISTENING -> Color(0xFF64FFDA) // 青亮色
-            SparkEyeState.THINKING -> Color(0xFF80D8FF)  // 浅海蓝
-            SparkEyeState.SPEAKING -> Color(0xFF00E5FF)  // 活泼电光蓝
-            SparkEyeState.MUTED -> Color(0xFF78909C)     // 沉静灰蓝
-            SparkEyeState.CAPTURING -> Color(0xFFFFD54F) // 拍照快门金黄色
-            SparkEyeState.IDLE -> Color(0xFF4EE2EC)      // 标志性灵动蓝
+            SparkEyeState.LISTENING -> Color(0xFF64FFDA)
+            SparkEyeState.THINKING -> Color(0xFF80D8FF)
+            SparkEyeState.SPEAKING -> Color(0xFF00E5FF)
+            SparkEyeState.MUTED -> Color(0xFF78909C)
+            SparkEyeState.CAPTURING -> Color(0xFFFFD54F)
+            SparkEyeState.IDLE -> Color(0xFF4EE2EC)
         }
 
-        // 根据屏幕宽高自适应眼睛大小（针对 308x240 设计）
-        val baseWidth = (size.width * 0.22f).coerceIn(48f, 85f)
-        val baseHeight = (size.height * 0.38f).coerceIn(60f, 105f)
-        val eyeSpacing = (size.width * 0.11f).coerceIn(24f, 44f)
+        val baseWidth = (size.width * 0.20f).coerceIn(44f, 75f)
+        val baseHeight = (size.height * 0.44f).coerceIn(55f, 90f)
+        val eyeSpacing = (size.width * 0.10f).coerceIn(20f, 38f)
 
         val dynamicScale = when (eyeState) {
             SparkEyeState.LISTENING -> 1.12f
@@ -260,18 +464,15 @@ private fun CuteEyesCanvas(
         val rightEyeCenter = Offset(cx + eyeSpacing + curWidth / 2f + lookOffsetX.value, cy + offsetY + lookOffsetY.value)
 
         if (eyeState == SparkEyeState.MUTED) {
-            // 静默模式：绘制两弯舒缓的小弧线（安睡状）
             drawSleepyEye(leftEyeCenter, curWidth)
             drawSleepyEye(rightEyeCenter, curWidth)
         } else {
-            // 正常、聆听、思考、表达：绘制圆润的椭圆胶囊大眼 + 高光
             drawSingleEye(leftEyeCenter, curWidth, curHeight, eyeColor, eyeState)
             drawSingleEye(rightEyeCenter, curWidth, curHeight, eyeColor, eyeState)
         }
     }
 }
 
-/** 单只眼睛的胶囊外形与灵动高光绘制 */
 private fun DrawScope.drawSingleEye(
     center: Offset,
     width: Float,
@@ -282,13 +483,9 @@ private fun DrawScope.drawSingleEye(
     val left = center.x - width / 2f
     val top = center.y - height / 2f
 
-    // 眼睛主体（大圆角矩形）
     drawRoundRect(
         brush = Brush.verticalGradient(
-            colors = listOf(
-                color,
-                color.copy(alpha = 0.88f),
-            ),
+            colors = listOf(color, color.copy(alpha = 0.88f)),
             startY = top,
             endY = top + height,
         ),
@@ -297,7 +494,6 @@ private fun DrawScope.drawSingleEye(
         cornerRadius = CornerRadius(width / 2f, width / 2f),
     )
 
-    // 倾听状态时的呼吸光晕轮廓
     if (state == SparkEyeState.LISTENING) {
         drawRoundRect(
             color = Color.White.copy(alpha = 0.5f),
@@ -308,7 +504,6 @@ private fun DrawScope.drawSingleEye(
         )
     }
 
-    // 灵动高光：左上方主光点 + 右下方小微光，打造通透感
     if (height > width * 0.4f) {
         val highlightRadius = width * 0.18f
         val hx = center.x - width * 0.20f
@@ -320,7 +515,6 @@ private fun DrawScope.drawSingleEye(
             center = Offset(hx, hy),
         )
 
-        // 副高光
         drawCircle(
             color = Color.White.copy(alpha = 0.55f),
             radius = highlightRadius * 0.45f,
@@ -329,7 +523,6 @@ private fun DrawScope.drawSingleEye(
     }
 }
 
-/** 静默安睡闭眼状态：两道柔和的月牙弯弧 */
 private fun DrawScope.drawSleepyEye(center: Offset, width: Float) {
     val path = Path().apply {
         moveTo(center.x - width / 2f, center.y)
