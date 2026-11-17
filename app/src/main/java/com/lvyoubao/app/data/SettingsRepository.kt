@@ -40,6 +40,8 @@ class SettingsRepository(private val context: Context) {
         val sparkMode = booleanPreferencesKey("spark_mode")
         val homeAddress = stringPreferencesKey("home_address")
         val autoSpeak = booleanPreferencesKey("auto_speak")
+        val keepAliveEnabled = booleanPreferencesKey("keep_alive_enabled")
+        val bootStartEnabled = booleanPreferencesKey("boot_start_enabled")
         val savedProviders = stringPreferencesKey("saved_providers")
     }
 
@@ -65,6 +67,8 @@ class SettingsRepository(private val context: Context) {
             sparkMode = p[Keys.sparkMode] ?: false,
             homeAddress = p[Keys.homeAddress] ?: "",
             autoSpeak = p[Keys.autoSpeak] ?: false,
+            keepAliveEnabled = p[Keys.keepAliveEnabled] ?: false,
+            bootStartEnabled = p[Keys.bootStartEnabled] ?: false,
             savedProviders = p[Keys.savedProviders]?.let { s ->
                 runCatching { providerJson.decodeFromString<Map<String, ProviderCredentials>>(s) }
                     .getOrDefault(emptyMap())
@@ -93,6 +97,8 @@ class SettingsRepository(private val context: Context) {
             p[Keys.sparkMode] = settings.sparkMode
             p[Keys.homeAddress] = settings.homeAddress
             p[Keys.autoSpeak] = settings.autoSpeak
+            p[Keys.keepAliveEnabled] = settings.keepAliveEnabled
+            p[Keys.bootStartEnabled] = settings.bootStartEnabled
             p[Keys.savedProviders] = providerJson.encodeToString(settings.savedProviders)
         }
     }

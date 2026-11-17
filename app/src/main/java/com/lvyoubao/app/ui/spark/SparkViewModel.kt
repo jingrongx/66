@@ -43,7 +43,13 @@ data class SparkMessage(
 
 class SparkViewModel(app: TravelApp) : ViewModel() {
 
+    private companion object {
+        // 回答播报完毕后静默 N 秒自动回到萌眼待机
+        const val EYES_RETURN_AFTER_MS = 4_000L
+    }
+
     private val repo = app.settingsRepository
+    private val memory = app.memoryStore
 
     // 必须 Eagerly：灵动屏界面从不收集这个流，WhileSubscribed 会让上游永不启动，
     // settings.value 永远停在默认空配置——曾导致退出灵动屏把默认空配置整体写回、
@@ -81,16 +87,60 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var activeRecording: SpeechInput.Recording? = null
     private var recordTimerJob: Job? = null
     private var aiRequestJob: Job? = null
+    private var idleToEyesJob: Job? = null
 
     init {
-        // 监听 TTS 状态：播报完毕自动复位为 IDLE
+        // 监听 TTS 状态：播报完毕自动复位为 IDLE；之后静默几秒无新交互就回到萌眼待机
         viewModelScope.launch {
             TtsPlayer.state.collect { ttsState ->
                 if (_eyeState.value == SparkEyeState.SPEAKING && ttsState is TtsPlayer.State.Idle) {
                     _eyeState.value = SparkEyeState.IDLE
+                    idleToEyesJob?.cancel()
+                    idleToEyesJob = viewModelScope.launch {
+                        delay(EYES_RETURN_AFTER_MS)
+                        // 这几秒里没开始新的录音/拍照/播报，才回到萌眼
+                        if (_eyeState.value == SparkEyeState.IDLE && !_isRecording.value) {
+                            _showEyes.value = true
+                        }
+                    }
                 } else if (_eyeState.value == SparkEyeState.THINKING && ttsState is TtsPlayer.State.Speaking) {
+                    idleToEyesJob?.cancel()
                     _eyeState.value = SparkEyeState.SPEAKING
                 }
+            }
+        }
+    }
+
+    /** 点会话消息：重新朗读这条内容（打断当前播报） */
+    fun replayMessage(context: Context, text: String) {
+        if (text.isBlank()) return
+        TtsPlayer.stop()
+        _eyeState.value = SparkEyeState.SPEAKING
+        _statusHint.value = null
+        TtsPlayer.speak(context, text)
+    }
+
+    /**
+     * 长按会话消息：收藏/取消收藏（与普通模式回答卡同一套个人飞轮证据，
+     * 以内容前 60 字为标题判重，已收藏再点则移除）
+     */
+    fun toggleFavorite(msg: SparkMessage, onResult: (String) -> Unit) {
+        viewModelScope.launch {
+            val title = msg.text.take(60)
+            val existing = memory.entries.value.firstOrNull {
+                it.kind == com.lvyoubao.app.data.MemoryStore.MemoryEntry.EVIDENCE && it.title == title
+            }
+            if (existing != null) {
+                memory.remove(existing.ts)
+                onResult("已取消收藏")
+            } else {
+                memory.add(
+                    kind = com.lvyoubao.app.data.MemoryStore.MemoryEntry.EVIDENCE,
+                    title = title,
+                    detail = msg.text.take(2000),
+                    source = "灵动屏（用户收藏）",
+                )
+                onResult("已收藏 ✓")
             }
         }
     }
@@ -132,7 +182,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return
         }
 
-        // 停止之前的朗读
+        // 停止之前的朗读，取消「回萌眼」倒计时（用户开始新交互了）
+        idleToEyesJob?.cancel()
         TtsPlayer.stop()
         _eyeState.value = SparkEyeState.LISTENING
         _showEyes.value = true // 按下时立刻呈现大眼睛动画
@@ -229,6 +280,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 抓拍单帧图片 -> 保存 Bitmap 供界面展示缩略图 -> 切换为会话框 -> 提交 DeepSeek 视觉解析
      */
     fun captureAndAnalyze(context: Context) {
+        idleToEyesJob?.cancel()
         TtsPlayer.stop()
         _eyeState.value = SparkEyeState.CAPTURING
         _statusHint.value = "正在拍照…"
@@ -262,6 +314,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 读取 Uri 解码 Bitmap 供界面展示 -> 切换为会话框 -> 提交 DeepSeek 视觉解析
      */
     fun handlePickedImage(context: Context, uri: android.net.Uri) {
+        idleToEyesJob?.cancel()
         TtsPlayer.stop()
         _statusHint.value = "正在读取相册…"
 
@@ -415,6 +468,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 模式切换只认设置页开关，这里只做收尾（停朗读、停录音），退出交给调用方 finishAffinity
      */
     fun exitApp() {
+        idleToEyesJob?.cancel()
         TtsPlayer.stop()
         activeRecording?.let {
             SpeechInput.cancelRecording(it)

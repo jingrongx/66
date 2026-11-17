@@ -1,6 +1,7 @@
 package com.lvyoubao.app.ui.spark
 
 import android.Manifest
+import android.content.Intent
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -99,6 +100,9 @@ fun SparkModeScreen(
 
     // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
+
+    // 长按会话消息弹出的操作面板（收藏/分享）
+    var actionMsg by remember { mutableStateOf<SparkMessage?>(null) }
 
     // 退出 = 退出应用（对齐大字模式：停朗读停录音后 finishAffinity）
     val exitApp = {
@@ -275,7 +279,13 @@ fun SparkModeScreen(
                     )
                 } else {
                     // 会话流展示（完整历史回看：用户问题/拍照轮在右，小源回答在左）
-                    ChatStream(messages = messages, scale = scale)
+                    // 点消息重播朗读；长按弹出收藏/分享
+                    ChatStream(
+                        messages = messages,
+                        scale = scale,
+                        onMsgTap = { msg -> vm.replayMessage(context, msg.text) },
+                        onMsgLongPress = { msg -> actionMsg = msg },
+                    )
                 }
             }
         }
@@ -365,6 +375,87 @@ fun SparkModeScreen(
         }
         }
 
+        // ---------- 消息操作浮层：长按会话消息弹出（收藏/分享） ----------
+        actionMsg?.let { msg ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .pointerInput(Unit) { detectTapGestures { actionMsg = null } },
+                contentAlignment = Alignment.Center,
+            ) {
+                Surface(
+                    shape = RoundedCornerShape((14 * scale).dp),
+                    color = Color(0xFF1B2330),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .padding((14 * scale).dp)
+                            .widthIn(min = (160 * scale).dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = msg.text.take(24) + if (msg.text.length > 24) "…" else "",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = (12 * scale).sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.height((10 * scale).dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy((8 * scale).dp)) {
+                            // 收藏/取消收藏（与普通模式同一套个人飞轮证据，重复长按同一条切换）
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape((10 * scale).dp))
+                                    .background(Color.White.copy(alpha = 0.12f))
+                                    .clickable {
+                                        vm.toggleFavorite(msg) { hint ->
+                                            vm.setTransientHint(hint)
+                                            actionMsg = null
+                                        }
+                                    }
+                                    .padding(horizontal = (12 * scale).dp, vertical = (6 * scale).dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "⭐ 收藏",
+                                    color = Color.White,
+                                    fontSize = (13 * scale).sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                            // 分享：系统分享面板（纯文本，微信/短信/剪贴板都能接）
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape((10 * scale).dp))
+                                    .background(Color.White.copy(alpha = 0.12f))
+                                    .clickable {
+                                        val send = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(Intent.EXTRA_TEXT, msg.text)
+                                        }
+                                        runCatching {
+                                            context.startActivity(Intent.createChooser(send, "分享会话内容"))
+                                        }
+                                        actionMsg = null
+                                    }
+                                    .padding(horizontal = (12 * scale).dp, vertical = (6 * scale).dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "↗ 分享",
+                                    color = Color.White,
+                                    fontSize = (13 * scale).sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ---------- 设置页覆盖层：右上角「设置」进入 ----------
         // 独立全屏宿主：Surface 铺不透明背景抢占整屏，insets 由设置页自管
         // （与大字/灵动屏开关互斥，退出灵动屏只认这里的开关）
@@ -393,6 +484,8 @@ fun SparkModeScreen(
 private fun ChatStream(
     messages: List<SparkMessage>,
     scale: Float,
+    onMsgTap: (SparkMessage) -> Unit = {},
+    onMsgLongPress: (SparkMessage) -> Unit = {},
 ) {
     val scrollState = rememberScrollState()
 
@@ -454,6 +547,13 @@ private fun ChatStream(
                                 .widthIn(max = (250 * scale).dp)
                                 .clip(RoundedCornerShape((10 * scale).dp))
                                 .background(Color(0xFF80D8FF).copy(alpha = 0.16f))
+                                .pointerInput(msg) {
+                                    // 点＝重播朗读，长按＝收藏/分享
+                                    detectTapGestures(
+                                        onTap = { onMsgTap(msg) },
+                                        onLongPress = { onMsgLongPress(msg) },
+                                    )
+                                }
                                 .padding(horizontal = (8 * scale).dp, vertical = (5 * scale).dp),
                         )
                     }
@@ -469,6 +569,13 @@ private fun ChatStream(
                             .widthIn(max = (250 * scale).dp)
                             .clip(RoundedCornerShape((10 * scale).dp))
                             .background(Color.White.copy(alpha = 0.07f))
+                            .pointerInput(msg) {
+                                // 点＝重播朗读，长按＝收藏/分享
+                                detectTapGestures(
+                                    onTap = { onMsgTap(msg) },
+                                    onLongPress = { onMsgLongPress(msg) },
+                                )
+                            }
                             .padding(horizontal = (8 * scale).dp, vertical = (5 * scale).dp),
                     )
                 }

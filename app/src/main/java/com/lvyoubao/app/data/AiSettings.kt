@@ -22,5 +22,7 @@ data class AiSettings(
     val sparkMode: Boolean = false, // 灵动屏模式：专为手表/小屏打造，极简可爱双眼，唤醒即对话，按需视觉识别
     val homeAddress: String = "",     // 常用地址（家）：问「回家的路」直接导航回家，不用每次问地址
     val autoSpeak: Boolean = false,   // 顶部开关：新回答自动朗读
+    val keepAliveEnabled: Boolean = false, // 后台常驻：前台服务保活，不被系统回收（灵动屏/随身设备场景）
+    val bootStartEnabled: Boolean = false, // 开机自启：开机完成后自动拉起应用/常驻服务（设为桌面时系统本来就会拉起）
     val savedProviders: Map<String, ProviderCredentials> = emptyMap(), // 每个供应商各自记住的接口配置，切换时恢复自己的，互不带Key
 )

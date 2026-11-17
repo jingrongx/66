@@ -56,6 +56,14 @@ class MainActivity : ComponentActivity() {
                     else "云端朗读兜底 Key：已配置（长度 ${appSettings.asrKey.length}）",
                 )
             }
+            // 后台常驻开关应用：开着就拉起前台服务，关了就停（设置页开关切换时也会实时启停）
+            LaunchedEffect(appSettings.keepAliveEnabled) {
+                if (appSettings.keepAliveEnabled) {
+                    com.lvyoubao.app.KeepAliveService.start(this@MainActivity)
+                } else {
+                    com.lvyoubao.app.KeepAliveService.stop(this@MainActivity)
+                }
+            }
             val density = LocalDensity.current
             // 锁定系统字体缩放（关怀模式/大字体把 fontScale 放大后，固定字号的设计布局会被二次
             // 放大挤爆：按钮文字换行、标题溢出、底栏挤成一团）。放大字号由应用自己的「大字模式」

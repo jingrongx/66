@@ -1,7 +1,15 @@
 package com.lvyoubao.app.ui.settings
 
+import android.Manifest
+import android.app.role.RoleManager
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -62,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.lvyoubao.app.KeepAliveService
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.ProviderPresets
@@ -96,6 +105,16 @@ fun SettingsScreen(
     var savedTick by remember { mutableStateOf(0) }
     var showSyncQr by remember { mutableStateOf(false) }
     var showScanner by remember { mutableStateOf(false) }
+
+    // 桌面与后台：常驻通知权限、默认桌面角色状态与请求
+    var isDefaultHome by remember { mutableStateOf(false) }
+    val notiPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { }
+    val homeRoleLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { isDefaultHome = isDefaultHomeNow(context) }
+    LaunchedEffect(Unit) { isDefaultHome = isDefaultHomeNow(context) }
 
     BackHandler { onClose() }
 
@@ -666,6 +685,73 @@ fun SettingsScreen(
             }
         }
 
+        // ---------- 桌面与后台 ----------
+        SectionLabel("桌面与后台")
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("后台常驻运行", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "前台服务保活不被系统回收 · 通知栏常驻一条，点按回到应用",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.keepAliveEnabled,
+                        onCheckedChange = { checked ->
+                            // 33+ 常驻通知要展示需要通知权限（拒绝也不影响服务本身）
+                            if (checked && Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS,
+                                ) != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                notiPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            vm.updateDraft { it.copy(keepAliveEnabled = checked) }
+                            vm.save(onSaved = {})
+                            if (checked) KeepAliveService.start(context) else KeepAliveService.stop(context)
+                        },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("开机自启", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "开机后自动拉起常驻服务并尝试进入应用；设为默认桌面时系统开机本来就会进入",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.bootStartEnabled,
+                        onCheckedChange = { checked ->
+                            vm.updateDraft { it.copy(bootStartEnabled = checked) }
+                            vm.save(onSaved = {})
+                        },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                SettingRow(
+                    title = if (isDefaultHome) "已设为默认桌面 ✓" else "设为默认桌面（开机即进）",
+                    value = if (isDefaultHome) "已设置" else "去设置",
+                    onClick = { requestDefaultHome(context, homeRoleLauncher) },
+                )
+            }
+        }
+
         // ---------- 语音输入 ----------
         SectionLabel("语音输入")
         ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
@@ -986,6 +1072,40 @@ private fun SettingRow(title: String, value: String, onClick: () -> Unit) {
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+/** 是否已被设为默认桌面（HOME 角色）；Android 9- 走默认解析器比对包名 */
+internal fun isDefaultHomeNow(context: Context): Boolean = if (Build.VERSION.SDK_INT >= 29) {
+    runCatching {
+        context.getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_HOME)
+    }.getOrNull() ?: false
+} else {
+    val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+    val pkg = runCatching {
+        context.packageManager.resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY)
+            ?.activityInfo?.packageName
+    }.getOrNull()
+    pkg == context.packageName
+}
+
+/** 发起「设为默认桌面」系统请求；无 HOME 角色能力的 ROM 退回系统默认应用设置页 */
+internal fun requestDefaultHome(
+    context: Context,
+    launcher: androidx.activity.result.ActivityResultLauncher<Intent>,
+) {
+    if (Build.VERSION.SDK_INT >= 29) {
+        val rm = context.getSystemService(RoleManager::class.java)
+        if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_HOME)) {
+            launcher.launch(rm.createRequestRoleIntent(RoleManager.ROLE_HOME))
+            return
+        }
+    }
+    runCatching {
+        context.startActivity(
+            Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }
 }
