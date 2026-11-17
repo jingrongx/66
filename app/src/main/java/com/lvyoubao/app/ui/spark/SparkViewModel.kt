@@ -74,15 +74,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private val _recordTick = MutableStateFlow(0)
     val recordTick: StateFlow<Int> = _recordTick.asStateFlow()
 
-    // 完整会话流（流式滚动展示，上下文可回看）；上限 40 条防图片占内存
-    private val _messages = MutableStateFlow<List<SparkMessage>>(emptyList())
-    val messages: StateFlow<List<SparkMessage>> = _messages.asStateFlow()
+    // 完整会话流：挂进程级单例（低内存设备上 VM/Activity 被系统重建时会话不丢）
+    val messages: StateFlow<List<SparkMessage>> = SparkChatStore.messages
 
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
-
-    // 完整对话历史（48,000 字符最大预算）
-    private val conversationHistory = mutableListOf<OutMessage>()
 
     private var activeRecording: SpeechInput.Recording? = null
     private var recordTimerJob: Job? = null
@@ -90,22 +86,33 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var idleToEyesJob: Job? = null
 
     init {
-        // 监听 TTS 状态：播报完毕自动复位为 IDLE；之后静默几秒无新交互就回到萌眼待机
+        // 监听 TTS 状态。
+        // 注意双段播报时序：流式先读前几字（很短，几秒播完发 Idle），完整答案再 speak() 重启播放——
+        // 交界的瞬时 Idle 曾把状态误判成「播完」并切回 IDLE，之后计时器在真播报中把眼睛顶出来。
+        // 所以：Speaking 到达一律重断言（从 THINKING/IDLE 拉回 SPEAKING）并取消回萌眼倒计时；
+        // Idle 只在「当前确实是播报态」时才当播完处理；计时到点再复核一次真实播放状态。
         viewModelScope.launch {
             TtsPlayer.state.collect { ttsState ->
-                if (_eyeState.value == SparkEyeState.SPEAKING && ttsState is TtsPlayer.State.Idle) {
-                    _eyeState.value = SparkEyeState.IDLE
-                    idleToEyesJob?.cancel()
-                    idleToEyesJob = viewModelScope.launch {
-                        delay(EYES_RETURN_AFTER_MS)
-                        // 这几秒里没开始新的录音/拍照/播报，才回到萌眼
-                        if (_eyeState.value == SparkEyeState.IDLE && !_isRecording.value) {
-                            _showEyes.value = true
+                when {
+                    ttsState is TtsPlayer.State.Speaking -> {
+                        idleToEyesJob?.cancel()
+                        if (_eyeState.value == SparkEyeState.THINKING || _eyeState.value == SparkEyeState.IDLE) {
+                            _eyeState.value = SparkEyeState.SPEAKING
                         }
                     }
-                } else if (_eyeState.value == SparkEyeState.THINKING && ttsState is TtsPlayer.State.Speaking) {
-                    idleToEyesJob?.cancel()
-                    _eyeState.value = SparkEyeState.SPEAKING
+                    ttsState is TtsPlayer.State.Idle && _eyeState.value == SparkEyeState.SPEAKING -> {
+                        _eyeState.value = SparkEyeState.IDLE
+                        idleToEyesJob?.cancel()
+                        idleToEyesJob = viewModelScope.launch {
+                            delay(EYES_RETURN_AFTER_MS)
+                            if (TtsPlayer.state.value is TtsPlayer.State.Idle &&
+                                _eyeState.value == SparkEyeState.IDLE &&
+                                !_isRecording.value
+                            ) {
+                                _showEyes.value = true
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -157,19 +164,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         _showEyes.value = show
     }
 
-    /** 追加一条会话消息（超上限丢最旧的，防图片占内存） */
-    private fun appendMessage(msg: SparkMessage) {
-        _messages.value = (_messages.value + msg).takeLast(40)
-    }
-
-    /** 流式更新最后一条 assistant 消息 */
-    private fun updateLastAssistant(text: String) {
-        val list = _messages.value.toMutableList()
-        if (list.isNotEmpty() && list.last().role == "assistant") {
-            list[list.lastIndex] = list.last().copy(text = text)
-            _messages.value = list
-        }
-    }
+    /** 追加一条会话消息（仓库内部防照片占内存） */
+    private fun appendMessage(msg: SparkMessage) = SparkChatStore.append(msg)
 
     /**
      * 按住说话：按下开始录音
@@ -276,42 +272,32 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
-     * 按需拍照识别：
-     * 抓拍单帧图片 -> 保存 Bitmap 供界面展示缩略图 -> 切换为会话框 -> 提交 DeepSeek 视觉解析
+     * 系统相机拍完（TakePicture 已把照片写进 FileProvider 文件）：
+     * EXIF 转正 → 降采样 → 进会话流 → 提交视觉解析。
+     * 之前用 Camera2 裸抓帧：传感器方向没处理（照片是横的）、无预览暖场首帧即抓（曝光未就绪全黑）。
      */
-    fun captureAndAnalyze(context: Context) {
+    fun handleCapturedPhoto(context: Context, uri: android.net.Uri) {
         idleToEyesJob?.cancel()
         TtsPlayer.stop()
-        _eyeState.value = SparkEyeState.CAPTURING
-        _statusHint.value = "正在拍照…"
+        _statusHint.value = "正在读取照片…"
 
-        viewModelScope.launch {
-            val result = CameraSnapshotHelper.takeSnapshot(context)
-            if (result == null) {
-                _eyeState.value = SparkEyeState.IDLE
-                _statusHint.value = "拍照失败，请检查摄像头权限"
+        viewModelScope.launch(Dispatchers.IO) {
+            val bitmap = SparkImageCodec.decodeUpright(context, uri)
+            if (bitmap == null) {
+                _statusHint.value = "照片读取失败，请重拍一次"
                 return@launch
             }
-
-            // 照片只属于拍照这一轮：随消息进会话流，说话的新一轮不会再带着旧照片
-            appendMessage(SparkMessage("user", "📷 帮我看看拍到了什么", result.bitmap))
-            appendMessage(SparkMessage("assistant", "小源正在观察画面…"))
-            _showEyes.value = false // 切换为会话流，露出刚刚拍到的照片和回答
-
-            _eyeState.value = SparkEyeState.THINKING
-            _statusHint.value = "小源正在观察…"
-
-            sendAiRequest(
+            proceedWithImage(
                 context = context,
-                userText = "请结合这张刚刚拍摄的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
-                imageDataUrls = listOf(result.dataUrl),
+                bitmap = bitmap,
+                userLabel = "📷 帮我看看拍到了什么",
+                prompt = "请结合这张刚刚拍摄的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
             )
         }
     }
 
     /**
-     * 选择相册图片识别：
-     * 读取 Uri 解码 Bitmap 供界面展示 -> 切换为会话框 -> 提交 DeepSeek 视觉解析
+     * 选择相册图片识别：系统选择器返回 Uri → EXIF 转正降采样 → 进会话流 → 视觉解析
      */
     fun handlePickedImage(context: Context, uri: android.net.Uri) {
         idleToEyesJob?.cancel()
@@ -319,44 +305,44 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         _statusHint.value = "正在读取相册…"
 
         viewModelScope.launch(Dispatchers.IO) {
-            val resolver = context.contentResolver
-            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
-
-            var sample = 1
-            while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) {
-                sample *= 2
-            }
-
-            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
-            val bitmap = resolver.openInputStream(uri)?.use {
-                android.graphics.BitmapFactory.decodeStream(it, null, opts)
-            }
-
+            val bitmap = SparkImageCodec.decodeUpright(context, uri)
             if (bitmap == null) {
                 _statusHint.value = "图片读取失败"
                 return@launch
             }
-
-            val out = java.io.ByteArrayOutputStream()
-            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, out)
-            val bytes = out.toByteArray()
-            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-            val dataUrl = "data:image/jpeg;base64,$base64"
-
-            appendMessage(SparkMessage("user", "🖼 帮我看看这张相册照片", bitmap))
-            appendMessage(SparkMessage("assistant", "小源正在观察相册图片…"))
-            _showEyes.value = false // 切换为会话流
-
-            _eyeState.value = SparkEyeState.THINKING
-            _statusHint.value = "小源正在观察…"
-
-            sendAiRequest(
+            proceedWithImage(
                 context = context,
-                userText = "请结合这张选自相册的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
-                imageDataUrls = listOf(dataUrl),
+                bitmap = bitmap,
+                userLabel = "🖼 帮我看看这张相册照片",
+                prompt = "请结合这张选自相册的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
             )
         }
+    }
+
+    /** 照片进会话流（缩略图只挂这一轮）+ base64 提交视觉解析 */
+    private fun proceedWithImage(
+        context: Context,
+        bitmap: Bitmap,
+        userLabel: String,
+        prompt: String,
+    ) {
+        val out = java.io.ByteArrayOutputStream()
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, out)
+        val base64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        val dataUrl = "data:image/jpeg;base64,$base64"
+
+        appendMessage(SparkMessage("user", userLabel, bitmap))
+        appendMessage(SparkMessage("assistant", "小源正在观察画面…"))
+        _showEyes.value = false // 切换为会话流，露出刚选的照片和回答
+
+        _eyeState.value = SparkEyeState.THINKING
+        _statusHint.value = "小源正在观察…"
+
+        sendAiRequest(
+            context = context,
+            userText = prompt,
+            imageDataUrls = listOf(dataUrl),
+        )
     }
 
     private fun sendAiRequest(
@@ -372,7 +358,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             if (curSettings.apiKey.isBlank()) {
                 _eyeState.value = SparkEyeState.IDLE
                 _isStreaming.value = false
-                updateLastAssistant("未配置 API Key，请去「设置」选择服务商并填写 Key。")
+                SparkChatStore.updateLastAssistant("未配置 API Key，请去「设置」选择服务商并填写 Key。")
                 _statusHint.value = "未配置 API Key"
                 return@launch
             }
@@ -395,7 +381,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 4. 若涉及视觉看图，生动具体地告诉用户拍到了什么。
             """.trimIndent()
 
-            val historyPayload = selectHistoryBudget(conversationHistory, 48_000)
+            val historyPayload = SparkChatStore.historyBudget(48_000)
 
             val currentUserMsg = OutMessage(
                 role = "user",
@@ -418,7 +404,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 searchEnabled = false,
                 onAnswer = { chunk ->
                     speechBuffer.append(chunk)
-                    updateLastAssistant(speechBuffer.toString())
+                    SparkChatStore.updateLastAssistant(speechBuffer.toString())
 
                     if (!hasStartedTts && speechBuffer.length >= 6) {
                         hasStartedTts = true
@@ -430,11 +416,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             ).fold(
                 onSuccess = { reply ->
                     val finalAnswer = reply.answer.trim()
-                    updateLastAssistant(finalAnswer)
+                    SparkChatStore.updateLastAssistant(finalAnswer)
                     _isStreaming.value = false
 
-                    conversationHistory.add(currentUserMsg)
-                    conversationHistory.add(OutMessage("assistant", finalAnswer))
+                    SparkChatStore.appendHistory(currentUserMsg)
+                    SparkChatStore.appendHistory(OutMessage("assistant", finalAnswer))
 
                     _eyeState.value = SparkEyeState.SPEAKING
                     _statusHint.value = null
@@ -443,24 +429,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 onFailure = { err ->
                     _eyeState.value = SparkEyeState.IDLE
                     _isStreaming.value = false
-                    updateLastAssistant("请求出错啦：${err.message ?: "网络超时"}")
+                    SparkChatStore.updateLastAssistant("请求出错啦：${err.message ?: "网络超时"}")
                     _statusHint.value = "请求失败"
                 },
             )
         }
-    }
-
-    private fun selectHistoryBudget(all: List<OutMessage>, budget: Int): List<OutMessage> {
-        if (all.isEmpty()) return emptyList()
-        var used = 0
-        var count = 0
-        for (msg in all.asReversed()) {
-            val cost = msg.text.length + 100 + msg.images.size * 2000
-            if (count >= 2 && used + cost > budget) break
-            used += cost
-            count++
-        }
-        return all.takeLast(count)
     }
 
     /**

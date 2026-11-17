@@ -69,6 +69,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -80,6 +81,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import kotlinx.coroutines.delay
+import java.io.File
 
 @Composable
 fun SparkModeScreen(
@@ -120,18 +122,39 @@ fun SparkModeScreen(
         }
     }
 
+    // 拍照走系统相机（TakePicture 落到 FileProvider 文件）：方向/曝光都由相机应用处理——
+    // 之前 Camera2 裸抓帧没处理传感器方向（横照）也没预览暖场（首帧全黑）
+    val cameraPhotoFile = remember {
+        File(context.cacheDir, "images").apply { mkdirs() }
+        File(context.cacheDir, "images/spark_capture.jpg")
+    }
+    val photoUri = remember {
+        FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            cameraPhotoFile,
+        )
+    }
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture(),
+    ) { ok ->
+        if (ok) {
+            vm.handleCapturedPhoto(context, photoUri)
+        }
+    }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            vm.captureAndAnalyze(context)
+            cameraLauncher.launch(photoUri)
         } else {
             vm.setTransientHint("需要相机权限才能拍照观察")
         }
     }
 
+    // 相册走系统 GetContent（ACTION_GET_CONTENT）：老设备/魔改 ROM 没有 Photo Picker 也能调出图库
     val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
+        contract = ActivityResultContracts.GetContent(),
     ) { uri ->
         if (uri != null) {
             vm.handlePickedImage(context, uri)
@@ -301,7 +324,7 @@ fun SparkModeScreen(
             horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 📷 拍照提问按钮
+            // 📷 拍照提问按钮（系统相机）
             Box(
                 modifier = Modifier
                     .size((40 * scale).dp)
@@ -310,7 +333,7 @@ fun SparkModeScreen(
                     .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape((12 * scale).dp))
                     .clickable {
                         if (CameraSnapshotHelper.hasCameraPermission(context)) {
-                            vm.captureAndAnalyze(context)
+                            cameraLauncher.launch(photoUri)
                         } else {
                             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                         }
@@ -320,7 +343,7 @@ fun SparkModeScreen(
                 Text("📷", fontSize = (20 * scale).sp)
             }
 
-            // 🖼️ 相册选图提问按钮
+            // 🖼️ 相册选图提问按钮（系统图库选择器）
             Box(
                 modifier = Modifier
                     .size((40 * scale).dp)
@@ -328,11 +351,7 @@ fun SparkModeScreen(
                     .background(Color.White.copy(alpha = 0.10f))
                     .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape((12 * scale).dp))
                     .clickable {
-                        galleryLauncher.launch(
-                            androidx.activity.result.PickVisualMediaRequest(
-                                ActivityResultContracts.PickVisualMedia.ImageOnly,
-                            ),
-                        )
+                        galleryLauncher.launch("image/*")
                     },
                 contentAlignment = Alignment.Center,
             ) {
