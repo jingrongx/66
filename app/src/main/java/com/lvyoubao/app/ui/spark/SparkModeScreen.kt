@@ -142,16 +142,20 @@ fun SparkModeScreen(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0D1117)) // 深邃科技黑底色（铺满含系统栏区域）
-            // 接管系统栏/刘海 insets：与普通/大字模式同口径，内容不再和
-            // 状态栏横幅、虚拟导航键、手势条重叠（手机横竖屏、手表均适配）
-            .windowInsetsPadding(WindowInsets.safeDrawing),
+            .background(Color(0xFF0D1117)), // 深邃科技黑底色（铺满含系统栏区域）
     ) {
         // 布局按 308x240 手表小屏设计；在手机等大屏上以可用短边为基准等比放大，
         // 保持与设计稿一致的构图与可点面积（小屏恒为 1，观感不变）
         val scale = (minOf(maxWidth, maxHeight) / 240.dp).coerceIn(1f, 1.9f)
 
-        Column(modifier = Modifier.fillMaxSize()) {
+        // 接管系统栏/刘海 insets：与普通/大字模式同口径，灵动屏自身内容不与系统栏重叠。
+        // 注意设置页不能放这层里面——它自带 safeDrawing 接管，嵌进来会双重留白/透明漏底
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing),
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
         // ---------- 顶部状态与退出栏（随屏幕等比放大，不挤不裁） ----------
         Row(
             modifier = Modifier
@@ -359,14 +363,22 @@ fun SparkModeScreen(
             }
         }
         }
+        }
 
-        // ---------- 设置页覆盖层：右上角「设置」进入；大字/灵动屏开关互斥，退出灵动屏只认这里 ----------
+        // ---------- 设置页覆盖层：右上角「设置」进入 ----------
+        // 独立全屏宿主：Surface 铺不透明背景抢占整屏，insets 由设置页自管
+        // （与大字/灵动屏开关互斥，退出灵动屏只认这里的开关）
         if (showSettings) {
-            SettingsScreen(
-                onClose = { showSettings = false },
-                onOpenUpdate = {},
-                app = app,
-            )
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.surface,
+            ) {
+                SettingsScreen(
+                    onClose = { showSettings = false },
+                    onOpenUpdate = {},
+                    app = app,
+                )
+            }
         }
     }
 }
