@@ -16,9 +16,11 @@ internal object SparkImageCodec {
     fun decodeUpright(context: Context, uri: Uri): Bitmap? = runCatching {
         val resolver = context.contentResolver
 
+        // 注意：inJustDecodeBounds=true 的解码恒返回 null（只填 bounds.outWidth/outHeight），
+        // 不能拿它的返回值判空——否则永远判「读取失败」（v0.8.77 曾踩坑，普通模式 v0.7.5 也踩过同一个）
+        val boundsStream = resolver.openInputStream(uri) ?: return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: return null
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
 
         var sample = 1
         while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) {
@@ -30,8 +32,10 @@ internal object SparkImageCodec {
             BitmapFactory.decodeStream(it, null, opts)
         } ?: return null
 
-        val orientation = resolver.openInputStream(uri)?.use { ExifInterface(it) }
-            ?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        val orientationStream = resolver.openInputStream(uri) ?: return decoded
+        val orientation = orientationStream.use { exifStream ->
+            ExifInterface(exifStream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        }
 
         val rotation = when (orientation) {
             ExifInterface.ORIENTATION_ROTATE_90 -> 90f

@@ -34,12 +34,15 @@ enum class SparkEyeState {
     MUTED,       // 静默安睡模式，月牙眯眼
 }
 
-/** 会话流中的一条消息：photo 仅在拍照/选图那一轮携带，随消息滚走，不再常驻顶部 */
+/** 会话流中的一条消息：photos 仅在带图那一轮携带（可多张），随消息滚走，不再常驻顶部 */
 data class SparkMessage(
     val role: String, // "user" / "assistant"
     val text: String,
-    val photo: Bitmap? = null,
+    val photos: List<Bitmap> = emptyList(),
 )
+
+/** 待发送照片：解码转正后的位图 + 视觉模型要的 base64 dataUrl */
+data class PendingPhoto(val bitmap: Bitmap, val dataUrl: String)
 
 class SparkViewModel(app: TravelApp) : ViewModel() {
 
@@ -79,6 +82,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
+
+    // 待发送照片缓冲：拍照/相册可连续加多张，按住说话时随问题一起发，或点「立即识别」单独问
+    private val _pendingPhotos = MutableStateFlow<List<PendingPhoto>>(emptyList())
+    val pendingPhotos: StateFlow<List<PendingPhoto>> = _pendingPhotos.asStateFlow()
 
     private var activeRecording: SpeechInput.Recording? = null
     private var recordTimerJob: Job? = null
@@ -252,9 +259,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 onSuccess = { spoken ->
                     val clean = HotwordCorrector.correct(spoken.trim())
                     if (clean.isNotBlank()) {
-                        appendMessage(SparkMessage("user", clean))
+                        // 按住说话时若缓冲里有照片，随这个问题一起发出去
+                        val pending = _pendingPhotos.value
+                        appendMessage(SparkMessage("user", clean, pending.map { it.bitmap }))
+                        _pendingPhotos.value = emptyList()
                         _showEyes.value = false // 提问完成，自动切换为会话流展示
-                        sendAiRequest(context, clean, emptyList())
+                        sendAiRequest(context, clean, pending.map { it.dataUrl })
                     } else {
                         _eyeState.value = SparkEyeState.IDLE
                         _statusHint.value = "没听清你说什么，可以再试一次"
@@ -272,67 +282,60 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
-     * 系统相机拍完（TakePicture 已把照片写进 FileProvider 文件）：
-     * EXIF 转正 → 降采样 → 进会话流 → 提交视觉解析。
-     * 之前用 Camera2 裸抓帧：传感器方向没处理（照片是横的）、无预览暖场首帧即抓（曝光未就绪全黑）。
+     * 拍照/相册照片入待发送缓冲（可连续多张）：
+     * EXIF 转正 → 降采样 → 缩略图条显示；点「立即识别」或按住说话时一起发出去。
+     * 之前用 Camera2 裸抓帧：传感器方向没处理（照片是横的）、无预览暖场首帧即抓（曝光未就绪全黑），
+     * 现已改走系统相机（TakePicture）+系统图库（GetMultipleContents 多选）。
      */
-    fun handleCapturedPhoto(context: Context, uri: android.net.Uri) {
+    fun addPendingPhotos(context: Context, uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
         idleToEyesJob?.cancel()
         TtsPlayer.stop()
         _statusHint.value = "正在读取照片…"
 
         viewModelScope.launch(Dispatchers.IO) {
-            val bitmap = SparkImageCodec.decodeUpright(context, uri)
-            if (bitmap == null) {
-                _statusHint.value = "照片读取失败，请重拍一次"
+            val added = uris.mapNotNull { uri ->
+                SparkImageCodec.decodeUpright(context, uri)?.let { bitmap ->
+                    val out = java.io.ByteArrayOutputStream()
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, out)
+                    val base64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+                    PendingPhoto(bitmap, "data:image/jpeg;base64,$base64")
+                }
+            }
+            if (added.isEmpty()) {
+                _statusHint.value = "照片读取失败，请重试"
                 return@launch
             }
-            proceedWithImage(
-                context = context,
-                bitmap = bitmap,
-                userLabel = "📷 帮我看看拍到了什么",
-                prompt = "请结合这张刚刚拍摄的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
-            )
+            _pendingPhotos.value = (_pendingPhotos.value + added).takeLast(9)
+            _statusHint.value = "已加 ${_pendingPhotos.value.size} 张照片，点「识别」或按住说话"
         }
     }
 
-    /**
-     * 选择相册图片识别：系统选择器返回 Uri → EXIF 转正降采样 → 进会话流 → 视觉解析
-     */
-    fun handlePickedImage(context: Context, uri: android.net.Uri) {
+    /** 缩略图条上的「立即识别」：把缓冲里的照片一起交给视觉解析 */
+    fun analyzePending(context: Context) {
+        val pending = _pendingPhotos.value
+        if (pending.isEmpty()) return
         idleToEyesJob?.cancel()
         TtsPlayer.stop()
-        _statusHint.value = "正在读取相册…"
-
-        viewModelScope.launch(Dispatchers.IO) {
-            val bitmap = SparkImageCodec.decodeUpright(context, uri)
-            if (bitmap == null) {
-                _statusHint.value = "图片读取失败"
-                return@launch
-            }
-            proceedWithImage(
-                context = context,
-                bitmap = bitmap,
-                userLabel = "🖼 帮我看看这张相册照片",
-                prompt = "请结合这张选自相册的照片，用通俗易懂的自然口语简要说明画面里是什么内容。",
-            )
+        val label = if (pending.size == 1) "📷 帮我看看这张照片" else "📷 帮我看看这 ${pending.size} 张照片"
+        val prompt = if (pending.size == 1) {
+            "请结合这张照片，用通俗易懂的自然口语简要说明画面里是什么内容。"
+        } else {
+            "请结合这 ${pending.size} 张照片，用通俗易懂的自然口语简要说明拍到了什么内容。"
         }
+        sendImageQuestion(context, pending, label, prompt)
     }
 
-    /** 照片进会话流（缩略图只挂这一轮）+ base64 提交视觉解析 */
-    private fun proceedWithImage(
+    /** 照片轮入会话（缩略图只挂这一轮）+ 视觉解析，并清空待发送缓冲 */
+    private fun sendImageQuestion(
         context: Context,
-        bitmap: Bitmap,
+        photos: List<PendingPhoto>,
         userLabel: String,
         prompt: String,
     ) {
-        val out = java.io.ByteArrayOutputStream()
-        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 75, out)
-        val base64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
-        val dataUrl = "data:image/jpeg;base64,$base64"
-
-        appendMessage(SparkMessage("user", userLabel, bitmap))
+        appendMessage(SparkMessage("user", userLabel, photos.map { it.bitmap }))
         appendMessage(SparkMessage("assistant", "小源正在观察画面…"))
+        _pendingPhotos.value = emptyList()
         _showEyes.value = false // 切换为会话流，露出刚选的照片和回答
 
         _eyeState.value = SparkEyeState.THINKING
@@ -341,7 +344,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         sendAiRequest(
             context = context,
             userText = prompt,
-            imageDataUrls = listOf(dataUrl),
+            imageDataUrls = photos.map { it.dataUrl },
         )
     }
 

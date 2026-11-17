@@ -86,7 +86,8 @@ class MainActivity : ComponentActivity() {
                 )
                 val updateState by updateVm.ui.collectAsState()
                 var showUpdateScreen by remember { mutableStateOf(false) }
-                LaunchedEffect(Unit) {
+                LaunchedEffect(appSettings.sparkMode, appSettings.largeTextMode) {
+                    // 模式变化时重查一次（AutoUpdater 自带节流）；普通模式的提示由 AppRoot 自己负责
                     if (appSettings.sparkMode || appSettings.largeTextMode) updateVm.autoCheck()
                 }
                 val newVersion = updateState.release?.tag_name

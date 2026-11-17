@@ -24,6 +24,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -101,6 +102,7 @@ fun SparkModeScreen(
     val recordTick by vm.recordTick.collectAsState()
     val messages by vm.messages.collectAsState()
     val statusHint by vm.statusHint.collectAsState()
+    val pendingPhotos by vm.pendingPhotos.collectAsState()
 
     // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
@@ -141,7 +143,8 @@ fun SparkModeScreen(
         contract = ActivityResultContracts.TakePicture(),
     ) { ok ->
         if (ok) {
-            vm.handleCapturedPhoto(context, photoUri)
+            // 拍完先进待发送缓冲（可继续连拍多张），点「识别」或按住说话才发出去
+            vm.addPendingPhotos(context, listOf(photoUri))
         }
     }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
@@ -154,12 +157,13 @@ fun SparkModeScreen(
         }
     }
 
-    // 相册走系统 GetContent（ACTION_GET_CONTENT）：老设备/魔改 ROM 没有 Photo Picker 也能调出图库
+    // 相册走系统多选（GetMultipleContents = ACTION_GET_CONTENT + 多选）：
+    // 没有 Photo Picker 的老设备/魔改 ROM 也能调出图库，且支持一次勾多张
     val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
-    ) { uri ->
-        if (uri != null) {
-            vm.handlePickedImage(context, uri)
+        contract = ActivityResultContracts.GetMultipleContents(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            vm.addPendingPhotos(context, uris)
         }
     }
 
@@ -338,6 +342,51 @@ fun SparkModeScreen(
             }
         }
 
+        // ---------- 待发送照片条：拍照/相册可连续加多张，「识别」一次问完；按住说话也带图 ----------
+        if (pendingPhotos.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = (8 * scale).dp, vertical = (2 * scale).dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy((6 * scale).dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy((4 * scale).dp),
+                ) {
+                    pendingPhotos.forEach { photo ->
+                        Image(
+                            bitmap = photo.bitmap.asImageBitmap(),
+                            contentDescription = "待发送照片",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(width = (44 * scale).dp, height = (33 * scale).dp)
+                                .clip(RoundedCornerShape((6 * scale).dp))
+                                .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape((6 * scale).dp)),
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape((10 * scale).dp))
+                        .background(MaterialTheme.colorScheme.primary)
+                        .clickable { vm.analyzePending(context) }
+                        .padding(horizontal = (10 * scale).dp, vertical = (6 * scale).dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "🔍 识别 ${pendingPhotos.size} 张",
+                        color = Color.White,
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+        }
+
         // ---------- 底部操作区：相机 + 相册 + 按住说话 ----------
         // 三颗按钮同高同圆角、随屏幕等比放大（手机上约 57dp 高，远超 48dp 可点下限），
         // 侧按钮改半透明白与顶部胶囊同语言，主按钮保持品牌青色，视觉左轻右重层次分明
@@ -502,7 +551,7 @@ fun SparkModeScreen(
 
         // ---------- 设置页覆盖层：右上角「设置」进入 ----------
         // 独立全屏宿主：Surface 铺不透明背景抢占整屏，insets 由设置页自管
-        // （与大字/灵动屏开关互斥，退出灵动屏只认这里的开关）
+        // （大字/灵动屏开关互斥，退出灵动屏只认这里的开关；检查更新接统一更新页）
         if (showSettings) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
@@ -510,7 +559,7 @@ fun SparkModeScreen(
             ) {
                 SettingsScreen(
                     onClose = { showSettings = false },
-                    onOpenUpdate = {},
+                    onOpenUpdate = onUpdateClick,
                     app = app,
                 )
             }
@@ -565,21 +614,28 @@ private fun ChatStream(
 
             messages.forEach { msg ->
                 if (msg.role == "user") {
-                    // 用户消息：靠右浅蓝气泡，拍照轮带缩略图
+                    // 用户消息：靠右浅蓝气泡，带图轮展示全部照片缩略图
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalAlignment = Alignment.End,
                     ) {
-                        msg.photo?.let { photo ->
-                            Image(
-                                bitmap = photo.asImageBitmap(),
-                                contentDescription = "本轮照片",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .size(width = (72 * scale).dp, height = (54 * scale).dp)
-                                    .clip(RoundedCornerShape((8 * scale).dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape((8 * scale).dp)),
-                            )
+                        if (msg.photos.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy((4 * scale).dp),
+                            ) {
+                                msg.photos.forEach { photo ->
+                                    Image(
+                                        bitmap = photo.asImageBitmap(),
+                                        contentDescription = "本轮照片",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(width = (72 * scale).dp, height = (54 * scale).dp)
+                                            .clip(RoundedCornerShape((8 * scale).dp))
+                                            .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape((8 * scale).dp)),
+                                    )
+                                }
+                            }
                             Spacer(Modifier.height((4 * scale).dp))
                         }
                         Text(
