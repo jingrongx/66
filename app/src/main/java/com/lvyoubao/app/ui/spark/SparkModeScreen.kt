@@ -387,82 +387,118 @@ fun SparkModeScreen(
             }
         }
 
-        // ---------- 底部操作区：相机 + 相册 + 按住说话 ----------
-        // 三颗按钮同高同圆角、随屏幕等比放大（手机上约 57dp 高，远超 48dp 可点下限），
-        // 侧按钮改半透明白与顶部胶囊同语言，主按钮保持品牌青色，视觉左轻右重层次分明
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height((46 * scale).dp)
-                .padding(horizontal = (8 * scale).dp, vertical = (3 * scale).dp),
-            horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 📷 拍照提问按钮（系统相机）
-            Box(
-                modifier = Modifier
-                    .size((40 * scale).dp)
-                    .clip(RoundedCornerShape((12 * scale).dp))
-                    .background(Color.White.copy(alpha = 0.10f))
-                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape((12 * scale).dp))
-                    .clickable {
-                        if (CameraSnapshotHelper.hasCameraPermission(context)) {
-                            cameraLauncher.launch(photoUri)
-                        } else {
-                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                        }
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("📷", fontSize = (20 * scale).sp)
+        // ---------- 底部操作区（随状态换摆法） ----------
+        // 萌眼态：方案 A 完整脸——脸颊圆钮分列两侧，全宽「嘴形」胶囊居中正对眼睛（对称成脸）；
+        // 会话态：紧凑对称单行（📷｜按住说话｜🖼️），嘴依然居中不歪，聊天区更高（组合方案）
+        val onCamera: () -> Unit = {
+            if (CameraSnapshotHelper.hasCameraPermission(context)) {
+                cameraLauncher.launch(photoUri)
+            } else {
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
             }
+        }
+        val onGallery: () -> Unit = { galleryLauncher.launch("image/*") }
+        val talkGesture = Modifier.pointerInput(Unit) {
+            detectTapGestures(
+                onPress = {
+                    vm.startHoldTalk(context) {
+                        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                    try {
+                        tryAwaitRelease()
+                    } finally {
+                        vm.endHoldTalk(context)
+                    }
+                },
+            )
+        }
 
-            // 🖼️ 相册选图提问按钮（系统图库选择器）
-            Box(
+        if (showEyes) {
+            Column(
                 modifier = Modifier
-                    .size((40 * scale).dp)
-                    .clip(RoundedCornerShape((12 * scale).dp))
-                    .background(Color.White.copy(alpha = 0.10f))
-                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape((12 * scale).dp))
-                    .clickable {
-                        galleryLauncher.launch("image/*")
-                    },
-                contentAlignment = Alignment.Center,
+                    .fillMaxWidth()
+                    .padding(horizontal = (10 * scale).dp, vertical = (4 * scale).dp),
             ) {
-                Text("🖼️", fontSize = (20 * scale).sp)
-            }
-
-            // 🎙️ 按住说话按钮（操作逻辑同常规/大字模式：按住即录，松手即发，按住时显示萌眼）
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height((40 * scale).dp)
-                    .clip(RoundedCornerShape((12 * scale).dp))
-                    .background(
-                        if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary,
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Box(
+                        modifier = Modifier
+                            .size((30 * scale).dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.10f))
+                            .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                            .clickable(onClick = onCamera),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("📷", fontSize = (15 * scale).sp) }
+                    Box(
+                        modifier = Modifier
+                            .size((30 * scale).dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.10f))
+                            .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                            .clickable(onClick = onGallery),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("🖼️", fontSize = (15 * scale).sp) }
+                }
+                Spacer(Modifier.height((5 * scale).dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height((40 * scale).dp)
+                        .clip(RoundedCornerShape(percent = 50))
+                        .background(if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary)
+                        .then(talkGesture),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
+                        fontSize = (16 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
                     )
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onPress = {
-                                vm.startHoldTalk(context) {
-                                    recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                }
-                                try {
-                                    tryAwaitRelease()
-                                } finally {
-                                    vm.endHoldTalk(context)
-                                }
-                            },
-                        )
-                    },
-                contentAlignment = Alignment.Center,
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = (10 * scale).dp, vertical = (4 * scale).dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy((10 * scale).dp),
             ) {
-                Text(
-                    text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
-                    fontSize = (16 * scale).sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                )
+                Box(
+                    modifier = Modifier
+                        .size((40 * scale).dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                        .clickable(onClick = onCamera),
+                    contentAlignment = Alignment.Center,
+                ) { Text("📷", fontSize = (19 * scale).sp) }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height((40 * scale).dp)
+                        .clip(RoundedCornerShape(percent = 50))
+                        .background(if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary)
+                        .then(talkGesture),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
+                        fontSize = (16 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size((40 * scale).dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                        .clickable(onClick = onGallery),
+                    contentAlignment = Alignment.Center,
+                ) { Text("🖼️", fontSize = (19 * scale).sp) }
             }
         }
         }
