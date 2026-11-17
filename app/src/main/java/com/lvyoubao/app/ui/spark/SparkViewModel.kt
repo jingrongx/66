@@ -135,6 +135,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
+     * 语音优先设备的提示也要说出来（识别没听清/识别失败/缺 Key 等）：
+     * 切播报态后朗读，播完由 TTS 收集器按「静默 4 秒回萌眼」接管
+     */
+    private fun speakHint(context: Context, text: String) {
+        _eyeState.value = SparkEyeState.SPEAKING
+        TtsPlayer.speak(context, text)
+    }
+
+    /**
      * 长按会话消息：收藏/取消收藏（与普通模式回答卡同一套个人飞轮证据，
      * 以内容前 60 字为标题判重，已收藏再点则移除）
      */
@@ -186,10 +195,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
 
         // 停止之前的朗读，取消「回萌眼」倒计时（用户开始新交互了）
+        // 注意：这里绝不能切视图（v0.8.81 曾在按住时强制 showEyes=true——会话态下按住说话
+        // 会把按钮从界面上摘掉，手势瞬间被打断直接走「松手识别」，录到的全是空气）
+        // 录音状态由按钮变红+「松手发送(Ns)」提示；萌眼态本来就显示眼睛，不受影响
         idleToEyesJob?.cancel()
         TtsPlayer.stop()
         _eyeState.value = SparkEyeState.LISTENING
-        _showEyes.value = true // 按下时立刻呈现大眼睛动画
         _statusHint.value = "正在听你说，松手发送…"
 
         val curSettings = settings.value
@@ -251,6 +262,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 )
                 _showEyes.value = false
                 _statusHint.value = "请在设置中配置语音识别 Key"
+                speakHint(context, "请先在设置中配置语音识别 Key")
                 SpeechInput.cancelRecording(rec)
                 return@launch
             }
@@ -268,6 +280,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     } else {
                         _eyeState.value = SparkEyeState.IDLE
                         _statusHint.value = "没听清你说什么，可以再试一次"
+                        speakHint(context, "没听清你说什么，可以再试一次")
                     }
                 },
                 onFailure = { err ->
@@ -275,7 +288,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     appendMessage(SparkMessage("user", "（识别未完成）"))
                     appendMessage(SparkMessage("assistant", err.message ?: "语音转文字失败，请稍后重试"))
                     _showEyes.value = false
-                    _statusHint.value = err.message
+                    _statusHint.value = "语音识别没成功，请再试一次"
+                    speakHint(context, "语音识别没成功，请再试一次")
                 },
             )
         }
@@ -363,6 +377,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 _isStreaming.value = false
                 SparkChatStore.updateLastAssistant("未配置 API Key，请去「设置」选择服务商并填写 Key。")
                 _statusHint.value = "未配置 API Key"
+                speakHint(context, "未配置 API Key，请去设置填写")
                 return@launch
             }
 
