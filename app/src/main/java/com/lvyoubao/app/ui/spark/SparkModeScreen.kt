@@ -216,7 +216,7 @@ fun SparkModeScreen(
                     text = when {
                         isRecording -> "录音中 ${recordTick}s"
                         !statusHint.isNullOrBlank() -> statusHint.orEmpty()
-                        showEyes -> "灵动屏"
+                        showEyes -> "旅游宝 · 灵动"
                         else -> "聊天"
                     },
                     color = Color.White.copy(alpha = 0.85f),
