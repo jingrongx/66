@@ -127,6 +127,8 @@ fun SettingsScreen(
     var themeDialog by remember { mutableStateOf(false) }
     var styleDialog by remember { mutableStateOf(false) }
     var asrSendDialog by remember { mutableStateOf(false) }
+    var largeFontDialog by remember { mutableStateOf(false) }
+    var sparkFontDialog by remember { mutableStateOf(false) }
     var showVoiceFix by remember { mutableStateOf(false) }
     // 纠正记录条数：打开/关闭管理页时刷新（页内删除后回来数字要变）
     val fixCount = remember(showVoiceFix) {
@@ -657,6 +659,12 @@ fun SettingsScreen(
                     )
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                SettingRow(
+                    title = "大字模式字号",
+                    value = fontScaleLabel(state.draft.largeTextFontScale),
+                    onClick = { largeFontDialog = true },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -682,6 +690,12 @@ fun SettingsScreen(
                         },
                     )
                 }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                SettingRow(
+                    title = "灵动屏字号",
+                    value = fontScaleLabel(state.draft.sparkFontScale),
+                    onClick = { sparkFontDialog = true },
+                )
             }
         }
 
@@ -899,6 +913,30 @@ fun SettingsScreen(
     if (showVoiceFix) {
         VoiceFixScreen(app = app, onClose = { showVoiceFix = false })
     }
+
+    if (largeFontDialog) {
+        FontScaleDialog(
+            title = "大字模式字号",
+            current = state.draft.largeTextFontScale,
+            onPick = { v ->
+                vm.updateDraft { it.copy(largeTextFontScale = v) }
+                vm.save(onSaved = {})
+            },
+            onDismiss = { largeFontDialog = false },
+        )
+    }
+    if (sparkFontDialog) {
+        FontScaleDialog(
+            title = "灵动屏字号",
+            current = state.draft.sparkFontScale,
+            onPick = { v ->
+                vm.updateDraft { it.copy(sparkFontScale = v) }
+                vm.save(onSaved = {})
+            },
+            onDismiss = { sparkFontDialog = false },
+        )
+    }
+
     if (themeDialog) {
         AlertDialog(
             onDismissRequest = { themeDialog = false },
@@ -1108,4 +1146,61 @@ internal fun requestDefaultHome(
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }
+}
+
+/** 字号系数显示名（未知自定义值兜底显示百分比） */
+internal fun fontScaleLabel(v: Float): String = when (v) {
+    0.85f -> "小一档 85%"
+    1.0f -> "标准 100%"
+    1.15f -> "大一档 115%"
+    1.3f -> "特大 130%"
+    else -> "${(v * 100).toInt()}%"
+}
+
+/**
+ * 字号选择弹窗（大字模式/灵动屏模式各一，同一组件）：
+ * 选中即保存并生效——该模式全部 sp 文字经 fontScale 整体缩放，dp 骨架不动。
+ */
+@Composable
+private fun FontScaleDialog(
+    title: String,
+    current: Float,
+    onPick: (Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                listOf(0.85f to "小一档", 1.0f to "标准", 1.15f to "大一档", 1.3f to "特大").forEach { (value, label) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(value) }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = current == value, onClick = { onPick(value) })
+                        Spacer(Modifier.width(8.dp))
+                        Text(label)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${(value * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Text(
+                    "调整后该模式全部文字整体放大/缩小，立即生效",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("完成") }
+        },
+    )
 }

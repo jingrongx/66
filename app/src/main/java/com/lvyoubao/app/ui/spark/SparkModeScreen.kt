@@ -87,6 +87,8 @@ import java.io.File
 fun SparkModeScreen(
     app: TravelApp,
     onExitApp: () -> Unit,
+    newVersion: String? = null, // 非空 = 有新版本，顶栏下出更新横幅（MainActivity 统一检查）
+    onUpdateClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val vm: SparkViewModel = viewModel(
@@ -277,6 +279,29 @@ fun SparkModeScreen(
                         fontWeight = FontWeight.Bold,
                     )
                 }
+            }
+        }
+
+        // ---------- 更新横幅：有新版本时插在顶栏下，占一行可点 ----------
+        if (newVersion != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = (8 * scale).dp, vertical = (3 * scale).dp)
+                    .clip(RoundedCornerShape((8 * scale).dp))
+                    .background(Color(0xFF00E5FF).copy(alpha = 0.15f))
+                    .clickable(onClick = onUpdateClick)
+                    .padding(horizontal = (10 * scale).dp, vertical = (6 * scale).dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "🚀 有新版本 $newVersion，点按更新",
+                    color = Color(0xFF80DEEA),
+                    fontSize = (13 * scale).sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
 

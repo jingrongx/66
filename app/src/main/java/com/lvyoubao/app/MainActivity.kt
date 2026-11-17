@@ -8,7 +8,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -68,28 +70,64 @@ class MainActivity : ComponentActivity() {
             // 锁定系统字体缩放（关怀模式/大字体把 fontScale 放大后，固定字号的设计布局会被二次
             // 放大挤爆：按钮文字换行、标题溢出、底栏挤成一团）。放大字号由应用自己的「大字模式」
             // 负责并按设计排版；dp 尺寸仍随系统"显示大小"整体等比缩放，无障碍不受影响。
+            // 大字/灵动屏各自的「字号」设置（设置页可调）通过 fontScale 整体缩放该模式全部 sp 文字，
+            // dp 骨架不动，布局不乱；普通模式恒 1。
+            val modeFontScale = when {
+                appSettings.sparkMode -> appSettings.sparkFontScale
+                appSettings.largeTextMode -> appSettings.largeTextFontScale
+                else -> 1f
+            }
             CompositionLocalProvider(
-                LocalDensity provides Density(density = density.density, fontScale = 1f),
+                LocalDensity provides Density(density = density.density, fontScale = modeFontScale),
             ) {
+                // 更新检查：普通模式由 AppRoot 自带提示；大字/灵动屏走这里统一弹层
+                val updateVm: UpdateViewModel = viewModel(
+                    factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
+                )
+                val updateState by updateVm.ui.collectAsState()
+                var showUpdateScreen by remember { mutableStateOf(false) }
+                LaunchedEffect(Unit) {
+                    if (appSettings.sparkMode || appSettings.largeTextMode) updateVm.autoCheck()
+                }
+                val newVersion = updateState.release?.tag_name
+
                 LvyoubaoTheme(themeMode = appSettings.themeMode) {
                     // Surface 统一提供主题背景色和内容色（LocalContentColor）：
                     // 否则未显式指定颜色的标题/图标会用默认黑色，深色主题下不可读
                     Surface(modifier = Modifier.fillMaxSize()) {
-                        when {
-                            appSettings.sparkMode -> {
-                                com.lvyoubao.app.ui.spark.SparkModeScreen(
-                                    app = app,
-                                    // 退出 = 退出应用（对齐大字模式）；模式切换只认设置页开关
-                                    onExitApp = { finishAffinity() },
-                                )
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            when {
+                                appSettings.sparkMode -> {
+                                    com.lvyoubao.app.ui.spark.SparkModeScreen(
+                                        app = app,
+                                        // 退出 = 退出应用（对齐大字模式）；模式切换只认设置页开关
+                                        onExitApp = { finishAffinity() },
+                                        newVersion = newVersion,
+                                        onUpdateClick = { showUpdateScreen = true },
+                                    )
+                                }
+                                appSettings.largeTextMode -> {
+                                    // 大字模式是启动默认模式：设置里开着就直接进大字模式，关了就是普通模式；
+                                    // 退出（按钮/返回键）= 退出应用，不再从这里切回普通模式
+                                    LargeTextScreen(
+                                        app = app,
+                                        onExitApp = { finishAffinity() },
+                                        newVersion = newVersion,
+                                        onUpdateClick = { showUpdateScreen = true },
+                                    )
+                                }
+                                else -> {
+                                    AppRoot(app)
+                                }
                             }
-                            appSettings.largeTextMode -> {
-                                // 大字模式是启动默认模式：设置里开着就直接进大字模式，关了就是普通模式；
-                                // 退出（按钮/返回键）= 退出应用，不再从这里切回普通模式
-                                LargeTextScreen(app = app, onExitApp = { finishAffinity() })
-                            }
-                            else -> {
-                                AppRoot(app)
+                            // 更新页全屏覆盖层（大字/灵动屏模式点横幅进入；普通模式走 AppRoot 自己的入口）
+                            if (showUpdateScreen) {
+                                Surface(
+                                    modifier = Modifier.fillMaxSize(),
+                                    color = MaterialTheme.colorScheme.surface,
+                                ) {
+                                    UpdateScreen(onClose = { showUpdateScreen = false }, vm = updateVm)
+                                }
                             }
                         }
                     }

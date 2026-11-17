@@ -114,7 +114,12 @@ private val LargeTextSuggestions = listOf(
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
+fun LargeTextScreen(
+    app: TravelApp,
+    onExitApp: () -> Unit,
+    newVersion: String? = null, // 非空 = 有新版本，顶部操作带出更新横幅（MainActivity 统一检查）
+    onUpdateClick: () -> Unit = {},
+) {
     val vm: ChatViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { ChatViewModel(app) } } },
     )
@@ -358,6 +363,23 @@ fun LargeTextScreen(app: TravelApp, onExitApp: () -> Unit) {
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                 contentPadding = PaddingValues(horizontal = 14.dp),
             ) { Text("退出", fontSize = 17.sp, maxLines = 1) }
+        }
+        // 更新横幅：发现新版本时占满一行（大字模式下也要能看到、点得到）
+        if (newVersion != null) {
+            Button(
+                onClick = onUpdateClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .height(48.dp),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Text(
+                    "🚀 发现新版本 $newVersion，点按更新",
+                    fontSize = 17.sp,
+                    maxLines = 1,
+                )
+            }
         }
         // 第二行：三个大导航按钮（新对话 / 历史 / 语音通话）——白底深字浮在浅青灰操作带上
         Row(
