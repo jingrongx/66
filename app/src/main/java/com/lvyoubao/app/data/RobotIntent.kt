@@ -14,6 +14,7 @@ object RobotIntent {
         data class Move(val distCm: Int) : Command()
         data class Turn(val angleDeg: Int) : Command()
         data class Head(val angleDeg: Int) : Command()
+        data object Look : Command()
         data object None : Command()
 
         /** 执行成功后的语音确认话术（短、口语、老人友好） */
@@ -23,6 +24,7 @@ object RobotIntent {
                 is Move -> if (distCm >= 0) "好的，前进${distCm}厘米" else "好的，后退${-distCm}厘米"
                 is Turn -> if (angleDeg >= 0) "好的，左转${angleDeg}度" else "好的，右转${-angleDeg}度"
                 is Head -> if (angleDeg >= 0) "好的，抬头看看" else "好的，低头啦"
+                Look -> "好的，我看看"
                 None -> ""
             }
     }
@@ -46,14 +48,15 @@ object RobotIntent {
 
     /** AI 解析协议：单行「动作 数值」，宁 NONE 勿动 */
     private val SYSTEM_PROMPT = """
-        你是机器人语音指令解析器。把用户这句话解析成一条机器人控制指令，只输出「动作 数值」一行，绝不解释。
+        你是机器人语音指令解析器。把用户这句话解析成一条指令，只输出「动作 数值」一行，绝不解释。
         可用动作（优必选小方头）：
         MOVE 厘米——底盘前进/后退：正数前进、负数后退，没说距离默认30。例：「向前走30厘米」→MOVE 30；「后退一点」→MOVE -15；「往前走走」→MOVE 30
         TURN 度——转向：正数左转、负数右转；没说角度按「左转/右转90、转个身180、一点30」。例：「左转90度」→TURN 90；「右转一点」→TURN -30；「转个身」→TURN 180
-        HEAD 度——头部抬头/低头：范围-25到23，正抬头负低头，没说默认15。例：「抬头」→HEAD 15；「低头看看地上」→HEAD -10；「抬头看看你」→HEAD 15
+        HEAD 度——头部抬头/低头：范围-25到23，正抬头负低头，没说默认15。例：「抬头」→HEAD 15；「低头」→HEAD -10
+        LOOK——用摄像头拍一张照片看看眼前。只要用户想让小源当场用摄像头看一眼（说法五花八门，不限于特定词），都算 LOOK：如「看看前面有什么」「前面是什么」「看看这是什么」「你看到了什么」「看看周围」「帮我看看眼前的」「拍张照看看」「瞅一眼」。判断标准：动作是「当场拍照看环境」，不是查资料问知识。
         STOP——立即停止。例：「停下」「别动了」→STOP
-        NONE——这句话不是在指挥机器人（闲聊、提问、问天气、问路线等），交给正常聊天。
-        只输出一个动作和一个数字（如 MOVE 30、TURN -90、HEAD 15、STOP、NONE），绝不输出其他任何内容；拿不准一律输出 NONE。
+        NONE——这句话不是在指挥机器人（闲聊、问天气、问路线、查资料等），交给正常聊天。注意「抬头看看你」是抬头的动作（HEAD），问「附近有什么好吃的」是 NONE，都不是 LOOK。
+        只输出一个动作和一个数字（如 MOVE 30、TURN -90、HEAD 15、LOOK、STOP、NONE），绝不输出其他任何内容；拿不准一律输出 NONE。
     """.trimIndent()
 
     /** AI 解析：超 8 秒或网络/服务失败一律返回 NONE（回落聊天，控制不能卡死语音主流程） */
@@ -73,13 +76,14 @@ object RobotIntent {
     /** 从模型回复里抠「动作 数字」：容忍前缀废话/大小写/全角数字以外的杂讯 */
     fun parseReply(reply: String): Command {
         val s = reply.trim().uppercase()
-        val m = Regex("(MOVE|TURN|HEAD|STOP)\\s*(-?\\d+)?").find(s) ?: return Command.None
+        val m = Regex("(MOVE|TURN|HEAD|STOP|LOOK)\\s*(-?\\d+)?").find(s) ?: return Command.None
         val value = m.groupValues[2].toIntOrNull()
         return when (m.groupValues[1]) {
             "STOP" -> Command.Stop
             "MOVE" -> Command.Move(value ?: 30)
             "TURN" -> Command.Turn(value ?: 90)
             "HEAD" -> Command.Head(value ?: 15)
+            "LOOK" -> Command.Look
             else -> Command.None
         }
     }

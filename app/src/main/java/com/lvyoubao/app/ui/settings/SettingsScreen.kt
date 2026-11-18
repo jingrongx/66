@@ -781,7 +781,7 @@ fun SettingsScreen(
                     Column(Modifier.weight(1f)) {
                         Text("语音指挥机器人", style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            "说「前进30厘米」「左转90度」「抬头」「停」直接指挥动作 · 先支持优必选小方头",
+                            "说「前进30厘米」「左转90度」「抬头」「停」「看看前面有什么」，AI 听懂就直接做 · 先支持优必选小方头",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -862,6 +862,17 @@ fun SettingsScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (robotOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                                 modifier = Modifier.padding(top = 6.dp),
+                            )
+                        }
+                        // 快捷填入：旅游宝就装在机器人上时，点一下直接填本机地址
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            AssistChip(
+                                onClick = {
+                                    vm.updateDraft { it.copy(robotHost = "127.0.0.1") }
+                                    detect("127.0.0.1")
+                                },
+                                label = { Text("📍 本机 127.0.0.1") },
                             )
                         }
                     }

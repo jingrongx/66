@@ -372,21 +372,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     /**
      * 语音控制机器人（设置里开「机器人控制」后生效，控制对象：xrobotctl 中枢驱动的机器人，现内置优必选小方头）：
      * ①「停」类词本地快路零延迟急停（急停不能等 AI 往返）；
-     * ②其余交给 AI 解析意图（chatPlain 单轮、思考关闭），解析出指令就调中枢 HTTP 执行；
+     * ②其余交给 AI 解析意图（chatPlain 单轮、思考关闭）：控制指令调中枢 HTTP 执行；LOOK（让小源当场看一眼）
+     *   只用设备相机静默拍照，不需要机器人中枢；触发词不设死，AI 判断整句是不是「拍照看环境」；
      * ③解析为 NONE / 未启用机器人返回 false，照常走聊天流程。
      * 所有执行结果都说话告知，绝不静默；解析失败回落聊天，控制绝不卡死语音主流程。
      */
     private suspend fun handleRobotCommand(context: Context, text: String): Boolean {
         val curSettings = repo.settings.firstOrNull() ?: settings.value
         if (!curSettings.robotEnabled) return false
-
-        val host = RobotClient.normalizeHost(curSettings.robotHost)
-        if (host == null) {
-            appendMessage(SparkMessage("assistant", "机器人地址还没填，请到「设置 → 机器人控制」填写机器人 IP。"))
-            _statusHint.value = "请先填写机器人地址"
-            speakHint(context, "机器人地址还没填，请到设置里填写")
-            return true
-        }
 
         val command = if (RobotIntent.matchStopFast(text)) {
             RobotIntent.Command.Stop
@@ -396,12 +389,27 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
         if (command == RobotIntent.Command.None) return false
 
+        // 拍照看一眼：设备相机就行，不依赖机器人中枢地址
+        if (command == RobotIntent.Command.Look) {
+            executeLook(context)
+            return true
+        }
+
+        val host = RobotClient.normalizeHost(curSettings.robotHost)
+        if (host == null) {
+            appendMessage(SparkMessage("assistant", "机器人地址还没填，请到「设置 → 机器人控制」填写机器人 IP。"))
+            _statusHint.value = "请先填写机器人地址"
+            speakHint(context, "机器人地址还没填，请到设置里填写")
+            return true
+        }
+
         val robot = RobotClient(host)
         val result = when (command) {
             RobotIntent.Command.Stop -> robot.stop()
             is RobotIntent.Command.Move -> robot.move(command.distCm)
             is RobotIntent.Command.Turn -> robot.turn(command.angleDeg)
             is RobotIntent.Command.Head -> robot.head(command.angleDeg)
+            RobotIntent.Command.Look -> return true // 上面已处理，防御性兜底
             RobotIntent.Command.None -> return false
         }
         result.fold(
@@ -417,6 +425,33 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             },
         )
         return true
+    }
+
+    /**
+     * LOOK「看看前面有什么」类：设备相机静默抓一帧（CameraSnapshotHelper 即拍即走，零待机占用）
+     * → 走现有视觉解析管线（照片轮入会话 + 流式回答 + 自动朗读）。
+     */
+    private suspend fun executeLook(context: Context) {
+        if (!CameraSnapshotHelper.hasCameraPermission(context)) {
+            appendMessage(SparkMessage("assistant", "需要相机权限才能帮你看，请点一下底部相机按钮授权一次。"))
+            _statusHint.value = "需要相机权限"
+            speakHint(context, "需要相机权限才能帮你看，请点一下相机按钮授权")
+            return
+        }
+        _statusHint.value = "正在看…"
+        val snap = CameraSnapshotHelper.takeSnapshot(context)
+        if (snap == null) {
+            appendMessage(SparkMessage("assistant", "没拍下来（相机没开起来），请再说一次试试。"))
+            _statusHint.value = "没拍下来"
+            speakHint(context, "没拍下来，请再说一次")
+            return
+        }
+        sendImageQuestion(
+            context = context,
+            photos = listOf(PendingPhoto(snap.bitmap, snap.dataUrl)),
+            userLabel = "👀 看看前面",
+            prompt = "这是小源眼前刚拍到的画面，请用通俗易懂的自然口语说说前面有什么：最主要的东西是什么、有没有人，一两句话即可。",
+        )
     }
 
     private fun sendAiRequest(
