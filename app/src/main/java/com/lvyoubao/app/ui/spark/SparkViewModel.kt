@@ -265,7 +265,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         // 按住说话用 MediaRecorder，与唤醒监听的 AudioRecord 抢麦：先停唤醒采集再开录音
         wakeSession?.stop()
         wakeSession = null
-
+        stopAlarm() // 用户主动开口交互，铃响也先安静
         // 停止之前的朗读，取消「回萌眼」倒计时（用户开始新交互了）
         // 注意：这里绝不能切视图（v0.8.81 曾在按住时强制 showEyes=true——会话态下按住说话
         // 会把按钮从界面上摘掉，手势瞬间被打断直接走「松手识别」，录到的全是空气）
@@ -461,6 +461,19 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private suspend fun handleAssistantIntent(context: Context, text: String): Boolean {
         val curSettings = repo.settings.firstOrNull() ?: settings.value
 
+        // 响铃中：明确的停止口令给确认（小源小源/退出/关闭/别响了都算）；其余任何语音也先停铃
+        // ——开口就是想让它安静，后续指令照常往下走
+        if (_alarmActive.value) {
+            if (matchAlarmStop(text)) {
+                stopAlarm()
+                appendMessage(SparkMessage("assistant", "好的，不响了"))
+                _statusHint.value = null
+                speakHint(context, "好的，不响了")
+                return true
+            }
+            stopAlarm()
+        }
+
         // 机器人快路：急停/头部短句（没开机器人控制就没有机器人可指挥，直接过）
         if (curSettings.robotEnabled) {
             if (RobotIntent.matchStopFast(text)) {
@@ -475,14 +488,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             }
         }
 
-        // 设备快路：铃响停止口令 + 计时/记事短句（零延迟）
-        if (_alarmActive.value && matchAlarmStop(text)) {
-            stopAlarm()
-            appendMessage(SparkMessage("assistant", "好的，不响了"))
-            _statusHint.value = null
-            speakHint(context, "好的，不响了")
-            return true
-        }
+        // 设备快路：计时/记事短句（零延迟）
         matchTimerFast(text)?.let { (sec, label) ->
             startTimerWithConfirm(context, sec, label)
             return true
@@ -706,12 +712,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         tone = null
     }
 
-    /** 告警停止口令本地匹配（连聊里直接说、待机里唤醒监听也能收到） */
+    /** 告警停止口令（仅响铃时判定）：说停/退出/关闭/小源小源 都算，宽容到「开口就是想让它安静」 */
     private fun matchAlarmStop(text: String): Boolean {
         val t = text.trim().trimEnd('。', '！', '!', '.', '，', ',')
-        if (t.isEmpty() || t.length > 10) return false
+        if (t.isEmpty() || t.length > 12) return false
         return t.contains("别响") || t.contains("别滴滴") || t.contains("停止提醒") || t.contains("取消提醒") ||
-            t.contains("关掉提醒") || t.contains("别闹了") || t.contains("关掉闹钟") || t.contains("不响了")
+            t.contains("关掉提醒") || t.contains("别闹了") || t.contains("关掉闹钟") || t.contains("关闭闹钟") ||
+            t.contains("关闹钟") || t.contains("不响了") || t.contains("退出") || t.contains("关闭") ||
+            t.contains("关掉") || t.contains("小源小源") || t.contains("停止") || t.contains("别说了")
     }
 
     fun cancelTimer() {
@@ -1075,6 +1083,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         // 也无法再唤醒）的根因。手动点「连聊」按钮时唤醒监听同样在跑，两路都要先停
         wakeSession?.stop()
         wakeSession = null
+        stopAlarm() // 用户主动开连聊，铃响也先安静
         idleToEyesJob?.cancel()
         TtsPlayer.stop()
         _showEyes.value = true
@@ -1219,19 +1228,30 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
         wav.delete()
         val text = spoken.orEmpty().trim()
-        // 铃响时待机喊「别响了」也能停（唤醒监听收得到），先于唤醒词判断
-        if (text.isNotBlank() && _alarmActive.value && matchAlarmStop(text)) {
+        // 铃响时待机任何语音都先停铃（开口就是想让它安静）：小源小源/小源小源退出/关闭闹钟/别响了都算
+        val wasAlarming = _alarmActive.value
+        if (text.isNotBlank() && wasAlarming) {
+            if (matchAlarmStop(text)) {
+                stopAlarm()
+                appendMessage(SparkMessage("assistant", "好的，不响了"))
+                _statusHint.value = null
+                speakHint(appContext, "好的，不响了")
+                return@launch
+            }
             stopAlarm()
-            appendMessage(SparkMessage("assistant", "好的，不响了"))
-            _statusHint.value = null
-            speakHint(appContext, "好的，不响了")
-            return@launch
         }
         if (isWakeWord(text) && !_isContinuous.value && activeRecording == null) {
+            // 「小源小源退出/关闭」这类只要停铃，别进对话
+            if (wasAlarming && listOf("退出", "关闭", "关掉", "停止", "别说了").any { text.contains(it) }) {
+                _statusHint.value = "好的，闹钟停了"
+                return@launch
+            }
             // 命中唤醒词：麦克风权限必然已授予（监听本来就开着），直接进连续对话
             _showEyes.value = true
             startContinuous(appContext) {}
             speakHint(appContext, "嗯，我在")
+        } else if (wasAlarming) {
+            _statusHint.value = "好的，闹钟停了"
         }
     }
 
