@@ -415,6 +415,13 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return true
         }
 
+        // 头部动作快路（平视/抬头/低头）：短句直接执行，不经 AI——堵住「平视」被误判成拍照
+        RobotIntent.matchHeadFast(text)?.let { headCmd ->
+            val robot = robotClientOrNull(context, curSettings) ?: return true
+            runRobot(context, robot, headCmd)
+            return true
+        }
+
         _statusHint.value = "正在理解指令…"
         val commands = RobotIntent.parse(text, curSettings)
         if (commands.isEmpty()) return false
