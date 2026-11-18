@@ -897,7 +897,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 }
             },
         )
-        if (!session.start()) return
+        // start 改后台重试（音频策略交接期 startRecording 会不生效）；若最终失败由 onError 清理
+        session.start()
         continuous = session
         _isContinuous.value = true
         speakHint(context, "连续对话模式，直接说就行")
@@ -963,11 +964,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     }
                 },
             )
-            if (session.start()) {
-                wakeSession = session
-            } else {
-                session.stop()
-            }
+            session.start() // 后台重试；最终失败由 onError 清理并提示
+            wakeSession = session
         } else if (!shouldRun && wakeSession != null) {
             wakeSession?.stop()
             wakeSession = null

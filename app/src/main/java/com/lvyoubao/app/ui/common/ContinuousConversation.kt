@@ -73,6 +73,7 @@ class ContinuousConversation(
     }
 
     @Volatile private var running = false
+    @Volatile private var stopRequested = false
     @Volatile private var ttsActive = false
     @Volatile private var ttsStartedAt = 0L
     @Volatile private var busy = false
@@ -95,15 +96,34 @@ class ContinuousConversation(
     private var segmentSamples = 0
     private var lastActivityAt = 0L
 
-    /** 启动采集；麦克风打不开/无权限返回 false 并回调 onError */
-    @SuppressLint("MissingPermission")
-    fun start(): Boolean {
-        if (running) return true
-        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (minBuf <= 0) {
-            listener.onError("这台设备的麦克风参数读不出来，连续对话用不了")
-            return false
+    /**
+     * 启动采集（后台重试，不阻塞调用方）。
+     * 音频策略在旧录音刚 release 的交接期，新 AudioRecord 的 startRecording 会不生效
+     * （构造成功但停在 STOPPED）——退出应用/停唤醒后马上点连聊最容易撞上。后台重试 5 次
+     * （每次重建 AudioRecord，约 1.5 秒窗口）；最终失败才回调一次 onError。
+     */
+    fun start() {
+        if (running) return
+        stopRequested = false
+        thread(name = "conv-start") {
+            var lastReason = "麦克风启动失败"
+            repeat(5) { attempt ->
+                if (stopRequested) return@thread // 重试期间被 stop：放弃启动
+                val reason = tryStartOnce()
+                if (reason == null) return@thread // 成功：tryStartOnce 内已进入采集态并起采集线程
+                lastReason = reason
+                if (attempt < 4) Thread.sleep(300)
+            }
+            if (stopRequested) return@thread
+            listener.onError(lastReason)
         }
+    }
+
+    /** 尝试创建 AudioRecord 并进入采集态；成功返回 null（已起采集线程），失败返回原因（已自清理） */
+    @SuppressLint("MissingPermission")
+    private fun tryStartOnce(): String? {
+        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        if (minBuf <= 0) return "这台设备的麦克风参数读不出来，连续对话用不了"
         val rec = try {
             AudioRecord(
                 MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -113,28 +133,29 @@ class ContinuousConversation(
                 maxOf(minBuf, FRAME_SAMPLES * 4 * 4),
             )
         } catch (e: Exception) {
-            listener.onError("麦克风启动失败：${e.message ?: "被占用"}")
-            return false
+            return "麦克风启动失败：${e.message ?: "被占用"}"
         }
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
             rec.release()
-            listener.onError("麦克风被占用或无权限，连续对话开不了")
-            return false
+            return "麦克风被占用或无权限，连续对话开不了"
         }
-        record = rec
-        // 系统 AEC/NS：压掉自己喇叭的回声与稳态噪声，打断体验的底线（拿不到就靠动态阈值兜底）
-        echoCanceler = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId) else null
-        noiseSuppressor = if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId) else null
         // 必须显式 startRecording：v0.8.90 漏了这一步，AudioRecord 不进入采集态，read 全部失败，
         // 5 秒后误报「麦克风读不到数据」退出（长按说话走 MediaRecorder 是另一条路所以没事）
         runCatching { rec.startRecording() }
         if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            runCatching { rec.release() }
-            record = null
-            listener.onError("麦克风没能开始采集（可能被占用），连续对话开不了")
-            return false
+            rec.release()
+            return "麦克风没能开始采集（可能被占用）"
         }
 
+        record = rec
+        // 重试期间被 stop：立刻清理放弃（快速开关连聊的竞态）
+        if (stopRequested) {
+            rec.release()
+            return "已取消启动"
+        }
+        // 系统 AEC/NS：压掉自己喇叭的回声与稳态噪声，打断体验的底线（拿不到就靠动态阈值兜底）
+        echoCanceler = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId) else null
+        noiseSuppressor = if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId) else null
         noiseFloorDb = -60f
         voiceRun = 0
         inSpeech = false
@@ -146,10 +167,11 @@ class ContinuousConversation(
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
             captureLoop()
         }
-        return true
+        return null
     }
 
     fun stop() {
+        stopRequested = true
         if (!running) return
         running = false
         audioThread?.let { t ->
