@@ -208,11 +208,21 @@ object SpeechInput {
         val result = if (recording.file.length() < 2_000) {
             Result.failure(SpeechException(SpeechFailure.NOT_HEARD, message = "没录到声音，请贴近手机再说一次"))
         } else {
-            transcribe(recording.file, asrKey, dialect)
+            transcribeFile(recording.file, asrKey, dialect)
         }
         recording.file.delete()
         return result
     }
+
+    /**
+     * 上传任意音频文件转文字（连续对话引擎切好的 WAV 段也走这里；调用方负责删文件）。
+     * 方言开关切换到方言口音模型。
+     */
+    suspend fun transcribeFile(
+        file: File,
+        asrKey: String,
+        dialect: Boolean = false,
+    ): Result<String> = transcribe(file, asrKey, dialect)
 
     fun cancelRecording(recording: Recording) {
         runCatching { recording.recorder.stop() }

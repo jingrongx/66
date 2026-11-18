@@ -103,6 +103,7 @@ fun SparkModeScreen(
     val messages by vm.messages.collectAsState()
     val statusHint by vm.statusHint.collectAsState()
     val pendingPhotos by vm.pendingPhotos.collectAsState()
+    val isContinuous by vm.isContinuous.collectAsState()
 
     // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
@@ -227,8 +228,34 @@ fun SparkModeScreen(
                 )
             }
 
-            // 右侧操作：切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
+            // 右侧操作：连续对话 + 切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 连续对话：免按住、说完自动答、播报中开口即打断；再点一次关
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape((8 * scale).dp))
+                        .background(
+                            if (isContinuous) MaterialTheme.colorScheme.primary
+                            else Color.White.copy(alpha = 0.12f),
+                        )
+                        .clickable {
+                            vm.startContinuous(context) {
+                                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (isContinuous) "👂 连续中" else "👂 连续",
+                        color = Color.White.copy(alpha = 0.95f),
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+
+                Spacer(Modifier.width((6 * scale).dp))
+
                 // 切换眼睛 / 会话文字
                 Box(
                     modifier = Modifier

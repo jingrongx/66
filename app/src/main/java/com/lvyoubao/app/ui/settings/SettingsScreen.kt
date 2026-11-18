@@ -121,6 +121,7 @@ fun SettingsScreen(
     var themeDialog by remember { mutableStateOf(false) }
     var styleDialog by remember { mutableStateOf(false) }
     var asrSendDialog by remember { mutableStateOf(false) }
+    var bargeInDialog by remember { mutableStateOf(false) }
     var largeFontDialog by remember { mutableStateOf(false) }
     var sparkFontDialog by remember { mutableStateOf(false) }
     var showVoiceFix by remember { mutableStateOf(false) }
@@ -777,12 +778,28 @@ fun SettingsScreen(
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                 SettingRow(
+                    title = "语音打断灵敏度",
+                    value = when (state.draft.voiceBargeIn) {
+                        0 -> "关（点按打断）"
+                        2 -> "灵敏"
+                        else -> "标准"
+                    },
+                    onClick = { bargeInDialog = true },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                SettingRow(
                     title = "纠正记录",
                     value = if (fixCount > 0) "$fixCount 条" else "还没有",
                     onClick = { showVoiceFix = true },
                 )
             }
         }
+        Text(
+            "语音打断=连续对话时小源在播报中听到你开口就停下听你说。个别设备喇叭回声压不住（自己打断自己）时调成「关」。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
         Text(
             "语音识别的稿子你手动改对再发送，就会记下「识别稿 → 发送稿」的差异；AI 智能纠错据此把同类错误越改越准。",
             style = MaterialTheme.typography.labelSmall,
@@ -1046,6 +1063,45 @@ fun SettingsScreen(
                 vm.save(onSaved = {})
             },
             onDismiss = { sparkFontDialog = false },
+        )
+    }
+
+    if (bargeInDialog) {
+        AlertDialog(
+            onDismissRequest = { bargeInDialog = false },
+            title = { Text("语音打断灵敏度") },
+            text = {
+                Column {
+                    listOf(
+                        0 to "关（点按打断）——播报中不监听；个别设备喇叭回声压不住、自己打断自己时选这个",
+                        1 to "标准——多数设备都适用（推荐）",
+                        2 to "灵敏——嘈杂环境接话更快，误打断风险略高",
+                    ).forEach { (value, label) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    vm.updateDraft { it.copy(voiceBargeIn = value) }
+                                    bargeInDialog = false
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = state.draft.voiceBargeIn == value,
+                                onClick = {
+                                    vm.updateDraft { it.copy(voiceBargeIn = value) }
+                                    bargeInDialog = false
+                                },
+                            )
+                            Text(label, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { bargeInDialog = false }) { Text("好的") }
+            },
         )
     }
 

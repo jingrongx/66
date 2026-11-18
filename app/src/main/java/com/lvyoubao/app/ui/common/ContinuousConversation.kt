@@ -1,0 +1,341 @@
+package com.lvyoubao.app.ui.common
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.os.SystemClock
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import kotlin.concurrent.thread
+import kotlin.math.log10
+import kotlin.math.sqrt
+
+/**
+ * 连续对话引擎（方案 B：半双工自动轮转 + 可选真·语音打断 barge-in）：
+ * AudioRecord(VOICE_COMMUNICATION + 系统 AEC/NS) → 帧级 RMS 能量 VAD → 静音断句切段 WAV → 回调给调用方。
+ *
+ * 回声处理（打断效果好坏的关键）：
+ * - 音源 VOICE_COMMUNICATION + AcousticEchoCanceler/NoiseSuppressor：免原生库，多数设备能压掉自己喇叭的回声；
+ * - TTS 播放期间阈值抬高（灵敏度分档：0=半双工不监听 / 1=标准 / 2=灵敏），且 TTS 开播后 300ms 起振静默窗
+ *   内不判打断（喇叭起振爆音免疫）；
+ * - 连续 3 帧（240ms）高于打断阈值才算真人开口，杜绝单帧噪声误打断。
+ *
+ * 断句节奏：说话中静音 800ms 判说完（老人语速慢，停顿不抢断）；最短语音 300ms（低于当噪声丢弃）；
+ * 单段上限 30 秒强制切（防忘词录满内存）。320ms 前滚缓冲保证首字不被掐。
+ *
+ * 线程模型：专用采集线程阻塞读；对外只有回调（在音频线程触发，调用方自行切协程）。
+ */
+class ContinuousConversation(
+    private val context: Context,
+    private val listener: Listener,
+    private val config: Config = Config(),
+) {
+
+    interface Listener {
+        /** 一段完整语音（WAV 16k 单声道，调用方负责上传 ASR 并删除文件） */
+        fun onUtterance(wav: File)
+
+        /** 播报中被真人开口打断（调用方应立刻停 TTS/取消在途回答） */
+        fun onBargeIn()
+
+        /** 空闲超时（一直没说话），调用方决定退出连续模式 */
+        fun onAutoTimeout()
+
+        /** 麦克风打不开等硬错误，调用方应停止引擎 */
+        fun onError(message: String)
+    }
+
+    data class Config(
+        val silenceEndMs: Long = 800L,      // 静音多久算说完
+        val minSpeechMs: Long = 300L,       // 短于此的当噪声丢弃
+        val maxUtteranceMs: Long = 30_000L, // 单段强制切断
+        val bargeInSensitivity: Int = 1,    // 0=关（半双工）1=标准 2=灵敏
+        val echoWindowMs: Long = 300L,      // TTS 起振静默窗
+        val idleTimeoutMs: Long = 60_000L,  // 空闲多久回调超时
+    )
+
+    companion object {
+        private const val SAMPLE_RATE = 16_000
+        private const val FRAME_SAMPLES = 1_280          // 80ms @ 16kHz
+        private const val FRAME_MS = 80L
+        private const val PREROLL_FRAMES = 4             // 320ms 前滚，保首字
+        private const val ONSET_RUN_NORMAL = 2           // 平时连续 2 帧算开口（160ms）
+        private const val ONSET_RUN_TTS = 3              // 播报中连续 3 帧才算真人（240ms，防回声误触发）
+        private const val MIN_ABS_ONSET_DB = -45f        // 安静房间的绝对起点
+        private const val BARGE_ABS_DB_STD = -35f        // 打断绝对阈值（标准档）
+        private const val BARGE_ABS_DB_HOT = -42f        // 打断绝对阈值（灵敏档）
+        private const val MAX_READ_ERRORS = 60           // 连续读失败 ~5 秒判麦克风被占
+    }
+
+    @Volatile private var running = false
+    @Volatile private var ttsActive = false
+    @Volatile private var ttsStartedAt = 0L
+    @Volatile private var busy = false
+    @Volatile private var bargeInFired = false
+
+    private var record: AudioRecord? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var audioThread: Thread? = null
+
+    // VAD 状态（仅音频线程访问）
+    private var noiseFloorDb = -60f
+    private var voiceRun = 0
+    private var inSpeech = false
+    private var speechStartAt = 0L
+    private var lastVoiceAt = 0L
+    private var readErrors = 0
+    private val preroll = ArrayDeque<ShortArray>(PREROLL_FRAMES)
+    private var segment = ByteArrayOutputStream()
+    private var segmentSamples = 0
+    private var lastActivityAt = 0L
+
+    /** 启动采集；麦克风打不开/无权限返回 false 并回调 onError */
+    @SuppressLint("MissingPermission")
+    fun start(): Boolean {
+        if (running) return true
+        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        if (minBuf <= 0) {
+            listener.onError("这台设备的麦克风参数读不出来，连续对话用不了")
+            return false
+        }
+        val rec = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuf, FRAME_SAMPLES * 4 * 4),
+            )
+        } catch (e: Exception) {
+            listener.onError("麦克风启动失败：${e.message ?: "被占用"}")
+            return false
+        }
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            rec.release()
+            listener.onError("麦克风被占用或无权限，连续对话开不了")
+            return false
+        }
+        record = rec
+        // 系统 AEC/NS：压掉自己喇叭的回声与稳态噪声，打断体验的底线（拿不到就靠动态阈值兜底）
+        echoCanceler = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId) else null
+        noiseSuppressor = if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId) else null
+
+        noiseFloorDb = -60f
+        voiceRun = 0
+        inSpeech = false
+        readErrors = 0
+        bargeInFired = false
+        lastActivityAt = SystemClock.elapsedRealtime()
+        running = true
+        audioThread = thread(name = "conv-audio") {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            captureLoop()
+        }
+        return true
+    }
+
+    fun stop() {
+        if (!running) return
+        running = false
+        audioThread?.let { t ->
+            runCatching { t.join(800) }
+        }
+        audioThread = null
+        runCatching { echoCanceler?.release() }
+        runCatching { noiseSuppressor?.release() }
+        echoCanceler = null
+        noiseSuppressor = null
+        runCatching { record?.release() }
+        record = null
+    }
+
+    /** TTS 开始/结束播报（播报中：半双工档丢弃收音，其余档用打断阈值监听） */
+    fun setTtsActive(active: Boolean) {
+        if (active) {
+            ttsStartedAt = SystemClock.elapsedRealtime()
+            bargeInFired = false
+        }
+        ttsActive = active
+    }
+
+    /** 调用方正忙着处理（转写/AI/编排）：暂停空闲计时 */
+    fun setBusy(value: Boolean) {
+        busy = value
+        if (value) lastActivityAt = SystemClock.elapsedRealtime()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun captureLoop() {
+        val buf = ShortArray(FRAME_SAMPLES)
+        while (running) {
+            val n = try {
+                record?.read(buf, 0, buf.size) ?: break
+            } catch (e: Exception) {
+                break
+            }
+            if (n <= 0) {
+                if (++readErrors > MAX_READ_ERRORS) {
+                    listener.onError("麦克风连续读不到数据（可能被其他应用占用）")
+                    running = false
+                    break
+                }
+                continue
+            }
+            readErrors = 0
+            processFrame(buf, n)
+        }
+    }
+
+    private fun processFrame(buf: ShortArray, n: Int) {
+        val now = SystemClock.elapsedRealtime()
+        val frame = buf.copyOf(n)
+        val db = (20.0 * log10(rmsOf(frame) / 32768.0 + 1e-6)).toFloat()
+
+        // 空闲帧缓慢跟踪噪声底（只在非语音帧更新，说话时不许把底噪拉高）
+        if (!inSpeech && db > -90f) {
+            noiseFloorDb = noiseFloorDb * 0.95f + db * 0.05f
+        }
+
+        // 半双工档：播报期间整帧丢弃（无语音打断，靠点按/按住打断）
+        if (ttsActive && config.bargeInSensitivity == 0) {
+            pushPreroll(frame)
+            return
+        }
+
+        val onsetDb = when {
+            ttsActive -> if (config.bargeInSensitivity >= 2) {
+                maxOf(noiseFloorDb + 12f, BARGE_ABS_DB_HOT)
+            } else {
+                maxOf(noiseFloorDb + 20f, BARGE_ABS_DB_STD)
+            }
+            else -> maxOf(noiseFloorDb + 12f, MIN_ABS_ONSET_DB)
+        }
+        val isVoice = db >= onsetDb
+        val requiredRun = if (ttsActive) ONSET_RUN_TTS else ONSET_RUN_NORMAL
+
+        if (isVoice) {
+            lastVoiceAt = now
+            lastActivityAt = now
+            if (!inSpeech) {
+                val echoWindowOpen = ttsActive && now - ttsStartedAt < config.echoWindowMs
+                if (!echoWindowOpen) {
+                    voiceRun++
+                    if (voiceRun >= requiredRun) startSpeech(now, frame)
+                }
+                // 起振窗内的帧先进前滚缓冲，窗一过若继续说话能带上开头
+                if (!inSpeech) pushPreroll(frame)
+            } else {
+                appendSegment(frame)
+            }
+        } else {
+            voiceRun = 0
+            if (inSpeech) {
+                appendSegment(frame) // 静音帧也录，保留自然尾音
+                if (now - lastVoiceAt > config.silenceEndMs) endSpeech(now)
+            }
+        }
+
+        // 单段上限：说个没完也强制切，防内存涨满
+        if (inSpeech && now - speechStartAt > config.maxUtteranceMs) endSpeech(now)
+
+        // 空闲超时：既没在说话也没在放 TTS、调用方也不忙，安静太久交还控制权
+        if (!inSpeech && !ttsActive && !busy &&
+            now - maxOf(lastActivityAt, lastVoiceAt) > config.idleTimeoutMs
+        ) {
+            lastActivityAt = now // 只报一次，等调用方 stop()
+            listener.onAutoTimeout()
+        }
+    }
+
+    private fun startSpeech(now: Long, currentFrame: ShortArray) {
+        inSpeech = true
+        speechStartAt = now
+        segment = ByteArrayOutputStream()
+        segmentSamples = 0
+        preroll.forEach { appendSegmentInternal(it) } // 前滚带上首字
+        preroll.clear()
+        appendSegmentInternal(currentFrame)
+    }
+
+    private fun pushPreroll(frame: ShortArray) {
+        preroll.addLast(frame)
+        while (preroll.size > PREROLL_FRAMES) preroll.removeFirst()
+    }
+
+    private fun appendSegment(frame: ShortArray) {
+        if (!inSpeech) return
+        appendSegmentInternal(frame)
+    }
+
+    private fun appendSegmentInternal(frame: ShortArray) {
+        val bytes = ByteArray(frame.size * 2)
+        frame.forEachIndexed { i, s ->
+            bytes[i * 2] = (s.toInt() and 0xFF).toByte()
+            bytes[i * 2 + 1] = (s.toInt() shr 8 and 0xFF).toByte()
+        }
+        segment.write(bytes)
+        segmentSamples += frame.size
+    }
+
+    private fun endSpeech(now: Long) {
+        inSpeech = false
+        val speechMs = now - speechStartAt
+        val data = segment.toByteArray()
+        segment = ByteArrayOutputStream()
+        segmentSamples = 0
+        if (speechMs < config.minSpeechMs) return // 太短当噪声丢弃
+        val wav = pcmToWav(data)
+        val file = File(context.cacheDir, "conv_${System.currentTimeMillis()}.wav")
+        runCatching {
+            FileOutputStream(file).use { it.write(wav) }
+            listener.onUtterance(file)
+        }.onFailure {
+            listener.onError("录音保存失败，请重试")
+        }
+    }
+
+    private fun rmsOf(frame: ShortArray): Double {
+        var sum = 0.0
+        for (s in frame) {
+            val v = s.toDouble()
+            sum += v * v
+        }
+        return sqrt(sum / frame.size)
+    }
+
+    /** 16kHz 单声道 PCM16 → WAV（44 字节头），硅基流动直接收 */
+    private fun pcmToWav(pcm: ByteArray, sampleRate: Int = SAMPLE_RATE): ByteArray {
+        val total = 36 + pcm.size
+        val header = ByteArray(44)
+        fun le32(offset: Int, value: Int) {
+            header[offset] = (value and 0xFF).toByte()
+            header[offset + 1] = (value shr 8 and 0xFF).toByte()
+            header[offset + 2] = (value shr 16 and 0xFF).toByte()
+            header[offset + 3] = (value shr 24 and 0xFF).toByte()
+        }
+        fun le16(offset: Int, value: Int) {
+            header[offset] = (value and 0xFF).toByte()
+            header[offset + 1] = (value shr 8 and 0xFF).toByte()
+        }
+        header[0] = 'R'.code.toByte(); header[1] = 'I'.code.toByte(); header[2] = 'F'.code.toByte(); header[3] = 'F'.code.toByte()
+        le32(4, total)
+        header[8] = 'W'.code.toByte(); header[9] = 'A'.code.toByte(); header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
+        header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte(); header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
+        le32(16, 16)          // fmt 块长度
+        le16(20, 1)           // PCM
+        le16(22, 1)           // 单声道
+        le32(24, sampleRate)
+        le32(28, sampleRate * 2) // byteRate
+        le16(32, 2)           // blockAlign
+        le16(34, 16)          // bitsPerSample
+        header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte(); header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
+        le32(40, pcm.size)
+        return header + pcm
+    }
+}

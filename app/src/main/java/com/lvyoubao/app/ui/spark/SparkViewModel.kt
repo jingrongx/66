@@ -18,6 +18,7 @@ import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.RobotIntent
+import com.lvyoubao.app.ui.common.ContinuousConversation
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import kotlinx.coroutines.Dispatchers
@@ -100,6 +101,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var aiRequestJob: Job? = null
     private var idleToEyesJob: Job? = null
 
+    // 连续对话（免按住、可语音打断）：引擎会话 + 界面开关态 + 连续识别失败计数（防网络抖动反复念叨）
+    private var continuous: ContinuousConversation? = null
+    private val _isContinuous = MutableStateFlow(false)
+    val isContinuous: StateFlow<Boolean> = _isContinuous.asStateFlow()
+    private var consecutiveAsrFailures = 0
+
     // 主动提醒（电量低/充满）：键控一次（同档位只提醒一次），空闲才说，静默安睡不说
     private var lastLowKey: String? = null
     private var fullReminded = false
@@ -121,21 +128,28 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             TtsPlayer.state.collect { ttsState ->
                 when {
                     ttsState is TtsPlayer.State.Speaking -> {
+                        // 连续对话引擎：播报中切换为「打断监听」阈值；播报即表明处理链路走完了，空闲计时恢复
+                        continuous?.setTtsActive(true)
+                        continuous?.setBusy(false)
                         idleToEyesJob?.cancel()
                         if (_eyeState.value == SparkEyeState.THINKING || _eyeState.value == SparkEyeState.IDLE) {
                             _eyeState.value = SparkEyeState.SPEAKING
                         }
                     }
-                    ttsState is TtsPlayer.State.Idle && _eyeState.value == SparkEyeState.SPEAKING -> {
-                        _eyeState.value = SparkEyeState.IDLE
-                        idleToEyesJob?.cancel()
-                        idleToEyesJob = viewModelScope.launch {
-                            delay(EYES_RETURN_AFTER_MS)
-                            if (TtsPlayer.state.value is TtsPlayer.State.Idle &&
-                                _eyeState.value == SparkEyeState.IDLE &&
-                                !_isRecording.value
-                            ) {
-                                _showEyes.value = true
+                    ttsState is TtsPlayer.State.Idle -> {
+                        continuous?.setTtsActive(false)
+                        if (_eyeState.value == SparkEyeState.SPEAKING) {
+                            // 连续对话：播完回「聆听中」接着听；普通模式：回 IDLE 待机
+                            _eyeState.value = if (_isContinuous.value) SparkEyeState.LISTENING else SparkEyeState.IDLE
+                            idleToEyesJob?.cancel()
+                            idleToEyesJob = viewModelScope.launch {
+                                delay(EYES_RETURN_AFTER_MS)
+                                if (TtsPlayer.state.value is TtsPlayer.State.Idle &&
+                                    (_eyeState.value == SparkEyeState.IDLE || _eyeState.value == SparkEyeState.LISTENING) &&
+                                    !_isRecording.value
+                                ) {
+                                    _showEyes.value = true
+                                }
                             }
                         }
                     }
@@ -723,6 +737,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     _isStreaming.value = false
                     SparkChatStore.updateLastAssistant("请求出错啦：${err.message ?: "网络超时"}")
                     _statusHint.value = "请求失败"
+                    continuous?.setBusy(false) // 失败不出声，别让连续对话的空闲计时卡死
                 },
             )
         }
@@ -734,6 +749,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      */
     fun exitApp() {
         idleToEyesJob?.cancel()
+        stopContinuousInternal()
         TtsPlayer.stop()
         activeRecording?.let {
             SpeechInput.cancelRecording(it)
@@ -741,8 +757,137 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    // ---------- 连续对话（免按住、语音打断） ----------
+
+    /**
+     * 连续对话开关：开=麦克风常听（说完自动断句→回答→播完接着听，播报中开口即打断）；再点一次关。
+     * 灵动屏是语音优先设备，这里用 applicationContext 全程驱动，界面只是状态展示。
+     */
+    fun startContinuous(context: Context, onRequestRecordPermission: () -> Unit) {
+        if (_isContinuous.value) {
+            stopContinuous()
+            _statusHint.value = "连续对话已关"
+            return
+        }
+        if (!SpeechInput.hasRecordPermission(context)) {
+            onRequestRecordPermission()
+            return
+        }
+        idleToEyesJob?.cancel()
+        TtsPlayer.stop()
+        _showEyes.value = true
+        _eyeState.value = SparkEyeState.LISTENING
+        _statusHint.value = "连续对话：直接说就行"
+        val session = ContinuousConversation(
+            appContext,
+            config = ContinuousConversation.Config(bargeInSensitivity = settings.value.voiceBargeIn),
+            listener = object : ContinuousConversation.Listener {
+                override fun onUtterance(wav: java.io.File) {
+                    handleContinuousUtterance(wav)
+                }
+
+                override fun onBargeIn() {
+                    // 播报中真人开口：掐 TTS、取消在途回答，回到聆听（音频线程触发，切主协程）
+                    viewModelScope.launch {
+                        aiRequestJob?.cancel()
+                        _isStreaming.value = false
+                        TtsPlayer.stop()
+                        _eyeState.value = SparkEyeState.LISTENING
+                        _statusHint.value = "听你说…"
+                    }
+                }
+
+                override fun onAutoTimeout() {
+                    viewModelScope.launch {
+                        stopContinuousInternal()
+                        _statusHint.value = "60 秒没说话，连续对话休息了"
+                    }
+                }
+
+                override fun onError(message: String) {
+                    viewModelScope.launch {
+                        stopContinuousInternal()
+                        _statusHint.value = message
+                        speakHint(appContext, message)
+                    }
+                }
+            },
+        )
+        if (!session.start()) return
+        continuous = session
+        _isContinuous.value = true
+        speakHint(context, "连续对话模式，直接说就行")
+    }
+
+    fun stopContinuous() {
+        stopContinuousInternal()
+        _eyeState.value = SparkEyeState.IDLE
+        _statusHint.value = null
+    }
+
+    private fun stopContinuousInternal() {
+        continuous?.stop()
+        continuous = null
+        _isContinuous.value = false
+    }
+
+    /**
+     * 一段语音的完整处理（连续模式核心管线）：云端转写 → 本地热词 → 电量快路 → 机器人意图 → 聊天。
+     * 与按住说话的区别：空结果/失败不朗读——TTS 会回灌麦克风形成正反馈，只给状态条静默续听；
+     * 连续 ≥2 次失败才出声提醒，≥4 次自动退出（省电+别折磨用户）。
+     */
+    private fun handleContinuousUtterance(wav: java.io.File) = viewModelScope.launch {
+        val cur = repo.settings.firstOrNull() ?: settings.value
+        val asrKey = cur.asrKey.trim()
+        if (asrKey.isBlank()) {
+            appendMessage(SparkMessage("assistant", "请先在「设置」中配置语音识别 Key，连续对话才能听懂你。"))
+            speakHint(appContext, "请先在设置中配置语音识别 Key")
+            stopContinuousInternal()
+            return@launch
+        }
+        continuous?.setBusy(true)
+        val result = withContext(Dispatchers.IO) { SpeechInput.transcribeFile(wav, asrKey, cur.dialectMode) }
+        wav.delete()
+        result.fold(
+            onSuccess = { spoken ->
+                consecutiveAsrFailures = 0
+                val clean = HotwordCorrector.correct(spoken.trim())
+                if (clean.isBlank()) {
+                    _statusHint.value = "没听清，再说一次"
+                    _eyeState.value = SparkEyeState.LISTENING
+                    continuous?.setBusy(false)
+                } else {
+                    appendMessage(SparkMessage("user", clean))
+                    _showEyes.value = false
+                    _eyeState.value = SparkEyeState.THINKING
+                    if (matchBatteryQuestion(clean)) {
+                        answerBattery(appContext)
+                        return@launch // answerBattery 会朗读，TTS 收集器恢复计时
+                    }
+                    if (!handleRobotCommand(appContext, clean)) {
+                        sendAiRequest(appContext, clean, emptyList())
+                    }
+                }
+            },
+            onFailure = { err ->
+                consecutiveAsrFailures++
+                _eyeState.value = SparkEyeState.LISTENING
+                if (consecutiveAsrFailures >= 2) {
+                    val spoken = SpeechInput.spokenHint(err)
+                    _statusHint.value = spoken
+                    speakHint(appContext, spoken)
+                    if (consecutiveAsrFailures >= 4) stopContinuousInternal()
+                } else {
+                    _statusHint.value = err.message ?: "没听清"
+                }
+                continuous?.setBusy(false)
+            },
+        )
+    }
+
     override fun onCleared() {
         super.onCleared()
+        stopContinuousInternal()
         runCatching { appContext.unregisterReceiver(batteryReceiver) }
         activeRecording?.let {
             SpeechInput.cancelRecording(it)
