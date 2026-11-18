@@ -21,6 +21,7 @@ object RobotIntent {
         data object TimerStop : Command()
         data class Note(val content: String) : Command()
         data class MemorySearch(val keyword: String) : Command()
+        data object AssistantOff : Command()
         data object None : Command()
 
         /** 时长话术：90→「1分半钟」太复杂，直接 X小时Y分钟Z秒 拼接 */
@@ -54,6 +55,7 @@ object RobotIntent {
                 TimerStop -> "好的，计时取消了"
                 is Note -> "记好了"
                 is MemorySearch -> ""
+                AssistantOff -> "好的，下次再聊"
                 None -> ""
             }
 
@@ -76,6 +78,7 @@ object RobotIntent {
                 TimerStop -> "取消计时"
                 is Note -> "记一笔"
                 is MemorySearch -> "查记忆"
+                AssistantOff -> "道别"
                 None -> ""
             }
     }
@@ -131,6 +134,7 @@ object RobotIntent {
         TIMER_STOP——取消正在跑的倒计时：「取消计时」「关掉倒计时」→TIMER_STOP。注意「停下/别说了」是停止播报（STOP），别混
         NOTE 记事内容——帮用户记一笔随手记，内容保留用户原话要点：「记一下，明天九点开会」→NOTE 明天九点开会；「帮我记着这事：后天交材料」→NOTE 后天交材料
         MEMORY_SEARCH 关键词——在用户的记忆和随手记里找东西，提炼一两个检索词，别照抄整句：「记忆里有没有火锅店」→MEMORY_SEARCH 火锅；「我之前记过什么药」→MEMORY_SEARCH 药；「上次说的那个馆子叫啥」→MEMORY_SEARCH 馆子
+        CONTINUOUS_OFF——道别/结束对话（用户想收尾了）：「再见」「拜拜」「我走了」「先这样吧」「不聊了」「退出对话」→CONTINUOUS_OFF。注意讨论「再见怎么写」这类话题不是道别；「别响了」是停提醒音（响铃时才有），别混
         VOLUME_UP——把小源的说话音量调大：「大点声」「大声点」「听不清，声音大些」→VOLUME_UP
         VOLUME_DOWN——调小：「小点声」「小声点」「太吵了」→VOLUME_DOWN
         VOLUME_MUTE——静音不出声：「静音」「别出声了」「把声音关掉」→VOLUME_MUTE。注意「停下/别说了」是停止播报（STOP），「别那么大声」是调小（VOLUME_DOWN），都跟静音不同
@@ -140,7 +144,7 @@ object RobotIntent {
         NONE——这句话不是在指挥机器人（闲聊、问天气、问路线、查资料等），交给正常聊天。注意「抬头看看你」是抬头的动作（HEAD），问「附近有什么好吃的」是 NONE，都不是 LOOK。
         用户一句话里有几个动作就输出几行（最多4行），按说话的先后顺序排：
         例：「抬头然后低头」→ 两行：HEAD 15 和 HEAD -10；「先前进30再左转90度」→ MOVE 30 和 TURN 90；「转个身看看前面」→ TURN 180 和 LOOK。
-        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、BATTERY、TIMER 900 关火、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
+        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、BATTERY、TIMER 900 关火、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、CONTINUOUS_OFF、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
     """.trimIndent()
 
     /** AI 解析：超 8 秒或网络/服务失败一律返回空表（回落聊天，控制不能卡死语音主流程） */
@@ -186,12 +190,13 @@ object RobotIntent {
                 continue
             }
             // 「动作 数字」指令（一行内可能塞多个）
-            Regex("(TIMER_STOP|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|VOLUME)\\s*(-?\\d+)?")
+            Regex("(TIMER_STOP|CONTINUOUS_OFF|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|VOLUME)\\s*(-?\\d+)?")
                 .findAll(upper)
                 .forEach { m ->
                     val value = m.groupValues[2].toIntOrNull()
                     when (m.groupValues[1]) {
                         "STOP" -> out += Command.Stop
+                        "CONTINUOUS_OFF" -> out += Command.AssistantOff
                         "MOVE" -> out += Command.Move(value ?: 30)
                         "TURN" -> out += Command.Turn(value ?: 90)
                         "HEAD" -> out += Command.Head(value ?: 15)

@@ -488,6 +488,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             }
         }
 
+        // 道别快路（连聊中）：再见/拜拜/退出等短句直接结束对话，零延迟
+        if (_isContinuous.value && matchByeFast(text)) {
+            stopContinuous()
+            appendMessage(SparkMessage("assistant", "好的，下次再聊"))
+            _statusHint.value = null
+            speakHint(context, "好的，下次再聊")
+            return true
+        }
+
         // 设备快路：计时/记事短句（零延迟）
         matchTimerFast(text)?.let { (sec, label) ->
             startTimerWithConfirm(context, sec, label)
@@ -533,6 +542,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
         chain.filterIsInstance<RobotIntent.Command.MemorySearch>().firstOrNull()?.let { ms ->
             executeMemorySearch(context, ms.keyword)
+            return true
+        }
+        // AI 判断是道别：结束连续对话（设备指令，不受机器人开关限制）
+        if (chain.contains(RobotIntent.Command.AssistantOff)) {
+            stopContinuous()
+            appendMessage(SparkMessage("assistant", RobotIntent.Command.AssistantOff.confirmText))
+            _statusHint.value = null
+            speakHint(context, RobotIntent.Command.AssistantOff.confirmText)
             return true
         }
 
@@ -777,6 +794,13 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         if (t.isEmpty() || t.length > 60) return null
         val m = Regex("^(?:帮我)?记(?:一下|一笔|个事|着|录)[：:，,]?\\s*(.+)$").find(t) ?: return null
         return m.groupValues[1].trim().takeIf { it.length >= 2 }
+    }
+
+    /** 道别短句本地匹配（仅连聊中）：再见/拜拜/退出/不聊了等，零延迟结束对话；长句交给 AI 判断 */
+    private fun matchByeFast(text: String): Boolean {
+        val t = text.trim().trimEnd('。', '！', '!', '.', '，', ',')
+        if (t.isEmpty() || t.length > 6) return false
+        return listOf("再见", "拜拜", "退出", "不聊了", "先这样", "告辞", "撤了").any { t == it || t.startsWith(it) }
     }
 
     /** 记一笔随手记（NoteStore 本机 JSONL，随手记页可见） */

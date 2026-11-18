@@ -368,7 +368,7 @@ fun SparkModeScreen(
                         ) {
                             Text(
                                 text = formatCountdown(timerLeft!!),
-                                fontSize = (34 * scale).sp,
+                                fontSize = (48 * scale).sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White,
                                 fontFamily = FontFamily.Monospace,
