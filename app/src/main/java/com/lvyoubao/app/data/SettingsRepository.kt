@@ -43,6 +43,8 @@ class SettingsRepository(private val context: Context) {
         val autoSpeak = booleanPreferencesKey("auto_speak")
         val keepAliveEnabled = booleanPreferencesKey("keep_alive_enabled")
         val bootStartEnabled = booleanPreferencesKey("boot_start_enabled")
+        val robotEnabled = booleanPreferencesKey("robot_enabled")
+        val robotHost = stringPreferencesKey("robot_host")
         val largeTextFontScale = floatPreferencesKey("large_text_font_scale")
         val sparkFontScale = floatPreferencesKey("spark_font_scale")
         val savedProviders = stringPreferencesKey("saved_providers")
@@ -72,6 +74,8 @@ class SettingsRepository(private val context: Context) {
             autoSpeak = p[Keys.autoSpeak] ?: false,
             keepAliveEnabled = p[Keys.keepAliveEnabled] ?: false,
             bootStartEnabled = p[Keys.bootStartEnabled] ?: false,
+            robotEnabled = p[Keys.robotEnabled] ?: false,
+            robotHost = p[Keys.robotHost] ?: "",
             largeTextFontScale = p[Keys.largeTextFontScale] ?: 1.0f,
             sparkFontScale = p[Keys.sparkFontScale] ?: 1.0f,
             savedProviders = p[Keys.savedProviders]?.let { s ->
@@ -104,6 +108,8 @@ class SettingsRepository(private val context: Context) {
             p[Keys.autoSpeak] = settings.autoSpeak
             p[Keys.keepAliveEnabled] = settings.keepAliveEnabled
             p[Keys.bootStartEnabled] = settings.bootStartEnabled
+            p[Keys.robotEnabled] = settings.robotEnabled
+            p[Keys.robotHost] = settings.robotHost
             p[Keys.largeTextFontScale] = settings.largeTextFontScale
             p[Keys.sparkFontScale] = settings.sparkFontScale
             p[Keys.savedProviders] = providerJson.encodeToString(settings.savedProviders)

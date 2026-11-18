@@ -233,7 +233,7 @@ fun AskScreen(
                 HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                 SpeechInput.listen(context, "说出来，我帮你问")
                     .onSuccess { vm.appendVoiceTranscript(it) }
-                    .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
+                    .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
                 listening = false
             }
         } else {
@@ -254,7 +254,7 @@ fun AskScreen(
                     HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                     vm.appendVoiceTranscript(it)
                 }
-                .onFailure { vm.setTransientError(it.message ?: "语音识别失败") }
+                .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
             listening = false
         }
     }

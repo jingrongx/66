@@ -74,6 +74,7 @@ import com.lvyoubao.app.KeepAliveService
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.ProviderPresets
+import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.presetById
 import com.lvyoubao.app.ui.SettingsViewModel
 import com.lvyoubao.app.ui.common.TtsPlayer
@@ -791,6 +792,92 @@ fun SettingsScreen(
         }
         Text(
             "语音识别的稿子你手动改对再发送，就会记下「识别稿 → 发送稿」的差异；AI 智能纠错据此把同类错误越改越准。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        )
+
+        // ---------- 机器人控制 ----------
+        SectionLabel("机器人控制")
+        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("语音指挥机器人", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "说「前进30厘米」「左转90度」「抬头」「停」直接指挥动作 · 先支持优必选小方头",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.robotEnabled,
+                        onCheckedChange = { checked ->
+                            vm.updateDraft { it.copy(robotEnabled = checked) }
+                            vm.save(onSaved = {})
+                        },
+                    )
+                }
+                if (state.draft.robotEnabled) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        FieldLabel("机器人中枢地址（机器人本机可填 127.0.0.1）")
+                        OutlinedTextField(
+                            value = state.draft.robotHost,
+                            onValueChange = { value -> vm.updateDraft { it.copy(robotHost = value.trim()) } },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            placeholder = { Text("机器人局域网 IP，如 192.168.3.102（端口默认 8899）") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            shape = RoundedCornerShape(14.dp),
+                        )
+                        val scope = rememberCoroutineScope()
+                        var testing by remember { mutableStateOf(false) }
+                        var testResult by remember { mutableStateOf<String?>(null) }
+                        Button(
+                            onClick = {
+                                if (testing) return@Button
+                                val host = RobotClient.normalizeHost(state.draft.robotHost)
+                                if (host == null) {
+                                    testResult = "地址不对：填机器人 IP（如 192.168.3.102）"
+                                    return@Button
+                                }
+                                testing = true
+                                testResult = null
+                                scope.launch {
+                                    testResult = RobotClient(host).ping().fold(
+                                        onSuccess = { name -> "✓ 已连接：$name" },
+                                        onFailure = { it.message ?: "连接失败" },
+                                    )
+                                    testing = false
+                                }
+                            },
+                            enabled = !testing,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                        ) {
+                            Text(if (testing) "测试中…" else "测试连接")
+                        }
+                        testResult?.let { msg ->
+                            Text(
+                                msg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (msg.startsWith("✓")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(top = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Text(
+            "机器人上需安装 xrobotctl 控制中枢（github.com/jingrongx/xrobotctl）并打开一次启动常驻服务；两台设备需连同一个 Wi-Fi。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),

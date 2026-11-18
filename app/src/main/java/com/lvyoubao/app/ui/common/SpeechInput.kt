@@ -34,6 +34,28 @@ import java.util.concurrent.TimeUnit
  */
 object SpeechInput {
 
+    /**
+     * 识别失败分类（语音优先设备的播报按类给固定话术，气泡里保留具体原因）：
+     * NOT_HEARD 没听清（再说一次就好）/ NETWORK 网络与服务端故障 / CONFIG 配置问题（Key/权限）/ OTHER 其他
+     */
+    enum class SpeechFailure { NOT_HEARD, NETWORK, CONFIG, OTHER }
+
+    open class SpeechException(
+        val failure: SpeechFailure,
+        val code: Int = 0,
+        message: String,
+    ) : IllegalStateException(message)
+
+    /** 播报话术：没听清/网络故障给固定话术，其余说具体原因 */
+    fun spokenHint(err: Throwable): String {
+        val e = err as? SpeechException ?: return err.message ?: "没听清楚，请再试一次"
+        return when (e.failure) {
+            SpeechFailure.NOT_HEARD -> "没听清楚，请再试一次"
+            SpeechFailure.NETWORK -> "网络服务有问题，请稍后再试"
+            else -> e.message ?: "没听清楚，请再试一次"
+        }
+    }
+
     private const val ASR_BASE_URL = "https://api.siliconflow.cn/v1"
 
     /** 普通识别：SenseVoice 免费模型，普通话准、响应快 */
@@ -76,20 +98,29 @@ object SpeechInput {
     const val PAUSE_HINT_MS = 8_000L
     const val MIN_SPEECH_MS = 15_000L
 
-    private class RecognizeError(val code: Int, message: String) : IllegalStateException(message)
+    private class RecognizeError(code: Int, message: String) :
+        SpeechException(failureKind(code), code, message)
+
+    /** 系统识别错误码 → 失败分类（没听清/网络/配置/其他） */
+    private fun failureKind(error: Int): SpeechFailure = when (error) {
+        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> SpeechFailure.NOT_HEARD
+        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT, SpeechRecognizer.ERROR_SERVER -> SpeechFailure.NETWORK
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> SpeechFailure.CONFIG
+        else -> SpeechFailure.OTHER
+    }
 
     /** 系统识别：起内置 UI 聆听并返回结果 */
     private suspend fun listenOnce(context: Context, prompt: String): Result<String> =
         suspendCancellableCoroutine { cont ->
             if (!isAvailable(context)) {
-                cont.resume(Result.failure(IllegalStateException("这台手机没有系统语音识别，请改用其他方式")))
+                cont.resume(Result.failure(SpeechException(SpeechFailure.OTHER, message = "这台手机没有系统语音识别，请改用其他方式")))
                 return@suspendCancellableCoroutine
             }
             val recognizer = runCatching {
                 SpeechRecognizer.createSpeechRecognizer(context.applicationContext)
             }.getOrNull()
             if (recognizer == null) {
-                cont.resume(Result.failure(IllegalStateException("语音识别启动失败，请改用打字提问")))
+                cont.resume(Result.failure(SpeechException(SpeechFailure.OTHER, message = "语音识别启动失败，请改用打字提问")))
                 return@suspendCancellableCoroutine
             }
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -122,7 +153,7 @@ object SpeechInput {
                     if (cont.isActive) {
                         cont.resume(
                             if (text.isNullOrBlank())
-                                Result.failure(RecognizeError(SpeechRecognizer.ERROR_NO_MATCH, "没听清你说什么，再试一次？"))
+                                Result.failure(RecognizeError(SpeechRecognizer.ERROR_NO_MATCH, "没听清楚，请再试一次"))
                             else Result.success(text),
                         )
                     }
@@ -175,7 +206,7 @@ object SpeechInput {
         runCatching { recording.recorder.stop() }
         runCatching { recording.recorder.release() }
         val result = if (recording.file.length() < 2_000) {
-            Result.failure(IllegalStateException("没录到声音，请贴近手机再说一次"))
+            Result.failure(SpeechException(SpeechFailure.NOT_HEARD, message = "没录到声音，请贴近手机再说一次"))
         } else {
             transcribe(recording.file, asrKey, dialect)
         }
@@ -209,23 +240,25 @@ object SpeechInput {
                 client.newCall(request).execute().use { response ->
                     val text = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        val hint = when (response.code) {
-                            401 -> "语音识别 Key 无效，请到设置里检查"
-                            402 -> "硅基流动账号余额不足：语音识别用的是免费模型，一般不扣余额，请到 siliconflow.cn 检查账号状态（是否实名/可用）"
-                            403 -> "语音识别请求被拒：请到 siliconflow.cn 确认账号可用（是否需要实名认证）"
-                            429 -> "语音识别太频繁，稍后再试"
-                            else -> "语音识别服务异常（HTTP ${response.code}）"
+                        // 分类：Key/账号类给 CONFIG（说具体原因）；服务端故障一律 NETWORK（播报说「网络服务问题」，气泡留 HTTP 码）
+                        val (failure, hint) = when (response.code) {
+                            401 -> SpeechFailure.CONFIG to "语音识别 Key 无效，请到设置里检查"
+                            402 -> SpeechFailure.CONFIG to "硅基流动账号余额不足：语音识别用的是免费模型，一般不扣余额，请到 siliconflow.cn 检查账号状态（是否实名/可用）"
+                            403 -> SpeechFailure.CONFIG to "语音识别请求被拒：请到 siliconflow.cn 确认账号可用（是否需要实名认证）"
+                            429 -> SpeechFailure.OTHER to "语音识别太频繁，稍后再试"
+                            else -> SpeechFailure.NETWORK to "语音识别服务异常（HTTP ${response.code}）"
                         }
-                        error(hint)
+                        throw SpeechException(failure, response.code, hint)
                     }
                     val parsed = runCatching {
                         json.decodeFromString<TranscribeResponse>(text).text
                     }.getOrDefault("")
-                    parsed.trim().ifBlank { error("没听清你说什么，再试一次？") }
+                    parsed.trim().ifBlank { throw SpeechException(SpeechFailure.NOT_HEARD, message = "没听清楚，请再试一次") }
                 }
             }.recoverCatching { e ->
-                if (e is IllegalStateException) throw e
-                throw IllegalStateException("语音识别失败：${e.message ?: "网络异常"}，请再试一次")
+                if (e is IllegalStateException) throw e // 含 SpeechException：分类已带好，原样上抛
+                // 走到这的都是网络层异常（连接失败/超时/DNS）：按用户要求统一说「网络服务问题」
+                throw SpeechException(SpeechFailure.NETWORK, message = "网络服务有问题，请稍后再试")
             }
         }
 
@@ -235,12 +268,11 @@ object SpeechInput {
     private data class TranscribeResponse(val text: String = "")
 
     private fun friendlyError(error: Int): String = when (error) {
-        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听到你说话，请靠近一点再试"
-        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音识别网络异常，稍后再试"
+        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听清楚，请再试一次"
+        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT, SpeechRecognizer.ERROR_SERVER -> "网络服务有问题，请稍后再试"
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "语音识别权限被拒绝，请检查系统设置"
         SpeechRecognizer.ERROR_AUDIO -> "录音出错，请再试一次"
         SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音识别忙，稍等一下再试"
-        SpeechRecognizer.ERROR_SERVER -> "语音服务出了点问题，稍后再试"
-        else -> "语音识别失败，请再试一次"
+        else -> "没听清楚，请再试一次"
     }
 }

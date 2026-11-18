@@ -203,7 +203,7 @@ fun LargeTextScreen(
                 HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
                 SpeechInput.listen(context, "请说话")
                     .onSuccess { vm.appendVoiceTranscript(it) }
-                    .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
+                    .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
                 listening = false
             }
         } else {
@@ -224,7 +224,7 @@ fun LargeTextScreen(
                     vm.appendVoiceTranscript(spoken, polish = !autoSend)
                     if (autoSend) vm.send(context)
                 }
-                .onFailure { vm.setTransientError(it.message ?: "语音识别失败，请再试一次") }
+                .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
             listening = false
         }
     }

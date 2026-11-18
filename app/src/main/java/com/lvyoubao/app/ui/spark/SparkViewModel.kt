@@ -11,6 +11,8 @@ import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.OutMessage
+import com.lvyoubao.app.data.RobotClient
+import com.lvyoubao.app.data.RobotIntent
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import kotlinx.coroutines.Dispatchers
@@ -276,20 +278,25 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         appendMessage(SparkMessage("user", clean, pending.map { it.bitmap }))
                         _pendingPhotos.value = emptyList()
                         _showEyes.value = false // 提问完成，自动切换为会话流展示
-                        sendAiRequest(context, clean, pending.map { it.dataUrl })
+                        // 机器人控制优先：开启且解析出控制指令时执行并播报结果，否则照常聊天
+                        if (!handleRobotCommand(context, clean)) {
+                            sendAiRequest(context, clean, pending.map { it.dataUrl })
+                        }
                     } else {
                         _eyeState.value = SparkEyeState.IDLE
-                        _statusHint.value = "没听清你说什么，可以再试一次"
-                        speakHint(context, "没听清你说什么，可以再试一次")
+                        _statusHint.value = "没听清楚，请再试一次"
+                        speakHint(context, "没听清楚，请再试一次")
                     }
                 },
                 onFailure = { err ->
                     _eyeState.value = SparkEyeState.IDLE
                     appendMessage(SparkMessage("user", "（识别未完成）"))
-                    appendMessage(SparkMessage("assistant", err.message ?: "语音转文字失败，请稍后重试"))
+                    appendMessage(SparkMessage("assistant", err.message ?: "没听清楚，请再试一次"))
                     _showEyes.value = false
-                    _statusHint.value = "语音识别没成功，请再试一次"
-                    speakHint(context, "语音识别没成功，请再试一次")
+                    // 播报按分类给话术：没听清说「没听清楚」、服务端故障说「网络服务问题」、其余说具体原因
+                    val spoken = SpeechInput.spokenHint(err)
+                    _statusHint.value = spoken
+                    speakHint(context, spoken)
                 },
             )
         }
@@ -360,6 +367,56 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             userText = prompt,
             imageDataUrls = photos.map { it.dataUrl },
         )
+    }
+
+    /**
+     * 语音控制机器人（设置里开「机器人控制」后生效，控制对象：xrobotctl 中枢驱动的机器人，现内置优必选小方头）：
+     * ①「停」类词本地快路零延迟急停（急停不能等 AI 往返）；
+     * ②其余交给 AI 解析意图（chatPlain 单轮、思考关闭），解析出指令就调中枢 HTTP 执行；
+     * ③解析为 NONE / 未启用机器人返回 false，照常走聊天流程。
+     * 所有执行结果都说话告知，绝不静默；解析失败回落聊天，控制绝不卡死语音主流程。
+     */
+    private suspend fun handleRobotCommand(context: Context, text: String): Boolean {
+        val curSettings = repo.settings.firstOrNull() ?: settings.value
+        if (!curSettings.robotEnabled) return false
+
+        val host = RobotClient.normalizeHost(curSettings.robotHost)
+        if (host == null) {
+            appendMessage(SparkMessage("assistant", "机器人地址还没填，请到「设置 → 机器人控制」填写机器人 IP。"))
+            _statusHint.value = "请先填写机器人地址"
+            speakHint(context, "机器人地址还没填，请到设置里填写")
+            return true
+        }
+
+        val command = if (RobotIntent.matchStopFast(text)) {
+            RobotIntent.Command.Stop
+        } else {
+            _statusHint.value = "正在理解指令…"
+            RobotIntent.parse(text, curSettings)
+        }
+        if (command == RobotIntent.Command.None) return false
+
+        val robot = RobotClient(host)
+        val result = when (command) {
+            RobotIntent.Command.Stop -> robot.stop()
+            is RobotIntent.Command.Move -> robot.move(command.distCm)
+            is RobotIntent.Command.Turn -> robot.turn(command.angleDeg)
+            is RobotIntent.Command.Head -> robot.head(command.angleDeg)
+            RobotIntent.Command.None -> return false
+        }
+        result.fold(
+            onSuccess = {
+                appendMessage(SparkMessage("assistant", command.confirmText))
+                _statusHint.value = null
+                speakHint(context, command.confirmText)
+            },
+            onFailure = { err ->
+                appendMessage(SparkMessage("assistant", "机器人没动起来：${err.message ?: "连接失败"}"))
+                _statusHint.value = err.message ?: "机器人没动起来"
+                speakHint(context, err.message ?: "机器人没动起来")
+            },
+        )
+        return true
     }
 
     private fun sendAiRequest(
