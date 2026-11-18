@@ -27,6 +27,17 @@ object RobotIntent {
                 Look -> "好的，我看看"
                 None -> ""
             }
+
+        /** 短标签：一句话多个动作时的播报拼接用（「好的，抬头，然后低头」） */
+        val label: String
+            get() = when (this) {
+                Stop -> "停下"
+                is Move -> if (distCm >= 0) "前进${distCm}厘米" else "后退${-distCm}厘米"
+                is Turn -> if (angleDeg >= 0) "左转${angleDeg}度" else "右转${-angleDeg}度"
+                is Head -> if (angleDeg >= 0) "抬头" else "低头"
+                Look -> "看看前面"
+                None -> ""
+            }
     }
 
     /** 急停词表：整句短语匹配（「停下的时候提醒我」这类长句不会误伤，长句交给 AI） */
@@ -46,9 +57,9 @@ object RobotIntent {
         return stopPhrases.any { t == it || t.startsWith(it) }
     }
 
-    /** AI 解析协议：单行「动作 数值」，宁 NONE 勿动 */
+    /** AI 解析协议：每行一个「动作 数值」，一句话可含多个动作按顺序输出；宁 NONE 勿动 */
     private val SYSTEM_PROMPT = """
-        你是机器人语音指令解析器。把用户这句话解析成一条指令，只输出「动作 数值」一行，绝不解释。
+        你是机器人语音指令解析器。把用户这句话解析成指令序列，每个动作单独一行「动作 数值」，绝不解释。
         可用动作（优必选小方头）：
         MOVE 厘米——底盘前进/后退：正数前进、负数后退，没说距离默认30。例：「向前走30厘米」→MOVE 30；「后退一点」→MOVE -15；「往前走走」→MOVE 30
         TURN 度——转向：正数左转、负数右转；没说角度按「左转/右转90、转个身180、一点30」。例：「左转90度」→TURN 90；「右转一点」→TURN -30；「转个身」→TURN 180
@@ -56,11 +67,13 @@ object RobotIntent {
         LOOK——用摄像头拍一张照片看看眼前。只要用户想让小源当场用摄像头看一眼（说法五花八门，不限于特定词），都算 LOOK：如「看看前面有什么」「前面是什么」「看看这是什么」「你看到了什么」「看看周围」「帮我看看眼前的」「拍张照看看」「瞅一眼」。判断标准：动作是「当场拍照看环境」，不是查资料问知识。
         STOP——立即停止。例：「停下」「别动了」→STOP
         NONE——这句话不是在指挥机器人（闲聊、问天气、问路线、查资料等），交给正常聊天。注意「抬头看看你」是抬头的动作（HEAD），问「附近有什么好吃的」是 NONE，都不是 LOOK。
-        只输出一个动作和一个数字（如 MOVE 30、TURN -90、HEAD 15、LOOK、STOP、NONE），绝不输出其他任何内容；拿不准一律输出 NONE。
+        用户一句话里有几个动作就输出几行（最多4行），按说话的先后顺序排：
+        例：「抬头然后低头」→ 两行：HEAD 15 和 HEAD -10；「先前进30再左转90度」→ MOVE 30 和 TURN 90；「转个身看看前面」→ TURN 180 和 LOOK。
+        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
     """.trimIndent()
 
-    /** AI 解析：超 8 秒或网络/服务失败一律返回 NONE（回落聊天，控制不能卡死语音主流程） */
-    suspend fun parse(text: String, settings: AiSettings): Command {
+    /** AI 解析：超 8 秒或网络/服务失败一律返回空表（回落聊天，控制不能卡死语音主流程） */
+    suspend fun parse(text: String, settings: AiSettings): List<Command> {
         val reply = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
             AiClient(settings).chatPlain(
                 messages = listOf(
@@ -69,22 +82,23 @@ object RobotIntent {
                 ),
                 thinking = false,
             ).getOrNull()
-        } ?: return Command.None
+        } ?: return emptyList()
         return parseReply(reply)
     }
 
-    /** 从模型回复里抠「动作 数字」：容忍前缀废话/大小写/全角数字以外的杂讯 */
-    fun parseReply(reply: String): Command {
+    /** 从模型回复里抠所有「动作 数字」行（容忍分隔符/大小写杂讯），按顺序最多取 4 条 */
+    fun parseReply(reply: String): List<Command> {
         val s = reply.trim().uppercase()
-        val m = Regex("(MOVE|TURN|HEAD|STOP|LOOK)\\s*(-?\\d+)?").find(s) ?: return Command.None
-        val value = m.groupValues[2].toIntOrNull()
-        return when (m.groupValues[1]) {
-            "STOP" -> Command.Stop
-            "MOVE" -> Command.Move(value ?: 30)
-            "TURN" -> Command.Turn(value ?: 90)
-            "HEAD" -> Command.Head(value ?: 15)
-            "LOOK" -> Command.Look
-            else -> Command.None
-        }
+        return Regex("(MOVE|TURN|HEAD|STOP|LOOK)\\s*(-?\\d+)?").findAll(s).take(4).mapNotNull { m ->
+            val value = m.groupValues[2].toIntOrNull()
+            when (m.groupValues[1]) {
+                "STOP" -> Command.Stop
+                "MOVE" -> Command.Move(value ?: 30)
+                "TURN" -> Command.Turn(value ?: 90)
+                "HEAD" -> Command.Head(value ?: 15)
+                "LOOK" -> Command.Look
+                else -> null
+            }
+        }.toList()
     }
 }

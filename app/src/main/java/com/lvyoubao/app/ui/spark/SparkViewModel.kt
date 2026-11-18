@@ -372,51 +372,103 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     /**
      * 语音控制机器人（设置里开「机器人控制」后生效，控制对象：xrobotctl 中枢驱动的机器人，现内置优必选小方头）：
      * ①「停」类词本地快路零延迟急停（急停不能等 AI 往返）；
-     * ②其余交给 AI 解析意图（chatPlain 单轮、思考关闭）：控制指令调中枢 HTTP 执行；LOOK（让小源当场看一眼）
-     *   只用设备相机静默拍照，不需要机器人中枢；触发词不设死，AI 判断整句是不是「拍照看环境」；
-     * ③解析为 NONE / 未启用机器人返回 false，照常走聊天流程。
-     * 所有执行结果都说话告知，绝不静默；解析失败回落聊天，控制绝不卡死语音主流程。
+     * ②其余交给 AI 解析意图（chatPlain 单轮、思考关闭）——一句话可含多个动作（AI 按顺序每行输出一条），
+     *   这里串行编排执行：动作间按运动耗时留间隔（中枢队列本身也串行，间隔只是给动作留出可感知的节奏），
+     *   结束后一次性播报「好的，抬头，然后低头」；LOOK（让小源当场看一眼）只用设备相机静默拍照，
+     *   不需要机器人中枢，且终止编排（拍照问答接管会话）；触发说法不设死，AI 判断；
+     * ③解析为空 / 未启用机器人返回 false，照常走聊天流程；失败即停编排并播报原因，绝不静默。
      */
     private suspend fun handleRobotCommand(context: Context, text: String): Boolean {
         val curSettings = repo.settings.firstOrNull() ?: settings.value
         if (!curSettings.robotEnabled) return false
 
-        val command = if (RobotIntent.matchStopFast(text)) {
-            RobotIntent.Command.Stop
-        } else {
-            _statusHint.value = "正在理解指令…"
-            RobotIntent.parse(text, curSettings)
+        // 急停快路：不等 AI 往返
+        if (RobotIntent.matchStopFast(text)) {
+            val robot = robotClientOrNull(context, curSettings) ?: return true
+            runRobot(context, robot, RobotIntent.Command.Stop)
+            return true
         }
-        if (command == RobotIntent.Command.None) return false
 
-        // 拍照看一眼：设备相机就行，不依赖机器人中枢地址
-        if (command == RobotIntent.Command.Look) {
+        _statusHint.value = "正在理解指令…"
+        val commands = RobotIntent.parse(text, curSettings)
+        if (commands.isEmpty()) return false
+
+        // LOOK 终止编排：拍照问答接管会话，其后的指令忽略
+        val lookIndex = commands.indexOf(RobotIntent.Command.Look)
+        val chain = if (lookIndex >= 0) commands.take(lookIndex + 1) else commands
+
+        // LOOK 单发：设备相机就行，不依赖机器人中枢
+        if (chain.size == 1 && chain[0] == RobotIntent.Command.Look) {
             executeLook(context)
             return true
         }
 
+        val robot = robotClientOrNull(context, curSettings) ?: return true
+
+        val executed = mutableListOf<String>()
+        for ((i, cmd) in chain.withIndex()) {
+            if (cmd == RobotIntent.Command.Look) {
+                if (executed.isNotEmpty()) announceChain(context, executed)
+                executeLook(context)
+                return true
+            }
+            val ok = executeRobot(robot, cmd).fold(
+                onSuccess = {
+                    executed.add(cmd.label)
+                    true
+                },
+                onFailure = { err ->
+                    appendMessage(SparkMessage("assistant", "机器人没动起来：${err.message ?: "连接失败"}"))
+                    _statusHint.value = err.message ?: "机器人没动起来"
+                    speakHint(context, err.message ?: "机器人没动起来")
+                    false
+                },
+            )
+            if (!ok) return true // 失败即停编排
+            if (i < chain.lastIndex) {
+                _statusHint.value = "执行中（${i + 1}/${chain.size}）…"
+                delay(estimateMillis(cmd)) // 留出动作的运动耗时，节奏可感知
+            }
+        }
+        announceChain(context, executed)
+        return true
+    }
+
+    /** 编排完成后一次性播报（比每步都打断 TTS 自然） */
+    private fun announceChain(context: Context, executed: List<String>) {
+        val spoken = "好的，" + executed.joinToString("，然后")
+        appendMessage(SparkMessage("assistant", spoken))
+        _statusHint.value = null
+        speakHint(context, spoken)
+    }
+
+    /** 中枢客户端；地址没填时语音引导并返回 null */
+    private suspend fun robotClientOrNull(context: Context, curSettings: AiSettings): RobotClient? {
         val host = RobotClient.normalizeHost(curSettings.robotHost)
         if (host == null) {
             appendMessage(SparkMessage("assistant", "机器人地址还没填，请到「设置 → 机器人控制」填写机器人 IP。"))
             _statusHint.value = "请先填写机器人地址"
             speakHint(context, "机器人地址还没填，请到设置里填写")
-            return true
+            return null
         }
+        return RobotClient(host)
+    }
 
-        val robot = RobotClient(host)
-        val result = when (command) {
-            RobotIntent.Command.Stop -> robot.stop()
-            is RobotIntent.Command.Move -> robot.move(command.distCm)
-            is RobotIntent.Command.Turn -> robot.turn(command.angleDeg)
-            is RobotIntent.Command.Head -> robot.head(command.angleDeg)
-            RobotIntent.Command.Look -> return true // 上面已处理，防御性兜底
-            RobotIntent.Command.None -> return false
-        }
-        result.fold(
+    private suspend fun executeRobot(robot: RobotClient, cmd: RobotIntent.Command): Result<Unit> = when (cmd) {
+        RobotIntent.Command.Stop -> robot.stop()
+        is RobotIntent.Command.Move -> robot.move(cmd.distCm)
+        is RobotIntent.Command.Turn -> robot.turn(cmd.angleDeg)
+        is RobotIntent.Command.Head -> robot.head(cmd.angleDeg)
+        else -> Result.success(Unit) // LOOK 不走中枢
+    }
+
+    /** 单条动作的完整执行（执行+播报），急停快路与单指令路径共用 */
+    private suspend fun runRobot(context: Context, robot: RobotClient, cmd: RobotIntent.Command) {
+        executeRobot(robot, cmd).fold(
             onSuccess = {
-                appendMessage(SparkMessage("assistant", command.confirmText))
+                appendMessage(SparkMessage("assistant", cmd.confirmText))
                 _statusHint.value = null
-                speakHint(context, command.confirmText)
+                speakHint(context, cmd.confirmText)
             },
             onFailure = { err ->
                 appendMessage(SparkMessage("assistant", "机器人没动起来：${err.message ?: "连接失败"}"))
@@ -424,7 +476,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 speakHint(context, err.message ?: "机器人没动起来")
             },
         )
-        return true
+    }
+
+    /** 动作的运动耗时估计（间隔节奏用；中枢队列本身串行，估少了也只是节奏紧不碍正确性） */
+    private fun estimateMillis(cmd: RobotIntent.Command): Long = when (cmd) {
+        is RobotIntent.Command.Move -> ((kotlin.math.abs(cmd.distCm) / 8f).coerceIn(1f, 8f) * 1000).toLong()
+        is RobotIntent.Command.Turn -> ((kotlin.math.abs(cmd.angleDeg) / 60f).coerceIn(1f, 6f) * 1000).toLong()
+        is RobotIntent.Command.Head -> 1_200L
+        else -> 500L
     }
 
     /**
