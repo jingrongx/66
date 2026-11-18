@@ -2,6 +2,7 @@ package com.lvyoubao.app.ui.spark
 
 import android.Manifest
 import android.content.Intent
+import android.os.SystemClock
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -228,34 +229,8 @@ fun SparkModeScreen(
                 )
             }
 
-            // 右侧操作：连续对话 + 切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
+            // 右侧操作：切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // 连续对话：免按住、说完自动答、播报中开口即打断；再点一次关
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape((8 * scale).dp))
-                        .background(
-                            if (isContinuous) MaterialTheme.colorScheme.primary
-                            else Color.White.copy(alpha = 0.12f),
-                        )
-                        .clickable {
-                            vm.startContinuous(context) {
-                                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        }
-                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = if (isContinuous) "👂 连续中" else "👂 连续",
-                        color = Color.White.copy(alpha = 0.95f),
-                        fontSize = (12 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-
-                Spacer(Modifier.width((6 * scale).dp))
-
                 // 切换眼睛 / 会话文字
                 Box(
                     modifier = Modifier
@@ -428,13 +403,21 @@ fun SparkModeScreen(
         val talkGesture = Modifier.pointerInput(Unit) {
             detectTapGestures(
                 onPress = {
+                    val pressStart = SystemClock.elapsedRealtime()
                     vm.startHoldTalk(context) {
                         recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     }
                     try {
                         tryAwaitRelease()
                     } finally {
-                        vm.endHoldTalk(context)
+                        // 轻点（<250ms）= 开/关连续对话；按住 = 临时说一句。嘴形胶囊文字有引导
+                        if (SystemClock.elapsedRealtime() - pressStart < 250) {
+                            vm.onMouthTap(context) {
+                                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        } else {
+                            vm.endHoldTalk(context)
+                        }
                     }
                 },
             )
@@ -477,7 +460,12 @@ fun SparkModeScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
+                        // 轻点嘴=开关连续对话（免按住/可语音打断），按住=临时说一句——文字自带引导，不用图标
+                        text = when {
+                            isRecording -> "松手发送 (${recordTick}s)"
+                            isContinuous -> "连续对话中 · 点按退出"
+                            else -> "按住说话 · 点按连聊"
+                        },
                         fontSize = (16 * scale).sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
@@ -511,7 +499,11 @@ fun SparkModeScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
+                        text = when {
+                            isRecording -> "松手发送 (${recordTick}s)"
+                            isContinuous -> "点按退出连续"
+                            else -> "🎙 按住说话"
+                        },
                         fontSize = (16 * scale).sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,

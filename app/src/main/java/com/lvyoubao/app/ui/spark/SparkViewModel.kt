@@ -825,6 +825,26 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         _statusHint.value = null
     }
 
+    /**
+     * 嘴形胶囊轻点（<250ms）：开/关连续对话。
+     * 按住说话刚起的那条短录音直接作废（不会走识别），零误发；文字引导写在胶囊上，不占顶栏、不用图标。
+     */
+    fun onMouthTap(context: Context, onRequestRecordPermission: () -> Unit) {
+        activeRecording?.let {
+            SpeechInput.cancelRecording(it)
+            activeRecording = null
+        }
+        _isRecording.value = false
+        recordTimerJob?.cancel()
+        _recordTick.value = 0
+        if (_isContinuous.value) {
+            stopContinuous()
+            _statusHint.value = "连续对话已关"
+        } else {
+            startContinuous(context, onRequestRecordPermission)
+        }
+    }
+
     private fun stopContinuousInternal() {
         continuous?.stop()
         continuous = null
