@@ -2,7 +2,6 @@ package com.lvyoubao.app.ui.spark
 
 import android.Manifest
 import android.content.Intent
-import android.os.SystemClock
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -403,21 +402,13 @@ fun SparkModeScreen(
         val talkGesture = Modifier.pointerInput(Unit) {
             detectTapGestures(
                 onPress = {
-                    val pressStart = SystemClock.elapsedRealtime()
                     vm.startHoldTalk(context) {
                         recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     }
                     try {
                         tryAwaitRelease()
                     } finally {
-                        // 轻点（<250ms）= 开/关连续对话；按住 = 临时说一句。嘴形胶囊文字有引导
-                        if (SystemClock.elapsedRealtime() - pressStart < 250) {
-                            vm.onMouthTap(context) {
-                                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        } else {
-                            vm.endHoldTalk(context)
-                        }
+                        vm.endHoldTalk(context)
                     }
                 },
             )
@@ -450,26 +441,49 @@ fun SparkModeScreen(
                     ) { Text("🖼️", fontSize = (15 * scale).sp) }
                 }
                 Spacer(Modifier.height((5 * scale).dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height((40 * scale).dp)
-                        .clip(RoundedCornerShape(percent = 50))
-                        .background(if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary)
-                        .then(talkGesture),
-                    contentAlignment = Alignment.Center,
+                // 嘴形胶囊分区：左侧「连聊」轻点开关（连续中青底发光），右侧按住临时说话——功能一目了然不误触
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy((6 * scale).dp),
                 ) {
-                    Text(
-                        // 轻点嘴=开关连续对话（免按住/可语音打断），按住=临时说一句——文字自带引导，不用图标
-                        text = when {
-                            isRecording -> "松手发送 (${recordTick}s)"
-                            isContinuous -> "连续对话中 · 点按退出"
-                            else -> "按住说话 · 点按连聊"
-                        },
-                        fontSize = (16 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height((40 * scale).dp)
+                            .clip(RoundedCornerShape(percent = 50))
+                            .background(if (isContinuous) Color(0xFF00ACC1) else Color.White.copy(alpha = 0.10f))
+                            .clickable {
+                                vm.startContinuous(context) {
+                                    recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = if (isContinuous) "连聊中" else "连聊",
+                            fontSize = (14 * scale).sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
+                            maxLines = 1,
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(2f)
+                            .height((40 * scale).dp)
+                            .clip(RoundedCornerShape(percent = 50))
+                            .background(if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary)
+                            .then(talkGesture),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
+                            fontSize = (16 * scale).sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         } else {
@@ -489,6 +503,29 @@ fun SparkModeScreen(
                         .clickable(onClick = onCamera),
                     contentAlignment = Alignment.Center,
                 ) { Text("📷", fontSize = (19 * scale).sp) }
+                // 会话态：连聊小段 + 按住说话段（与萌眼态同构，紧凑窄版）
+                Box(
+                    modifier = Modifier
+                        .width((52 * scale).dp)
+                        .height((40 * scale).dp)
+                        .clip(RoundedCornerShape(percent = 50))
+                        .background(if (isContinuous) Color(0xFF00ACC1) else Color.White.copy(alpha = 0.10f))
+                        .clickable {
+                            vm.startContinuous(context) {
+                                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (isContinuous) "连聊中" else "连聊",
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
+                        maxLines = 1,
+                    )
+                }
+                Spacer(Modifier.width((4 * scale).dp))
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -499,14 +536,11 @@ fun SparkModeScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = when {
-                            isRecording -> "松手发送 (${recordTick}s)"
-                            isContinuous -> "点按退出连续"
-                            else -> "🎙 按住说话"
-                        },
-                        fontSize = (16 * scale).sp,
+                        text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
+                        fontSize = (15 * scale).sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
+                        maxLines = 1,
                     )
                 }
                 Box(

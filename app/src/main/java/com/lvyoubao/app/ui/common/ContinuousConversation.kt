@@ -125,6 +125,15 @@ class ContinuousConversation(
         // 系统 AEC/NS：压掉自己喇叭的回声与稳态噪声，打断体验的底线（拿不到就靠动态阈值兜底）
         echoCanceler = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId) else null
         noiseSuppressor = if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId) else null
+        // 必须显式 startRecording：v0.8.90 漏了这一步，AudioRecord 不进入采集态，read 全部失败，
+        // 5 秒后误报「麦克风读不到数据」退出（长按说话走 MediaRecorder 是另一条路所以没事）
+        runCatching { rec.startRecording() }
+        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            runCatching { rec.release() }
+            record = null
+            listener.onError("麦克风没能开始采集（可能被占用），连续对话开不了")
+            return false
+        }
 
         noiseFloorDb = -60f
         voiceRun = 0
@@ -151,6 +160,7 @@ class ContinuousConversation(
         runCatching { noiseSuppressor?.release() }
         echoCanceler = null
         noiseSuppressor = null
+        runCatching { record?.stop() }
         runCatching { record?.release() }
         record = null
     }
