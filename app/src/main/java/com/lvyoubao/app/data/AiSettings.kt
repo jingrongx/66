@@ -28,5 +28,6 @@ data class AiSettings(
     val bootStartEnabled: Boolean = false, // 开机自启：开机完成后自动拉起应用/常驻服务（设为桌面时系统本来就会拉起）
     val robotEnabled: Boolean = false, // 机器人控制：语音指挥机器人动作（需机器人已装 xrobotctl 控制中枢）
     val robotHost: String = "",        // 机器人中枢地址：机器人局域网 IP（机器人本机可用 127.0.0.1），端口缺省 8899
+    val proactiveReminders: Boolean = true, // 主动提醒：电量低/充满时小源自主说一句（只在空闲时说，不打断对话）
     val savedProviders: Map<String, ProviderCredentials> = emptyMap(), // 每个供应商各自记住的接口配置，切换时恢复自己的，互不带Key
 )

@@ -668,6 +668,28 @@ fun SettingsScreen(
                     value = fontScaleLabel(state.draft.sparkFontScale),
                     onClick = { sparkFontDialog = true },
                 )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("主动提醒", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "电量低（20%/10%）、充满电时小源自己说一句 · 只在空闲时说，不打断对话和录音",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.draft.proactiveReminders,
+                        onCheckedChange = { checked ->
+                            vm.updateDraft { it.copy(proactiveReminders = checked) }
+                        },
+                    )
+                }
             }
         }
 

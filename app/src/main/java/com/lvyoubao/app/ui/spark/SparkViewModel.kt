@@ -1,13 +1,18 @@
 package com.lvyoubao.app.ui.spark
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.os.BatteryManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.AiClient
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.CalendarContext
+import com.lvyoubao.app.data.DeviceBattery
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.OutMessage
@@ -55,6 +60,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     private val repo = app.settingsRepository
     private val memory = app.memoryStore
+    private val appContext = app.applicationContext
 
     // 必须 Eagerly：灵动屏界面从不收集这个流，WhileSubscribed 会让上游永不启动，
     // settings.value 永远停在默认空配置——曾导致退出灵动屏把默认空配置整体写回、
@@ -94,6 +100,17 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var aiRequestJob: Job? = null
     private var idleToEyesJob: Job? = null
 
+    // 主动提醒（电量低/充满）：键控一次（同档位只提醒一次），空闲才说，静默安睡不说
+    private var lastLowKey: String? = null
+    private var fullReminded = false
+    private var wasCharging = false
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_BATTERY_CHANGED) onBatteryChanged(intent)
+        }
+    }
+
     init {
         // 监听 TTS 状态。
         // 注意双段播报时序：流式先读前几字（很短，几秒播完发 Idle），完整答案再 speak() 重启播放——
@@ -124,6 +141,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     }
                 }
             }
+        }
+        // 电量广播：注册即收到粘性广播一次（初始状态），此后每次电量/充电状态变化触发——主动提醒的数据源
+        runCatching {
+            appContext.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         }
     }
 
@@ -278,6 +299,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         appendMessage(SparkMessage("user", clean, pending.map { it.bitmap }))
                         _pendingPhotos.value = emptyList()
                         _showEyes.value = false // 提问完成，自动切换为会话流展示
+                        // 电量问答走本地快路（读系统电池，零延迟零联网），其余再过机器人意图 / 聊天
+                        if (matchBatteryQuestion(clean)) {
+                            answerBattery(context)
+                            return@launch
+                        }
                         // 机器人控制优先：开启且解析出控制指令时执行并播报结果，否则照常聊天
                         if (!handleRobotCommand(context, clean)) {
                             sendAiRequest(context, clean, pending.map { it.dataUrl })
@@ -397,6 +423,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         val lookIndex = commands.indexOf(RobotIntent.Command.Look)
         val chain = if (lookIndex >= 0) commands.take(lookIndex + 1) else commands
 
+        // 电量问答：读本机系统电池（协议约定单发），不需要机器人中枢
+        if (chain.contains(RobotIntent.Command.Battery)) {
+            answerBattery(context)
+            return true
+        }
+
         // LOOK 单发：设备相机就行，不依赖机器人中枢
         if (chain.size == 1 && chain[0] == RobotIntent.Command.Look) {
             executeLook(context)
@@ -513,6 +545,90 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         )
     }
 
+    /**
+     * 电量问句本地匹配：电量/多少电/几度电/还有电/电池/剩电类短句直接本地答（零延迟零联网），
+     * 长句不拦交给 AI（AI 协议里也有 BATTERY 兜底）。只拦小源自己——问别的设备的电量交给聊天。
+     */
+    private fun matchBatteryQuestion(text: String): Boolean {
+        val t = text.trim()
+        if (t.isEmpty() || t.length > 12) return false
+        if (t.contains("电量") || t.contains("多少电") || t.contains("几度电") || t.contains("还有电") || t.contains("电池")) return true
+        return t.contains("电") && (t.contains("剩") || t.contains("够不够"))
+    }
+
+    /** 回答本机电量（DeviceBattery 读系统；读不到如实说，绝不编数字） */
+    private fun answerBattery(context: Context) {
+        val state = DeviceBattery.read(context)
+        val spoken = when {
+            state == null -> "这台设备读不到电量"
+            state.charging && state.percent >= 99 -> "正在充电，已经充满啦"
+            state.charging -> "正在充电，电量还有百分之${state.percent}"
+            state.percent <= 15 -> "电量只剩百分之${state.percent}了，快去充电吧"
+            else -> "电量还有百分之${state.percent}"
+        }
+        appendMessage(SparkMessage("assistant", spoken))
+        _statusHint.value = null
+        speakHint(context, spoken)
+    }
+
+    /** 现在能不能自主说话：录音/流式回答/播报中都别打扰，静默安睡模式不出声 */
+    private fun canSpeakProactively(): Boolean =
+        !_isRecording.value &&
+            !_isStreaming.value &&
+            TtsPlayer.state.value is TtsPlayer.State.Idle &&
+            _eyeState.value != SparkEyeState.MUTED
+
+    /** 自主说话：进会话流留个记录 + 朗读（用 applicationContext，主动提醒不依赖界面） */
+    private fun speakProactive(text: String) {
+        appendMessage(SparkMessage("assistant", text))
+        speakHint(appContext, text)
+    }
+
+    /**
+     * 主动提醒：电量低（≤20% 一般提醒 / ≤10% 加急）/ 充满电时小源自己说一句。
+     * 防打扰三道闸：①设置「主动提醒」开关（默认开）；②只在空闲时说（录音/回答/播报中都跳过，
+     * 且不消耗提醒键——忙完下一个电量事件自然补上）；③同一档位只提醒一次（20→19 不连着念，
+     * 充满只说一次，拔掉充电器重置）。
+     */
+    private fun onBatteryChanged(intent: Intent) {
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        if (level < 0 || scale <= 0) return
+        val percent = level * 100 / scale
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        val full = status == BatteryManager.BATTERY_STATUS_FULL
+
+        if (charging != wasCharging) {
+            wasCharging = charging
+            if (!charging) fullReminded = false // 拔掉充电器，下个充电周期重新提醒
+        }
+        if (!settings.value.proactiveReminders) return
+        if (!canSpeakProactively()) return // 不消耗提醒键：忙完由下一个电量事件补上
+
+        if (full && !fullReminded) {
+            fullReminded = true
+            speakProactive("充好电啦")
+            return
+        }
+        if (!charging) {
+            val key = when {
+                percent <= 10 -> "low10"
+                percent <= 20 -> "low20"
+                else -> null
+            }
+            if (key != null && key != lastLowKey) {
+                lastLowKey = key
+                speakProactive(
+                    if (key == "low10") "电量只剩${percent}了，快没电啦，记得充电"
+                    else "电量只剩${percent}了，记得及时充电",
+                )
+            }
+            if (percent > 20) lastLowKey = null // 电量回升，跨档键复位
+        }
+    }
+
     private fun sendAiRequest(
         context: Context,
         userText: String,
@@ -620,6 +736,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        runCatching { appContext.unregisterReceiver(batteryReceiver) }
         activeRecording?.let {
             SpeechInput.cancelRecording(it)
             activeRecording = null
