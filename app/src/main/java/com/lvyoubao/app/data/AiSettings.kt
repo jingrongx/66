@@ -30,5 +30,6 @@ data class AiSettings(
     val robotHost: String = "",        // 机器人中枢地址：机器人局域网 IP（机器人本机可用 127.0.0.1），端口缺省 8899
     val proactiveReminders: Boolean = true, // 主动提醒：电量低/充满时小源自主说一句（只在空闲时说，不打断对话）
     val voiceBargeIn: Int = 1,        // 语音打断灵敏度（连续对话）：0 关(半双工)/1 标准/2 灵敏；回声压不住的设备调关
+    val wakeWordEnabled: Boolean = true, // 唤醒词监听：灵动屏待机时喊「小源小源」直接进连续对话（云识别关键词，限流防杂音）
     val savedProviders: Map<String, ProviderCredentials> = emptyMap(), // 每个供应商各自记住的接口配置，切换时恢复自己的，互不带Key
 )

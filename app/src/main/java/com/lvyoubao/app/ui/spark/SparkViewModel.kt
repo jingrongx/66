@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.os.BatteryManager
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lvyoubao.app.TravelApp
@@ -108,6 +109,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     val isContinuous: StateFlow<Boolean> = _isContinuous.asStateFlow()
     private var consecutiveAsrFailures = 0
 
+    // 唤醒词监听（待机时喊「小源小源」进连续对话）：与连续对话共用一套引擎，状态机决定开谁
+    private var wakeSession: ContinuousConversation? = null
+    private var sparkActive = false
+    private var lastConvUploadAt = 0L
+    private var lastWakeUploadAt = 0L
+    private var wakeUploadCount = 0
+    private var wakeWindowStart = 0L
+
     // 主动提醒（电量低/充满）：键控一次（同档位只提醒一次），空闲才说，静默安睡不说
     private var lastLowKey: String? = null
     private var fullReminded = false
@@ -160,6 +169,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         // 电量广播：注册即收到粘性广播一次（初始状态），此后每次电量/充电状态变化触发——主动提醒的数据源
         runCatching {
             appContext.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }
+        // 设置变化（含自动保存落盘）→ 重算唤醒监听该不该开
+        viewModelScope.launch {
+            settings.collect { syncWakeEngine() }
         }
     }
 
@@ -231,6 +244,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             onRequestRecordPermission()
             return
         }
+
+        // 按住说话用 MediaRecorder，与唤醒监听的 AudioRecord 抢麦：先停唤醒采集再开录音
+        wakeSession?.stop()
+        wakeSession = null
 
         // 停止之前的朗读，取消「回萌眼」倒计时（用户开始新交互了）
         // 注意：这里绝不能切视图（v0.8.81 曾在按住时强制 showEyes=true——会话态下按住说话
@@ -344,6 +361,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     speakHint(context, spoken)
                 },
             )
+            syncWakeEngine() // 按住说话结束（MediaRecorder 已释放），恢复待机唤醒监听
         }
     }
 
@@ -791,8 +809,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 模式切换只认设置页开关，这里只做收尾（停朗读、停录音），退出交给调用方 finishAffinity
      */
     fun exitApp() {
+        sparkActive = false
         idleToEyesJob?.cancel()
         stopContinuousInternal()
+        wakeSession?.stop()
+        wakeSession = null
         TtsPlayer.stop()
         activeRecording?.let {
             SpeechInput.cancelRecording(it)
@@ -823,7 +844,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         _statusHint.value = "连续对话：直接说就行"
         val session = ContinuousConversation(
             appContext,
-            config = ContinuousConversation.Config(bargeInSensitivity = settings.value.voiceBargeIn),
+            config = ContinuousConversation.Config(
+                bargeInSensitivity = settings.value.voiceBargeIn,
+                idleTimeoutMs = 180_000L, // 空闲 3 分钟才休息（老人聊会儿歇会儿很正常），退出前会先告辞
+            ),
             listener = object : ContinuousConversation.Listener {
                 override fun onUtterance(wav: java.io.File) {
                     handleContinuousUtterance(wav)
@@ -843,7 +867,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 override fun onAutoTimeout() {
                     viewModelScope.launch {
                         stopContinuousInternal()
-                        _statusHint.value = "60 秒没说话，连续对话休息了"
+                        _statusHint.value = "连续对话休息了，点「连聊」或喊「小源小源」唤醒"
+                        speakHint(appContext, "我先休息啦，点连聊再叫我")
                     }
                 }
 
@@ -860,6 +885,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         continuous = session
         _isContinuous.value = true
         speakHint(context, "连续对话模式，直接说就行")
+        syncWakeEngine() // 连聊开着时待机唤醒监听让路（一台设备同一时刻只有一个 AudioRecord 采集）
     }
 
     fun stopContinuous() {
@@ -872,6 +898,103 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         continuous?.stop()
         continuous = null
         _isContinuous.value = false
+        syncWakeEngine()
+    }
+
+    // ---------- 唤醒词（待机时喊「小源小源」直接进连续对话） ----------
+
+    /** 灵动屏进入前台时调用：待机唤醒监听随页面开关 */
+    fun onSparkActive() {
+        sparkActive = true
+        syncWakeEngine()
+    }
+
+    /**
+     * 唤醒监听状态机：灵动屏前台 + 开关开 + 有 ASR Key + 有麦克风权限 + 不在连聊 + 不在按住说话 → 开引擎；
+     * 其余一律关。与连续对话共用 ContinuousConversation，但一台设备同一时刻只允许一个采集会话。
+     */
+    private fun syncWakeEngine() {
+        val cur = settings.value
+        val shouldRun = sparkActive &&
+            cur.wakeWordEnabled &&
+            cur.asrKey.isNotBlank() &&
+            SpeechInput.hasRecordPermission(appContext) &&
+            !_isContinuous.value &&
+            activeRecording == null
+        if (shouldRun && wakeSession == null) {
+            val session = ContinuousConversation(
+                appContext,
+                config = ContinuousConversation.Config(
+                    silenceEndMs = 600L,
+                    minSpeechMs = 250L,
+                    bargeInSensitivity = 0, // 待机不需要打断：主动提醒播报期间不收音，防回灌
+                    idleTimeoutMs = Long.MAX_VALUE / 2, // 待机监听常驻，不自动退
+                ),
+                listener = object : ContinuousConversation.Listener {
+                    override fun onUtterance(wav: java.io.File) {
+                        handleWakeUtterance(wav)
+                    }
+
+                    override fun onBargeIn() {}
+                    override fun onAutoTimeout() {}
+
+                    override fun onError(message: String) {
+                        viewModelScope.launch {
+                            wakeSession?.stop()
+                            wakeSession = null
+                            _statusHint.value = "唤醒监听停了：$message"
+                        }
+                    }
+                },
+            )
+            if (session.start()) {
+                wakeSession = session
+            } else {
+                session.stop()
+            }
+        } else if (!shouldRun && wakeSession != null) {
+            wakeSession?.stop()
+            wakeSession = null
+        }
+    }
+
+    /**
+     * 待机一段语音：云转写 → 含唤醒词才进连续对话；没命中静默丢弃（杂音/电视声不成词就不打扰）。
+     * 限流：2 秒冷却 + 每分钟最多 6 条上传，防持续噪声刷请求。
+     */
+    private fun handleWakeUtterance(wav: java.io.File) = viewModelScope.launch {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastWakeUploadAt < 2_000) {
+            wav.delete()
+            return@launch
+        }
+        if (now - wakeWindowStart > 60_000) {
+            wakeWindowStart = now
+            wakeUploadCount = 0
+        }
+        if (++wakeUploadCount > 6) {
+            wav.delete()
+            return@launch
+        }
+        lastWakeUploadAt = now
+        val cur = repo.settings.firstOrNull() ?: settings.value
+        val spoken = withContext(Dispatchers.IO) {
+            SpeechInput.transcribeFile(wav, cur.asrKey.trim(), cur.dialectMode).getOrNull()
+        }
+        wav.delete()
+        if (isWakeWord(spoken.orEmpty().trim()) && !_isContinuous.value && activeRecording == null) {
+            // 命中唤醒词：麦克风权限必然已授予（监听本来就开着），直接进连续对话
+            _showEyes.value = true
+            startContinuous(appContext) {}
+            speakHint(appContext, "嗯，我在")
+        }
+    }
+
+    /** 唤醒词判定：ASR 对「小源小源」的常见同音误写都算，长句不拦（交给聊天） */
+    private fun isWakeWord(text: String): Boolean {
+        if (text.isEmpty() || text.length > 12) return false
+        return listOf("小源", "小原", "小袁", "小圆", "小远", "小元", "小缘", "晓源", "小媛", "小沅")
+            .any { text.contains(it) }
     }
 
     /**
@@ -889,6 +1012,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return@launch
         }
         continuous?.setBusy(true)
+        // 1 秒冷却：静音/噪声段间隔着触发切段时别连着刷 ASR（真说话的切段天然间隔 >800ms，不受影响）
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastConvUploadAt < 1_000) {
+            wav.delete()
+            continuous?.setBusy(false)
+            return@launch
+        }
+        lastConvUploadAt = now
         val result = withContext(Dispatchers.IO) { SpeechInput.transcribeFile(wav, asrKey, cur.dialectMode) }
         wav.delete()
         result.fold(
@@ -917,6 +1048,16 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 }
             },
             onFailure = { err ->
+                // 「没听清」类（静音/噪声段被当成话传上去，云识别返回空）：静默续听——
+                // 朗读提示会回灌麦克风自激，还会反复念叨（v0.8.93「没听清楚」连说三次后退出连聊的根因）
+                val failure = (err as? SpeechInput.SpeechException)?.failure
+                if (failure == SpeechInput.SpeechFailure.NOT_HEARD) {
+                    _statusHint.value = "没听清，再说一次"
+                    _eyeState.value = SparkEyeState.LISTENING
+                    continuous?.setBusy(false)
+                    return@launch
+                }
+                // 真失败（网络/服务/配置）才计数：≥2 次出声提醒、≥4 次退出
                 consecutiveAsrFailures++
                 _eyeState.value = SparkEyeState.LISTENING
                 if (consecutiveAsrFailures >= 2) {
@@ -934,7 +1075,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        sparkActive = false
         stopContinuousInternal()
+        wakeSession?.stop()
+        wakeSession = null
         runCatching { appContext.unregisterReceiver(batteryReceiver) }
         activeRecording?.let {
             SpeechInput.cancelRecording(it)

@@ -25,7 +25,11 @@ object RobotIntent {
                 Stop -> "好的，已停下"
                 is Move -> if (distCm >= 0) "好的，前进${distCm}厘米" else "好的，后退${-distCm}厘米"
                 is Turn -> if (angleDeg >= 0) "好的，左转${angleDeg}度" else "好的，右转${-angleDeg}度"
-                is Head -> if (angleDeg >= 0) "好的，抬头看看" else "好的，低头啦"
+                is Head -> when {
+                    angleDeg > 0 -> "好的，抬头看看"
+                    angleDeg == 0 -> "好的，平视了"
+                    else -> "好的，低头啦"
+                }
                 Look -> "好的，我看看"
                 Battery -> ""
                 is Volume -> ""
@@ -38,7 +42,11 @@ object RobotIntent {
                 Stop -> "停下"
                 is Move -> if (distCm >= 0) "前进${distCm}厘米" else "后退${-distCm}厘米"
                 is Turn -> if (angleDeg >= 0) "左转${angleDeg}度" else "右转${-angleDeg}度"
-                is Head -> if (angleDeg >= 0) "抬头" else "低头"
+                is Head -> when {
+                    angleDeg > 0 -> "抬头"
+                    angleDeg == 0 -> "平视"
+                    else -> "低头"
+                }
                 Look -> "看看前面"
                 Battery -> "报一下电量"
                 is Volume -> "调音量"

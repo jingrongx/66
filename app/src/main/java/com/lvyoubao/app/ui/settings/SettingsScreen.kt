@@ -778,6 +778,14 @@ fun SettingsScreen(
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                 SettingRow(
+                    title = "唤醒词监听",
+                    value = if (state.draft.wakeWordEnabled) "「小源小源」· 开" else "关",
+                    onClick = {
+                        vm.updateDraft { it.copy(wakeWordEnabled = !it.wakeWordEnabled) }
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
+                SettingRow(
                     title = "语音打断灵敏度",
                     value = when (state.draft.voiceBargeIn) {
                         0 -> "关（点按打断）"
@@ -795,7 +803,7 @@ fun SettingsScreen(
             }
         }
         Text(
-            "语音打断=连续对话时小源在播报中听到你开口就停下听你说。个别设备喇叭回声压不住（自己打断自己）时调成「关」。",
+            "唤醒词监听：灵动屏待机时喊「小源小源」直接进连续对话，不用一直喊（云识别关键词，杂音/电视声不成词不会误触）。语音打断=连续对话时小源在播报中听到你开口就停下听你说。个别设备喇叭回声压不住（自己打断自己）时调成「关」。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),

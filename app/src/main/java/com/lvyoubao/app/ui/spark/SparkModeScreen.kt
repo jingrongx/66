@@ -173,6 +173,9 @@ fun SparkModeScreen(
         exitApp()
     }
 
+    // 灵动屏进前台：待机唤醒词监听随页面开关（设置变化由 VM 的 settings 收集器重算）
+    LaunchedEffect(Unit) { vm.onSparkActive() }
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()

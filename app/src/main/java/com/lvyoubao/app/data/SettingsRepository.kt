@@ -47,6 +47,7 @@ class SettingsRepository(private val context: Context) {
         val robotHost = stringPreferencesKey("robot_host")
         val proactiveReminders = booleanPreferencesKey("proactive_reminders")
         val voiceBargeIn = intPreferencesKey("voice_barge_in")
+        val wakeWordEnabled = booleanPreferencesKey("wake_word_enabled")
         val largeTextFontScale = floatPreferencesKey("large_text_font_scale")
         val sparkFontScale = floatPreferencesKey("spark_font_scale")
         val savedProviders = stringPreferencesKey("saved_providers")
@@ -80,6 +81,7 @@ class SettingsRepository(private val context: Context) {
             robotHost = p[Keys.robotHost] ?: "",
             proactiveReminders = p[Keys.proactiveReminders] ?: true,
             voiceBargeIn = p[Keys.voiceBargeIn] ?: 1,
+            wakeWordEnabled = p[Keys.wakeWordEnabled] ?: true,
             largeTextFontScale = p[Keys.largeTextFontScale] ?: 1.0f,
             sparkFontScale = p[Keys.sparkFontScale] ?: 1.0f,
             savedProviders = p[Keys.savedProviders]?.let { s ->
@@ -116,6 +118,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.robotHost] = settings.robotHost
             p[Keys.proactiveReminders] = settings.proactiveReminders
             p[Keys.voiceBargeIn] = settings.voiceBargeIn
+            p[Keys.wakeWordEnabled] = settings.wakeWordEnabled
             p[Keys.largeTextFontScale] = settings.largeTextFontScale
             p[Keys.sparkFontScale] = settings.sparkFontScale
             p[Keys.savedProviders] = providerJson.encodeToString(settings.savedProviders)
