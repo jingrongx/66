@@ -13,6 +13,7 @@ import com.lvyoubao.app.data.AiClient
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.DeviceBattery
+import com.lvyoubao.app.data.DeviceVolume
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.OutMessage
@@ -313,9 +314,13 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         appendMessage(SparkMessage("user", clean, pending.map { it.bitmap }))
                         _pendingPhotos.value = emptyList()
                         _showEyes.value = false // 提问完成，自动切换为会话流展示
-                        // 电量问答走本地快路（读系统电池，零延迟零联网），其余再过机器人意图 / 聊天
+                        // 电量/音量走本地快路（读系统，零延迟零联网），其余再过机器人意图 / 聊天
                         if (matchBatteryQuestion(clean)) {
                             answerBattery(context)
+                            return@launch
+                        }
+                        matchVolumeFast(clean)?.let { action ->
+                            answerVolume(context, action)
                             return@launch
                         }
                         // 机器人控制优先：开启且解析出控制指令时执行并播报结果，否则照常聊天
@@ -447,6 +452,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         // 电量问答：读本机系统电池（协议约定单发），不需要机器人中枢
         if (chain.contains(RobotIntent.Command.Battery)) {
             answerBattery(context)
+            return true
+        }
+
+        // 音量控制：调系统 STREAM_MUSIC（设备能力，不需要机器人中枢）
+        chain.filterIsInstance<RobotIntent.Command.Volume>().firstOrNull()?.let { volCmd ->
+            answerVolume(context, volCmd.action, volCmd.percent)
             return true
         }
 
@@ -590,6 +601,38 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         appendMessage(SparkMessage("assistant", spoken))
         _statusHint.value = null
         speakHint(context, spoken)
+    }
+
+    /**
+     * 音量问句本地匹配（零延迟）：静音/大小声/最大/恢复类短句直接执行，长句交给 AI 协议（VOLUME_*）。
+     * 「别那么大声」是调小、「别说了」是停止——否定前缀放行给 AI 判断。
+     */
+    private fun matchVolumeFast(text: String): DeviceVolume.Action? {
+        val t = text.trim().trimEnd('。', '！', '!', '.', '，', ',')
+        if (t.isEmpty() || t.length > 8) return null
+        if (t.startsWith("别") || t.startsWith("不要")) return null
+        return when {
+            t.contains("静音") || t.contains("不出声") || t.contains("关掉声音") || t.contains("关声音") -> DeviceVolume.Action.MUTE
+            t.contains("最大") -> DeviceVolume.Action.MAX
+            t.contains("恢复音量") || t.contains("音量正常") || t.contains("正常音量") -> DeviceVolume.Action.RESTORE
+            t.contains("大点声") || t.contains("大声点") || t.contains("大声些") || t.contains("声音大") ||
+                t.contains("音量大") || t.contains("太轻了") || t.contains("听不清") -> DeviceVolume.Action.UP
+            t.contains("小点声") || t.contains("小声点") || t.contains("小声些") || t.contains("声音小") ||
+                t.contains("音量小") || t.contains("太吵") || t.contains("太大声") -> DeviceVolume.Action.DOWN
+            else -> null
+        }
+    }
+
+    /** 执行音量调整并播报；静音后不再朗读（自相矛盾），用状态条显示 */
+    private fun answerVolume(context: Context, action: DeviceVolume.Action, percent: Int = 60) {
+        val label = DeviceVolume.apply(context, action, percent)
+        appendMessage(SparkMessage("assistant", label))
+        if (action == DeviceVolume.Action.MUTE) {
+            _statusHint.value = label
+        } else {
+            _statusHint.value = null
+            speakHint(context, label)
+        }
     }
 
     /** 现在能不能自主说话：录音/流式回答/播报中都别打扰，静默安睡模式不出声 */
@@ -863,6 +906,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     if (matchBatteryQuestion(clean)) {
                         answerBattery(appContext)
                         return@launch // answerBattery 会朗读，TTS 收集器恢复计时
+                    }
+                    matchVolumeFast(clean)?.let { action ->
+                        answerVolume(appContext, action)
+                        return@launch
                     }
                     if (!handleRobotCommand(appContext, clean)) {
                         sendAiRequest(appContext, clean, emptyList())
