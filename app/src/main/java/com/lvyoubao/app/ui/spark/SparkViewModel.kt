@@ -64,6 +64,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     private val repo = app.settingsRepository
     private val memory = app.memoryStore
+    private val notes = app.noteStore
     private val appContext = app.applicationContext
 
     // 必须 Eagerly：灵动屏界面从不收集这个流，WhileSubscribed 会让上游永不启动，
@@ -122,6 +123,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var lastLowKey: String? = null
     private var fullReminded = false
     private var wasCharging = false
+
+    // 倒计时（语音「计时10分钟」）：眼睛区大字显示 时分秒，到点播报
+    private var timerJob: Job? = null
+    private val _timerRemainingSec = MutableStateFlow<Int?>(null)
+    val timerRemainingSec: StateFlow<Int?> = _timerRemainingSec.asStateFlow()
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -341,8 +347,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                             answerVolume(context, action)
                             return@launch
                         }
-                        // 机器人控制优先：开启且解析出控制指令时执行并播报结果，否则照常聊天
-                        if (!handleRobotCommand(context, clean)) {
+                        // 语音助手指令优先（机器人控制 + 计时/记事/查记忆等，AI 统一判断），否则照常聊天
+                        if (!handleAssistantIntent(context, clean)) {
                             sendAiRequest(context, clean, pending.map { it.dataUrl })
                         }
                     } else {
@@ -434,32 +440,42 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
-     * 语音控制机器人（设置里开「机器人控制」后生效，控制对象：xrobotctl 中枢驱动的机器人，现内置优必选小方头）：
-     * ①「停」类词本地快路零延迟急停（急停不能等 AI 往返）；
-     * ②其余交给 AI 解析意图（chatPlain 单轮、思考关闭）——一句话可含多个动作（AI 按顺序每行输出一条），
-     *   这里串行编排执行：动作间按运动耗时留间隔（中枢队列本身也串行，间隔只是给动作留出可感知的节奏），
-     *   结束后一次性播报「好的，抬头，然后低头」；LOOK（让小源当场看一眼）只用设备相机静默拍照，
-     *   不需要机器人中枢，且终止编排（拍照问答接管会话）；触发说法不设死，AI 判断；
-     * ③解析为空 / 未启用机器人返回 false，照常走聊天流程；失败即停编排并播报原因，绝不静默。
+     * 语音助手意图统一入口（AI 解析判断，机器人动作 + 设备指令一体化）：
+     * ①机器人快路（急停/头部短句，开了机器人控制才生效）+ 设备快路（计时/记事短句，零延迟）；
+     * ②其余交给 AI 解析意图（chatPlain 单轮、思考关闭）——一句话可含多个动作（AI 按顺序每行输出一条）：
+     *   机器人动作（MOVE/TURN/HEAD/STOP）走中枢串行编排（动作间按运动耗时留间隔，结束一次性播报）；
+     *   设备指令（LOOK 拍照看一眼 / BATTERY / VOLUME_* / TIMER / NOTE / MEMORY_SEARCH）直接本机执行，
+     *   不受机器人开关限制；LOOK 终止编排（拍照问答接管会话）；触发说法不设死，AI 判断；
+     * ③解析为空返回 false 照常聊天；机器人动作在没开机器人控制时也回落聊天；失败即停编排并播报原因。
      */
-    private suspend fun handleRobotCommand(context: Context, text: String): Boolean {
+    private suspend fun handleAssistantIntent(context: Context, text: String): Boolean {
         val curSettings = repo.settings.firstOrNull() ?: settings.value
-        if (!curSettings.robotEnabled) return false
 
-        // 急停快路：不等 AI 往返
-        if (RobotIntent.matchStopFast(text)) {
-            val robot = robotClientOrNull(context, curSettings) ?: return true
-            runRobot(context, robot, RobotIntent.Command.Stop)
+        // 机器人快路：急停/头部短句（没开机器人控制就没有机器人可指挥，直接过）
+        if (curSettings.robotEnabled) {
+            if (RobotIntent.matchStopFast(text)) {
+                val robot = robotClientOrNull(context, curSettings) ?: return true
+                runRobot(context, robot, RobotIntent.Command.Stop)
+                return true
+            }
+            RobotIntent.matchHeadFast(text)?.let { headCmd ->
+                val robot = robotClientOrNull(context, curSettings) ?: return true
+                runRobot(context, robot, headCmd)
+                return true
+            }
+        }
+
+        // 设备快路：计时/记事短句零延迟执行
+        matchTimerFast(text)?.let { sec ->
+            startTimerWithConfirm(context, sec)
+            return true
+        }
+        matchNoteFast(text)?.let { content ->
+            executeNote(context, content)
             return true
         }
 
-        // 头部动作快路（平视/抬头/低头）：短句直接执行，不经 AI——堵住「平视」被误判成拍照
-        RobotIntent.matchHeadFast(text)?.let { headCmd ->
-            val robot = robotClientOrNull(context, curSettings) ?: return true
-            runRobot(context, robot, headCmd)
-            return true
-        }
-
+        // AI 解析（机器人动作 + 设备指令统一判断）
         _statusHint.value = "正在理解指令…"
         val commands = RobotIntent.parse(text, curSettings)
         if (commands.isEmpty()) return false
@@ -468,15 +484,32 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         val lookIndex = commands.indexOf(RobotIntent.Command.Look)
         val chain = if (lookIndex >= 0) commands.take(lookIndex + 1) else commands
 
-        // 电量问答：读本机系统电池（协议约定单发），不需要机器人中枢
+        // 设备能力指令（不需要机器人中枢，单发即执行）
         if (chain.contains(RobotIntent.Command.Battery)) {
             answerBattery(context)
             return true
         }
-
-        // 音量控制：调系统 STREAM_MUSIC（设备能力，不需要机器人中枢）
         chain.filterIsInstance<RobotIntent.Command.Volume>().firstOrNull()?.let { volCmd ->
             answerVolume(context, volCmd.action, volCmd.percent)
+            return true
+        }
+        chain.filterIsInstance<RobotIntent.Command.Timer>().firstOrNull()?.let { t ->
+            startTimerWithConfirm(context, t.totalSec)
+            return true
+        }
+        if (chain.contains(RobotIntent.Command.TimerStop)) {
+            cancelTimer()
+            appendMessage(SparkMessage("assistant", RobotIntent.Command.TimerStop.confirmText))
+            _statusHint.value = null
+            speakHint(context, RobotIntent.Command.TimerStop.confirmText)
+            return true
+        }
+        chain.filterIsInstance<RobotIntent.Command.Note>().firstOrNull()?.let { n ->
+            executeNote(context, n.content)
+            return true
+        }
+        chain.filterIsInstance<RobotIntent.Command.MemorySearch>().firstOrNull()?.let { ms ->
+            executeMemorySearch(context, ms.keyword)
             return true
         }
 
@@ -485,6 +518,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             executeLook(context)
             return true
         }
+
+        // 剩下的是机器人动作：没开机器人控制→回落聊天
+        if (!curSettings.robotEnabled) return false
 
         val robot = robotClientOrNull(context, curSettings) ?: return true
 
@@ -594,6 +630,108 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             userLabel = "👀 看看前面",
             prompt = "这是小源眼前刚拍到的画面，请用通俗易懂的自然口语说说前面有什么：最主要的东西是什么、有没有人，一两句话即可。",
         )
+    }
+
+    // ---------- 计时 / 记事 / 查记忆 ----------
+
+    /** 启动倒计时：眼睛区大字显示，到点播报「时间到啦」 */
+    fun startTimer(totalSec: Int) {
+        timerJob?.cancel()
+        var left = totalSec.coerceIn(1, 86_400)
+        _timerRemainingSec.value = left
+        timerJob = viewModelScope.launch {
+            while (left > 0) {
+                delay(1_000)
+                left--
+                _timerRemainingSec.value = left
+            }
+            _timerRemainingSec.value = null
+            TtsPlayer.stop()
+            _statusHint.value = "时间到"
+            speakHint(appContext, "时间到啦")
+        }
+    }
+
+    fun cancelTimer() {
+        timerJob?.cancel()
+        _timerRemainingSec.value = null
+    }
+
+    private fun startTimerWithConfirm(context: Context, totalSec: Int) {
+        startTimer(totalSec)
+        appendMessage(SparkMessage("assistant", RobotIntent.Command.Timer(totalSec).confirmText))
+        _statusHint.value = null
+        speakHint(context, RobotIntent.Command.Timer(totalSec).confirmText)
+    }
+
+    /** 计时/倒计时短句本地匹配（零延迟）：「计时10分钟」「倒计时30秒」「15分钟后提醒我」，长句交给 AI */
+    private fun matchTimerFast(text: String): Int? {
+        val t = text.trim().trimEnd('。', '！', '!', '.', '，', ',')
+        if (t.isEmpty() || t.length > 14) return null
+        if (t.startsWith("别") || t.startsWith("不要") || t.contains("取消") || t.contains("停止")) return null
+        val m = Regex("(?:计时|倒计时|闹钟|提醒我|定个?)[约]?\\s*(\\d{1,3})\\s*(?:个)?(小时|时|分钟|分|秒)|(\\d{1,3})\\s*(?:个)?(小时|时|分钟|分|秒)(?:之?后|以后?)提醒我?")
+            .find(t) ?: return null
+        val num = (m.groupValues[1].ifEmpty { m.groupValues[3] }).toIntOrNull() ?: return null
+        val unit = m.groupValues[2].ifEmpty { m.groupValues[4] }
+        val sec = when (unit) {
+            "小时", "时" -> num * 3600
+            "分钟", "分" -> num * 60
+            else -> num
+        }
+        return sec.takeIf { it in 1..86_400 }
+    }
+
+    /** 记事短句本地匹配：「记一下，明天九点开会」→内容提取；「记忆里…」等以记开头但非记事的放行给 AI */
+    private fun matchNoteFast(text: String): String? {
+        val t = text.trim()
+        if (t.isEmpty() || t.length > 60) return null
+        val m = Regex("^(?:帮我)?记(?:一下|一笔|个事|着|录)[：:，,]?\\s*(.+)$").find(t) ?: return null
+        return m.groupValues[1].trim().takeIf { it.length >= 2 }
+    }
+
+    /** 记一笔随手记（NoteStore 本机 JSONL，随手记页可见） */
+    private suspend fun executeNote(context: Context, content: String) {
+        val ok = runCatching { notes.add(content) }.getOrNull() != null
+        if (ok) {
+            appendMessage(SparkMessage("assistant", "记好了：$content"))
+            _statusHint.value = null
+            speakHint(context, "记好了")
+        } else {
+            appendMessage(SparkMessage("assistant", "没记下来，请再说一次"))
+            _statusHint.value = "记事失败"
+            speakHint(context, "没记下来，请再说一次")
+        }
+    }
+
+    /** 在记忆和随手记里找（AI 提炼的检索词，标题/内容包含匹配，最多各 3 条） */
+    private suspend fun executeMemorySearch(context: Context, keyword: String) {
+        val k = keyword.trim()
+        if (k.isBlank()) return
+        val sdf = java.text.SimpleDateFormat("M月d日", java.util.Locale.CHINA)
+        val lines = mutableListOf<String>()
+        memory.entries.value
+            .filter { it.title.contains(k) || it.detail.contains(k) }
+            .take(3)
+            .forEach { e ->
+                val title = e.title.ifBlank { e.detail.take(30) }
+                lines += "▪ $title（${sdf.format(java.util.Date(e.ts))}）"
+            }
+        notes.notes.value
+            .filter { it.text.contains(k) }
+            .take(3)
+            .forEach { n ->
+                lines += "▪ 📝 ${n.text.take(40)}（${sdf.format(java.util.Date(n.ts))}）"
+            }
+        val spoken = if (lines.isEmpty()) {
+            "记忆里没有找到「$k」相关的内容"
+        } else {
+            val first = lines.first().removePrefix("▪ ").removePrefix("📝 ")
+            "找到了${lines.size}条，最相关的是：$first"
+        }
+        val bubble = if (lines.isEmpty()) spoken else "在记忆和随手记里找到「$k」相关 ${lines.size} 条：\n" + lines.joinToString("\n")
+        appendMessage(SparkMessage("assistant", bubble))
+        _statusHint.value = null
+        speakHint(context, spoken)
     }
 
     /**
@@ -822,6 +960,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     fun exitApp() {
         sparkActive = false
         idleToEyesJob?.cancel()
+        timerJob?.cancel()
+        _timerRemainingSec.value = null
         stopContinuousInternal()
         wakeSession?.stop()
         wakeSession = null
@@ -1056,7 +1196,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         answerVolume(appContext, action)
                         return@launch
                     }
-                    if (!handleRobotCommand(appContext, clean)) {
+                    if (!handleAssistantIntent(appContext, clean)) {
                         sendAiRequest(appContext, clean, emptyList())
                     }
                 }
@@ -1090,6 +1230,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     override fun onCleared() {
         super.onCleared()
         sparkActive = false
+        timerJob?.cancel()
         stopContinuousInternal()
         wakeSession?.stop()
         wakeSession = null

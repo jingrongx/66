@@ -72,6 +72,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -105,6 +106,7 @@ fun SparkModeScreen(
     val statusHint by vm.statusHint.collectAsState()
     val pendingPhotos by vm.pendingPhotos.collectAsState()
     val isContinuous by vm.isContinuous.collectAsState()
+    val timerLeft by vm.timerRemainingSec.collectAsState()
 
     // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
@@ -328,12 +330,33 @@ fun SparkModeScreen(
                 label = "MainContent",
             ) { isEyesMode ->
                 if (isEyesMode) {
-                    // 眼睛动画展示
-                    CuteEyesCanvas(
-                        eyeState = eyeState,
-                        scale = scale,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    // 倒计时进行中：眼睛区让位给大字时分秒（语音「计时10分钟」）
+                    if (timerLeft != null) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                text = formatCountdown(timerLeft!!),
+                                fontSize = (34 * scale).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            Text(
+                                text = "倒计时",
+                                fontSize = (11 * scale).sp,
+                                color = Color.White.copy(alpha = 0.55f),
+                            )
+                        }
+                    } else {
+                        // 眼睛动画展示
+                        CuteEyesCanvas(
+                            eyeState = eyeState,
+                            scale = scale,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 } else {
                     // 会话流展示（完整历史回看：用户问题/拍照轮在右，小源回答在左）
                     // 点消息重播朗读；长按弹出收藏/分享
@@ -995,4 +1018,13 @@ private fun DrawScope.drawSleepyEye(center: Offset, width: Float, scale: Float) 
         color = Color(0xFF78909C),
         style = Stroke(width = 5.5f * scale, cap = androidx.compose.ui.graphics.StrokeCap.Round),
     )
+}
+
+/** 倒计时显示：≥1 小时用 H:MM:SS，否则 MM:SS */
+private fun formatCountdown(sec: Int): String {
+    val h = sec / 3600
+    val m = (sec % 3600) / 60
+    val s = sec % 60
+    return if (h > 0) String.format("%d:%02d:%02d", h, m, s)
+    else String.format("%02d:%02d", m, s)
 }

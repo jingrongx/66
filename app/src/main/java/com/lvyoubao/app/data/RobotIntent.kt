@@ -17,7 +17,23 @@ object RobotIntent {
         data object Look : Command()
         data object Battery : Command()
         data class Volume(val action: DeviceVolume.Action, val percent: Int = 60) : Command()
+        data class Timer(val totalSec: Int) : Command()
+        data object TimerStop : Command()
+        data class Note(val content: String) : Command()
+        data class MemorySearch(val keyword: String) : Command()
         data object None : Command()
+
+        /** 时长话术：90→「1分半钟」太复杂，直接 X小时Y分钟Z秒 拼接 */
+        fun durationText(sec: Int): String {
+            val h = sec / 3600
+            val m = (sec % 3600) / 60
+            val s = sec % 60
+            val parts = mutableListOf<String>()
+            if (h > 0) parts += "${h}小时"
+            if (m > 0) parts += "${m}分钟"
+            if (s > 0 || parts.isEmpty()) parts += "${s}秒"
+            return parts.joinToString("")
+        }
 
         /** 执行成功后的语音确认话术（短、口语、老人友好） */
         val confirmText: String
@@ -33,6 +49,10 @@ object RobotIntent {
                 Look -> "好的，我看看"
                 Battery -> ""
                 is Volume -> ""
+                is Timer -> "好的，${durationText(totalSec)}倒计时开始"
+                TimerStop -> "好的，计时取消了"
+                is Note -> "记好了"
+                is MemorySearch -> ""
                 None -> ""
             }
 
@@ -50,6 +70,10 @@ object RobotIntent {
                 Look -> "看看前面"
                 Battery -> "报一下电量"
                 is Volume -> "调音量"
+                is Timer -> "开始${durationText(totalSec)}倒计时"
+                TimerStop -> "取消计时"
+                is Note -> "记一笔"
+                is MemorySearch -> "查记忆"
                 None -> ""
             }
     }
@@ -101,6 +125,10 @@ object RobotIntent {
         HEAD 度——头部抬头/低头/摆正：范围-25到23，正抬头负低头，0是平视。例：「抬头」→HEAD 15；「低头」→HEAD -10；「平视」「正视」「头摆正」「头回正」→HEAD 0
         LOOK——用摄像头拍一张照片看看眼前。只要用户想让小源当场用摄像头看一眼（说法五花八门，不限于特定词），都算 LOOK：如「看看前面有什么」「前面是什么」「看看这是什么」「你看到了什么」「看看周围」「帮我看看眼前的」「拍张照看看」「瞅一眼」。判断标准：动作是「当场拍照看环境」，不是查资料问知识。注意「平视/正视/头摆正」是头部动作（HEAD 0），「抬头看看你」是抬头动作（HEAD），都不是 LOOK。
         BATTERY——报一下小源自己这台设备的电量。例：「你电量还剩多少」「快没电了吗」「电量多少」→BATTERY。注意问的是小源本机，不是机器人；只单发，不与其他动作同句。
+        TIMER 秒数——开始一个倒计时，把时长换算成总秒数：「定个5分钟的倒计时」「计时10分钟」「15分钟后提醒我去看锅」→TIMER 300/600/900；支持小时/分钟/秒组合（1小时30分=5400）
+        TIMER_STOP——取消正在跑的倒计时：「取消计时」「关掉倒计时」→TIMER_STOP。注意「停下/别说了」是停止播报（STOP），别混
+        NOTE 记事内容——帮用户记一笔随手记，内容保留用户原话要点：「记一下，明天九点开会」→NOTE 明天九点开会；「帮我记着这事：后天交材料」→NOTE 后天交材料
+        MEMORY_SEARCH 关键词——在用户的记忆和随手记里找东西，提炼一两个检索词，别照抄整句：「记忆里有没有火锅店」→MEMORY_SEARCH 火锅；「我之前记过什么药」→MEMORY_SEARCH 药；「上次说的那个馆子叫啥」→MEMORY_SEARCH 馆子
         VOLUME_UP——把小源的说话音量调大：「大点声」「大声点」「听不清，声音大些」→VOLUME_UP
         VOLUME_DOWN——调小：「小点声」「小声点」「太吵了」→VOLUME_DOWN
         VOLUME_MUTE——静音不出声：「静音」「别出声了」「把声音关掉」→VOLUME_MUTE。注意「停下/别说了」是停止播报（STOP），「别那么大声」是调小（VOLUME_DOWN），都跟静音不同
@@ -110,7 +138,7 @@ object RobotIntent {
         NONE——这句话不是在指挥机器人（闲聊、问天气、问路线、查资料等），交给正常聊天。注意「抬头看看你」是抬头的动作（HEAD），问「附近有什么好吃的」是 NONE，都不是 LOOK。
         用户一句话里有几个动作就输出几行（最多4行），按说话的先后顺序排：
         例：「抬头然后低头」→ 两行：HEAD 15 和 HEAD -10；「先前进30再左转90度」→ MOVE 30 和 TURN 90；「转个身看看前面」→ TURN 180 和 LOOK。
-        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、BATTERY、VOLUME_SET 50、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
+        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、BATTERY、TIMER 300、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
     """.trimIndent()
 
     /** AI 解析：超 8 秒或网络/服务失败一律返回空表（回落聊天，控制不能卡死语音主流程） */
@@ -127,28 +155,51 @@ object RobotIntent {
         return parseReply(reply)
     }
 
-    /** 从模型回复里抠所有「动作 数字」行（容忍分隔符/大小写杂讯），按顺序最多取 4 条 */
+    /**
+     * 从模型回复里逐行抠指令，按顺序最多取 4 条：
+     * - NOTE/MEMORY_SEARCH 带内容（「NOTE 明天九点开会」），内容保留原大小写
+     * - 其余「动作 数字」（TIMER 300 / MOVE 30 / …），容忍一行里多个动作与前后杂讯
+     */
     fun parseReply(reply: String): List<Command> {
-        val s = reply.trim().uppercase()
-        return Regex("(VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME)\\s*(-?\\d+)?")
-            .findAll(s).take(4).mapNotNull { m ->
-                val value = m.groupValues[2].toIntOrNull()
-                when (m.groupValues[1]) {
-                    "STOP" -> Command.Stop
-                    "MOVE" -> Command.Move(value ?: 30)
-                    "TURN" -> Command.Turn(value ?: 90)
-                    "HEAD" -> Command.Head(value ?: 15)
-                    "LOOK" -> Command.Look
-                    "BATTERY" -> Command.Battery
-                    "VOLUME_UP" -> Command.Volume(DeviceVolume.Action.UP)
-                    "VOLUME_DOWN" -> Command.Volume(DeviceVolume.Action.DOWN)
-                    "VOLUME_MUTE" -> Command.Volume(DeviceVolume.Action.MUTE)
-                    "VOLUME_MAX" -> Command.Volume(DeviceVolume.Action.MAX)
-                    "VOLUME_RESTORE" -> Command.Volume(DeviceVolume.Action.RESTORE)
-                    "VOLUME_SET" -> Command.Volume(DeviceVolume.Action.SET, value ?: 60)
-                    "VOLUME" -> if (value != null) Command.Volume(DeviceVolume.Action.SET, value) else Command.Volume(DeviceVolume.Action.UP)
-                    else -> null
+        val out = mutableListOf<Command>()
+        for (raw in reply.trim().lines()) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            val upper = line.uppercase()
+            // 带内容的指令（关键字在前，内容保留原样）
+            val contentM = Regex("^(NOTE|MEMORY_SEARCH)\\s*[:：]?\\s*(.+)$").find(upper)
+            if (contentM != null) {
+                val content = line.substring(contentM.groupValues[1].length).trimStart(' ', ':', '：', '，')
+                if (content.isNotBlank()) {
+                    out += if (contentM.groupValues[1] == "NOTE") Command.Note(content) else Command.MemorySearch(content)
                 }
-            }.toList()
+                continue
+            }
+            // 「动作 数字」指令（一行内可能塞多个）
+            Regex("(TIMER_STOP|TIMER|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|VOLUME)\\s*(-?\\d+)?")
+                .findAll(upper)
+                .forEach { m ->
+                    val value = m.groupValues[2].toIntOrNull()
+                    when (m.groupValues[1]) {
+                        "STOP" -> out += Command.Stop
+                        "MOVE" -> out += Command.Move(value ?: 30)
+                        "TURN" -> out += Command.Turn(value ?: 90)
+                        "HEAD" -> out += Command.Head(value ?: 15)
+                        "LOOK" -> out += Command.Look
+                        "BATTERY" -> out += Command.Battery
+                        "TIMER" -> out += Command.Timer(value ?: 60)
+                        "TIMER_STOP" -> out += Command.TimerStop
+                        "VOLUME_UP" -> out += Command.Volume(DeviceVolume.Action.UP)
+                        "VOLUME_DOWN" -> out += Command.Volume(DeviceVolume.Action.DOWN)
+                        "VOLUME_MUTE" -> out += Command.Volume(DeviceVolume.Action.MUTE)
+                        "VOLUME_MAX" -> out += Command.Volume(DeviceVolume.Action.MAX)
+                        "VOLUME_RESTORE" -> out += Command.Volume(DeviceVolume.Action.RESTORE)
+                        "VOLUME_SET" -> out += Command.Volume(DeviceVolume.Action.SET, value ?: 60)
+                        "VOLUME" -> out += if (value != null) Command.Volume(DeviceVolume.Action.SET, value) else Command.Volume(DeviceVolume.Action.UP)
+                        else -> {}
+                    }
+                }
+        }
+        return out.take(4)
     }
 }
