@@ -103,7 +103,6 @@ fun SettingsScreen(
     var showKey by remember { mutableStateOf(false) }
     var showAmap by remember { mutableStateOf(false) }
     var showAsr by remember { mutableStateOf(false) }
-    var savedTick by remember { mutableStateOf(0) }
     var showSyncQr by remember { mutableStateOf(false) }
     var showScanner by remember { mutableStateOf(false) }
 
@@ -119,12 +118,6 @@ fun SettingsScreen(
 
     BackHandler { onClose() }
 
-    LaunchedEffect(savedTick) {
-        if (savedTick > 0) {
-            kotlinx.coroutines.delay(2500)
-            savedTick = 0
-        }
-    }
     var themeDialog by remember { mutableStateOf(false) }
     var styleDialog by remember { mutableStateOf(false) }
     var asrSendDialog by remember { mutableStateOf(false) }
@@ -341,32 +334,20 @@ fun SettingsScreen(
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(
-                        onClick = { vm.testConnection() },
-                        enabled = !state.testing,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(14.dp),
-                    ) { Text("测试连接") }
-                    Spacer(Modifier.width(12.dp))
-                    Button(
-                        onClick = { vm.save(onSaved = { savedTick++ }) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(14.dp),
-                    ) { Text("保存", fontWeight = FontWeight.Bold) }
-                }
-                if (savedTick > 0) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "已保存 ✓",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
+                OutlinedButton(
+                    onClick = { vm.testConnection() },
+                    enabled = !state.testing,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                ) { Text(if (state.testing) "测试中…" else "测试连接") }
+                Text(
+                    "以上改动自动保存，无需手动保存",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
             }
         }
 
@@ -507,7 +488,7 @@ fun SettingsScreen(
                     shape = RoundedCornerShape(14.dp),
                 )
                 Text(
-                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。常用地址填好后点下方「保存」，问「回家的路」就直接导航回家，不再追问地址。",
+                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。常用地址填好即自动保存，问「回家的路」就直接导航回家，不再追问地址。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
@@ -587,21 +568,11 @@ fun SettingsScreen(
                     )
                 }
                 Spacer(Modifier.height(14.dp))
-                Button(
-                    onClick = { vm.save(onSaved = { savedTick++ }) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                ) { Text("保存", fontWeight = FontWeight.Bold) }
-                if (savedTick > 0) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "已保存 ✓",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
+                Text(
+                    "以上改动自动保存，无需手动保存",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 
@@ -827,54 +798,69 @@ fun SettingsScreen(
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                         FieldLabel("机器人中枢地址（机器人本机可填 127.0.0.1）")
-                        OutlinedTextField(
-                            value = state.draft.robotHost,
-                            // 地址填完即时保存（对话界面读的是持久化配置）：v0.8.83 只存草稿——
-                            // 测试连接读草稿能通，但没按底部「保存」就退出，灵动屏会报「地址还没填」。
-                            // 对齐开关的即时保存，输入即持久化，不靠用户记得按保存
-                            onValueChange = { value ->
-                                vm.updateDraft { it.copy(robotHost = value.trim()) }
-                                vm.save(onSaved = {})
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            placeholder = { Text("机器人局域网 IP，如 192.168.3.102（端口默认 8899）") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                            shape = RoundedCornerShape(14.dp),
-                        )
-                        val scope = rememberCoroutineScope()
-                        var testing by remember { mutableStateOf(false) }
-                        var testResult by remember { mutableStateOf<String?>(null) }
-                        Button(
-                            onClick = {
-                                if (testing) return@Button
-                                val host = RobotClient.normalizeHost(state.draft.robotHost)
-                                if (host == null) {
-                                    testResult = "地址不对：填机器人 IP（如 192.168.3.102）"
-                                    return@Button
-                                }
-                                testing = true
-                                testResult = null
-                                scope.launch {
-                                    testResult = RobotClient(host).ping().fold(
-                                        onSuccess = { name -> "✓ 已连接：$name" },
-                                        onFailure = { it.message ?: "连接失败" },
-                                    )
-                                    testing = false
-                                }
-                            },
-                            enabled = !testing,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 8.dp),
-                        ) {
-                            Text(if (testing) "测试中…" else "测试连接")
+                        var robotTesting by remember { mutableStateOf(false) }
+                        var robotOk by remember { mutableStateOf(false) }
+                        var robotResult by remember { mutableStateOf<String?>(null) }
+                        val robotScope = rememberCoroutineScope()
+
+                        /** 检测指定地址（addr 空 = 检测本机 127.0.0.1，通了直接把地址填好并自动保存） */
+                        fun detect(addr: String) {
+                            if (robotTesting) return
+                            val target = RobotClient.normalizeHost(addr) ?: "127.0.0.1"
+                            robotTesting = true
+                            robotOk = false
+                            robotResult = null
+                            robotScope.launch {
+                                val result = RobotClient(target).ping()
+                                robotTesting = false
+                                result.fold(
+                                    onSuccess = { name ->
+                                        if (addr.isBlank()) {
+                                            vm.updateDraft { it.copy(robotHost = "127.0.0.1") } // 改草稿即自动保存
+                                        }
+                                        robotOk = true
+                                        robotResult = if (addr.isBlank()) "✓ 本机检测到中枢：$name，地址已自动填好"
+                                            else "✓ 已连接：$name"
+                                    },
+                                    onFailure = { e ->
+                                        robotOk = false
+                                        robotResult = if (addr.isBlank()) "本机没有检测到中枢（旅游宝和机器人不在同一台设备），请填机器人的局域网 IP"
+                                            else (e.message ?: "连接失败")
+                                    },
+                                )
+                            }
                         }
-                        testResult?.let { msg ->
+
+                        // 开关打开/进设置页时地址还空着：先自动检测本机有没有中枢，有就一步填好，没有就引导填 IP
+                        LaunchedEffect(state.draft.robotEnabled) {
+                            if (state.draft.robotEnabled && state.draft.robotHost.isBlank()) detect("")
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            OutlinedTextField(
+                                value = state.draft.robotHost,
+                                // 改动即自动保存（对话界面读的是持久化配置），不靠用户记得按保存
+                                onValueChange = { value -> vm.updateDraft { it.copy(robotHost = value.trim()) } },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                placeholder = { Text("机器人局域网 IP，如 192.168.3.102") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                shape = RoundedCornerShape(14.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = { detect(state.draft.robotHost) },
+                                enabled = !robotTesting,
+                            ) { Text(if (robotTesting) "检测中" else "检测") }
+                        }
+                        robotResult?.let { msg ->
                             Text(
                                 msg,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (msg.startsWith("✓")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                color = if (robotOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                                 modifier = Modifier.padding(top = 6.dp),
                             )
                         }
@@ -883,7 +869,7 @@ fun SettingsScreen(
             }
         }
         Text(
-            "地址填完自动保存，无需按底部「保存」。机器人上需安装 xrobotctl 控制中枢（github.com/jingrongx/xrobotctl）并打开一次启动常驻服务；两台设备需连同一个 Wi-Fi。",
+            "改动自动保存。打开开关会先自动检测本机有没有中枢：检测到就直接填好 127.0.0.1，检测不到再填机器人的局域网 IP。机器人上需安装 xrobotctl 控制中枢（github.com/jingrongx/xrobotctl）并打开一次启动常驻服务；两台设备需连同一个 Wi-Fi。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),

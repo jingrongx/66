@@ -11,7 +11,11 @@ import com.lvyoubao.app.data.ProviderCredentials
 import com.lvyoubao.app.data.ProviderPreset
 import com.lvyoubao.app.data.SyncableConfig
 import com.lvyoubao.app.data.presetById
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -54,6 +58,12 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
         .readTimeout(6, TimeUnit.SECONDS)
         .build()
 
+    // 自动保存：改草稿 700ms 无新改动即落盘（防抖，打字不刷库）；退出页面时若防抖还没到点，独立作用域补存。
+    // persistScope 独立于 viewModelScope——onCleared 时 scope 已取消，补存必须另起。
+    private val persistScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var autoSaveJob: Job? = null
+    private var dirty = false
+
     init {
         viewModelScope.launch {
             val saved = repo.settings.first()
@@ -63,11 +73,27 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
 
     override fun onCleared() {
         syncServer.stop()
+        // 防抖还没到点就退出设置页：把最后的改动补存，绝不丢用户输入的尾巴
+        if (dirty) persistScope.launch { repo.save(_ui.value.draft) }
         super.onCleared()
     }
 
-    fun updateDraft(transform: (AiSettings) -> AiSettings) =
+    fun updateDraft(transform: (AiSettings) -> AiSettings) {
         _ui.update { it.copy(draft = transform(it.draft), testResult = null) }
+        scheduleAutoSave()
+    }
+
+    /** 防抖自动保存。loading 时绝不落盘：草稿还没从 DataStore 装载完，此刻存=用默认空配置覆盖用户全部设置 */
+    private fun scheduleAutoSave() {
+        if (_ui.value.loading) return
+        dirty = true
+        autoSaveJob?.cancel()
+        autoSaveJob = viewModelScope.launch {
+            delay(700)
+            repo.save(_ui.value.draft)
+            dirty = false
+        }
+    }
 
     /**
      * 切换供应商：先把当前供应商的接口配置存档（配过 Key、或自定义填过地址才算配置过），
@@ -104,9 +130,13 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
                 fetchedModels = emptyList(),
             )
         }
+        // 切换供应商整体改写了草稿（含旧供应商配置存档），同样走自动保存
+        scheduleAutoSave()
     }
 
     fun save(onSaved: () -> Unit) {
+        autoSaveJob?.cancel()
+        dirty = false
         viewModelScope.launch {
             repo.save(_ui.value.draft)
             onSaved()
