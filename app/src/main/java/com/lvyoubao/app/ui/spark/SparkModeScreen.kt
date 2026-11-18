@@ -107,6 +107,8 @@ fun SparkModeScreen(
     val pendingPhotos by vm.pendingPhotos.collectAsState()
     val isContinuous by vm.isContinuous.collectAsState()
     val timerLeft by vm.timerRemainingSec.collectAsState()
+    val alarmActive by vm.alarmActive.collectAsState()
+    val alarmText by vm.alarmText.collectAsState()
 
     // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
@@ -182,7 +184,9 @@ fun SparkModeScreen(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0D1117)), // 深邃科技黑底色（铺满含系统栏区域）
+            .background(Color(0xFF0D1117)) // 深邃科技黑底色（铺满含系统栏区域）
+            // 倒计时铃响时点屏幕任意空白处停止（按钮类控件自己消费点击，不受影响）
+            .pointerInput(Unit) { detectTapGestures { if (alarmActive) vm.stopAlarm() } },
     ) {
         // 布局按 308x240 手表小屏设计；在手机等大屏上以可用短边为基准等比放大，
         // 保持与设计稿一致的构图与可点面积（小屏恒为 1，观感不变）
@@ -330,8 +334,34 @@ fun SparkModeScreen(
                 label = "MainContent",
             ) { isEyesMode ->
                 if (isEyesMode) {
-                    // 倒计时进行中：眼睛区让位给大字时分秒（语音「计时10分钟」）
-                    if (timerLeft != null) {
+                    // 告警响着：眼睛区显示「时间到」+ 提醒事项 + 停止引导（点屏幕任意处/说别响了）
+                    if (alarmActive) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                text = "⏰ 时间到",
+                                fontSize = (26 * scale).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                            )
+                            if (alarmText.length > "时间到啦".length) {
+                                Text(
+                                    text = alarmText.removePrefix("时间到啦，").removePrefix("时间到啦"),
+                                    fontSize = (15 * scale).sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF80DEEA),
+                                )
+                            }
+                            Text(
+                                text = "点按屏幕停止",
+                                fontSize = (11 * scale).sp,
+                                color = Color.White.copy(alpha = 0.55f),
+                            )
+                        }
+                    } else if (timerLeft != null) {
+                        // 倒计时进行中：眼睛区让位给大字时分秒（语音「计时10分钟」）
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center,

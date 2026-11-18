@@ -17,7 +17,7 @@ object RobotIntent {
         data object Look : Command()
         data object Battery : Command()
         data class Volume(val action: DeviceVolume.Action, val percent: Int = 60) : Command()
-        data class Timer(val totalSec: Int) : Command()
+        data class Timer(val totalSec: Int, val remindText: String = "") : Command()
         data object TimerStop : Command()
         data class Note(val content: String) : Command()
         data class MemorySearch(val keyword: String) : Command()
@@ -49,7 +49,8 @@ object RobotIntent {
                 Look -> "好的，我看看"
                 Battery -> ""
                 is Volume -> ""
-                is Timer -> "好的，${durationText(totalSec)}倒计时开始"
+                is Timer -> if (remindText.isBlank()) "好的，${durationText(totalSec)}倒计时开始"
+                    else "好的，${durationText(totalSec)}后提醒你$remindText"
                 TimerStop -> "好的，计时取消了"
                 is Note -> "记好了"
                 is MemorySearch -> ""
@@ -70,7 +71,8 @@ object RobotIntent {
                 Look -> "看看前面"
                 Battery -> "报一下电量"
                 is Volume -> "调音量"
-                is Timer -> "开始${durationText(totalSec)}倒计时"
+                is Timer -> if (remindText.isBlank()) "开始${durationText(totalSec)}倒计时"
+                    else "${durationText(totalSec)}后提醒你$remindText"
                 TimerStop -> "取消计时"
                 is Note -> "记一笔"
                 is MemorySearch -> "查记忆"
@@ -125,7 +127,7 @@ object RobotIntent {
         HEAD 度——头部抬头/低头/摆正：范围-25到23，正抬头负低头，0是平视。例：「抬头」→HEAD 15；「低头」→HEAD -10；「平视」「正视」「头摆正」「头回正」→HEAD 0
         LOOK——用摄像头拍一张照片看看眼前。只要用户想让小源当场用摄像头看一眼（说法五花八门，不限于特定词），都算 LOOK：如「看看前面有什么」「前面是什么」「看看这是什么」「你看到了什么」「看看周围」「帮我看看眼前的」「拍张照看看」「瞅一眼」。判断标准：动作是「当场拍照看环境」，不是查资料问知识。注意「平视/正视/头摆正」是头部动作（HEAD 0），「抬头看看你」是抬头动作（HEAD），都不是 LOOK。
         BATTERY——报一下小源自己这台设备的电量。例：「你电量还剩多少」「快没电了吗」「电量多少」→BATTERY。注意问的是小源本机，不是机器人；只单发，不与其他动作同句。
-        TIMER 秒数——开始一个倒计时，把时长换算成总秒数：「定个5分钟的倒计时」「计时10分钟」「15分钟后提醒我去看锅」→TIMER 300/600/900；支持小时/分钟/秒组合（1小时30分=5400）
+        TIMER 秒数 要提醒的事——开始一个倒计时，把时长换算成总秒数；带提醒事项时把事项写在秒数后面：「定个5分钟的倒计时」→TIMER 300；「计时10分钟」→TIMER 600；「15分钟后提醒我去看锅」→TIMER 900 看锅；支持小时/分钟/秒组合（1小时30分=5400）
         TIMER_STOP——取消正在跑的倒计时：「取消计时」「关掉倒计时」→TIMER_STOP。注意「停下/别说了」是停止播报（STOP），别混
         NOTE 记事内容——帮用户记一笔随手记，内容保留用户原话要点：「记一下，明天九点开会」→NOTE 明天九点开会；「帮我记着这事：后天交材料」→NOTE 后天交材料
         MEMORY_SEARCH 关键词——在用户的记忆和随手记里找东西，提炼一两个检索词，别照抄整句：「记忆里有没有火锅店」→MEMORY_SEARCH 火锅；「我之前记过什么药」→MEMORY_SEARCH 药；「上次说的那个馆子叫啥」→MEMORY_SEARCH 馆子
@@ -138,7 +140,7 @@ object RobotIntent {
         NONE——这句话不是在指挥机器人（闲聊、问天气、问路线、查资料等），交给正常聊天。注意「抬头看看你」是抬头的动作（HEAD），问「附近有什么好吃的」是 NONE，都不是 LOOK。
         用户一句话里有几个动作就输出几行（最多4行），按说话的先后顺序排：
         例：「抬头然后低头」→ 两行：HEAD 15 和 HEAD -10；「先前进30再左转90度」→ MOVE 30 和 TURN 90；「转个身看看前面」→ TURN 180 和 LOOK。
-        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、BATTERY、TIMER 300、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
+        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、BATTERY、TIMER 900 关火、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
     """.trimIndent()
 
     /** AI 解析：超 8 秒或网络/服务失败一律返回空表（回落聊天，控制不能卡死语音主流程） */
@@ -175,8 +177,16 @@ object RobotIntent {
                 }
                 continue
             }
+            // TIMER 带提醒事项（「TIMER 900 关火」）：先于通用动作行单独抠
+            val timerM = Regex("^TIMER\\s+(\\d{1,6})\\s*(.*)$").find(upper)
+            if (timerM != null) {
+                val sec = timerM.groupValues[1].toIntOrNull() ?: 60
+                val label = upper.substring(timerM.range.last + 1).trim()
+                out += Command.Timer(sec, label)
+                continue
+            }
             // 「动作 数字」指令（一行内可能塞多个）
-            Regex("(TIMER_STOP|TIMER|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|VOLUME)\\s*(-?\\d+)?")
+            Regex("(TIMER_STOP|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|VOLUME)\\s*(-?\\d+)?")
                 .findAll(upper)
                 .forEach { m ->
                     val value = m.groupValues[2].toIntOrNull()
@@ -187,8 +197,6 @@ object RobotIntent {
                         "HEAD" -> out += Command.Head(value ?: 15)
                         "LOOK" -> out += Command.Look
                         "BATTERY" -> out += Command.Battery
-                        "TIMER" -> out += Command.Timer(value ?: 60)
-                        "TIMER_STOP" -> out += Command.TimerStop
                         "VOLUME_UP" -> out += Command.Volume(DeviceVolume.Action.UP)
                         "VOLUME_DOWN" -> out += Command.Volume(DeviceVolume.Action.DOWN)
                         "VOLUME_MUTE" -> out += Command.Volume(DeviceVolume.Action.MUTE)

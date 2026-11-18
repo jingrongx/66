@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.BatteryManager
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
@@ -124,10 +126,18 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var fullReminded = false
     private var wasCharging = false
 
-    // 倒计时（语音「计时10分钟」）：眼睛区大字显示 时分秒，到点播报
+    // 倒计时（语音「计时10分钟」）：眼睛区大字显示 时分秒，到点先语音告知（带提醒事项）再滴滴滴循环响
     private var timerJob: Job? = null
     private val _timerRemainingSec = MutableStateFlow<Int?>(null)
     val timerRemainingSec: StateFlow<Int?> = _timerRemainingSec.asStateFlow()
+
+    // 到点告警：滴滴滴循环（ToneGenerator），点屏幕任意处或说「别响了」停止
+    private var alarmJob: Job? = null
+    private var tone: ToneGenerator? = null
+    private val _alarmActive = MutableStateFlow(false)
+    val alarmActive: StateFlow<Boolean> = _alarmActive.asStateFlow()
+    private val _alarmText = MutableStateFlow("")
+    val alarmText: StateFlow<String> = _alarmText.asStateFlow()
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -465,9 +475,16 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             }
         }
 
-        // 设备快路：计时/记事短句零延迟执行
-        matchTimerFast(text)?.let { sec ->
-            startTimerWithConfirm(context, sec)
+        // 设备快路：铃响停止口令 + 计时/记事短句（零延迟）
+        if (_alarmActive.value && matchAlarmStop(text)) {
+            stopAlarm()
+            appendMessage(SparkMessage("assistant", "好的，不响了"))
+            _statusHint.value = null
+            speakHint(context, "好的，不响了")
+            return true
+        }
+        matchTimerFast(text)?.let { (sec, label) ->
+            startTimerWithConfirm(context, sec, label)
             return true
         }
         matchNoteFast(text)?.let { content ->
@@ -494,7 +511,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return true
         }
         chain.filterIsInstance<RobotIntent.Command.Timer>().firstOrNull()?.let { t ->
-            startTimerWithConfirm(context, t.totalSec)
+            startTimerWithConfirm(context, t.totalSec, t.remindText)
             return true
         }
         if (chain.contains(RobotIntent.Command.TimerStop)) {
@@ -634,9 +651,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     // ---------- 计时 / 记事 / 查记忆 ----------
 
-    /** 启动倒计时：眼睛区大字显示，到点播报「时间到啦」 */
-    fun startTimer(totalSec: Int) {
+    /** 启动倒计时：眼睛区大字显示；到点先语音告知（带提醒事项），再滴滴滴循环响直到被停 */
+    fun startTimer(totalSec: Int, label: String = "") {
         timerJob?.cancel()
+        val tip = label.trim()
         var left = totalSec.coerceIn(1, 86_400)
         _timerRemainingSec.value = left
         timerJob = viewModelScope.launch {
@@ -647,38 +665,102 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             }
             _timerRemainingSec.value = null
             TtsPlayer.stop()
-            _statusHint.value = "时间到"
-            speakHint(appContext, "时间到啦")
+            val msg = if (tip.isBlank()) "时间到啦" else "时间到啦，$tip"
+            _alarmText.value = msg
+            _statusHint.value = msg
+            speakHint(appContext, msg)
+            startAlarm()
         }
+    }
+
+    /** 滴滴滴循环告警：等语音告知播完再响（不掐自己的话），点屏幕/语音停止 */
+    private fun startAlarm() {
+        alarmJob?.cancel()
+        _alarmActive.value = true
+        alarmJob = viewModelScope.launch {
+            var waited = 0
+            while (TtsPlayer.state.value is TtsPlayer.State.Speaking && waited < 8_000) {
+                delay(200)
+                waited += 200
+            }
+            val gen = runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 85) }.getOrNull()
+            tone = gen
+            try {
+                while (_alarmActive.value) {
+                    runCatching { gen?.startTone(ToneGenerator.TONE_PROP_BEEP, 280) }
+                    delay(750)
+                }
+            } finally {
+                runCatching { gen?.release() }
+                if (tone === gen) tone = null
+            }
+        }
+    }
+
+    /** 停止滴滴滴告警（点屏幕任意处 / 说「别响了」） */
+    fun stopAlarm() {
+        _alarmActive.value = false
+        alarmJob?.cancel()
+        alarmJob = null
+        runCatching { tone?.release() }
+        tone = null
+    }
+
+    /** 告警停止口令本地匹配（连聊里直接说、待机里唤醒监听也能收到） */
+    private fun matchAlarmStop(text: String): Boolean {
+        val t = text.trim().trimEnd('。', '！', '!', '.', '，', ',')
+        if (t.isEmpty() || t.length > 10) return false
+        return t.contains("别响") || t.contains("别滴滴") || t.contains("停止提醒") || t.contains("取消提醒") ||
+            t.contains("关掉提醒") || t.contains("别闹了") || t.contains("关掉闹钟") || t.contains("不响了")
     }
 
     fun cancelTimer() {
         timerJob?.cancel()
         _timerRemainingSec.value = null
+        stopAlarm()
     }
 
-    private fun startTimerWithConfirm(context: Context, totalSec: Int) {
-        startTimer(totalSec)
-        appendMessage(SparkMessage("assistant", RobotIntent.Command.Timer(totalSec).confirmText))
+    private fun startTimerWithConfirm(context: Context, totalSec: Int, label: String) {
+        startTimer(totalSec, label)
+        appendMessage(SparkMessage("assistant", RobotIntent.Command.Timer(totalSec, label).confirmText))
         _statusHint.value = null
-        speakHint(context, RobotIntent.Command.Timer(totalSec).confirmText)
+        speakHint(context, RobotIntent.Command.Timer(totalSec, label).confirmText)
     }
 
-    /** 计时/倒计时短句本地匹配（零延迟）：「计时10分钟」「倒计时30秒」「15分钟后提醒我」，长句交给 AI */
-    private fun matchTimerFast(text: String): Int? {
+    /** 计时/倒计时短句本地匹配（零延迟），带提醒事项：「15分钟后提醒我关火」→(900, 关火)；长句交给 AI */
+    private fun matchTimerFast(text: String): Pair<Int, String>? {
         val t = text.trim().trimEnd('。', '！', '!', '.', '，', ',')
-        if (t.isEmpty() || t.length > 14) return null
+        if (t.isEmpty() || t.length > 20) return null
         if (t.startsWith("别") || t.startsWith("不要") || t.contains("取消") || t.contains("停止")) return null
-        val m = Regex("(?:计时|倒计时|闹钟|提醒我|定个?)[约]?\\s*(\\d{1,3})\\s*(?:个)?(小时|时|分钟|分|秒)|(\\d{1,3})\\s*(?:个)?(小时|时|分钟|分|秒)(?:之?后|以后?)提醒我?")
-            .find(t) ?: return null
-        val num = (m.groupValues[1].ifEmpty { m.groupValues[3] }).toIntOrNull() ?: return null
-        val unit = m.groupValues[2].ifEmpty { m.groupValues[4] }
-        val sec = when (unit) {
+
+        fun toSec(num: Int, unit: String) = when (unit) {
             "小时", "时" -> num * 3600
             "分钟", "分" -> num * 60
             else -> num
         }
-        return sec.takeIf { it in 1..86_400 }
+
+        // A：提醒我/计时/倒计时/闹钟/定个 N 单位 [后] [提醒事项]
+        Regex("(提醒我|计时|倒计时|闹钟|定个?)[约]?\\s*(\\d{1,3})\\s*(?:个)?(小时|时|分钟|分|秒)\\s*(?:之?后|以后?)?(.*)").find(t)?.let { a ->
+            val sec = toSec(a.groupValues[2].toIntOrNull() ?: return null, a.groupValues[3])
+            if (sec !in 1..86_400) return null
+            var label = a.groupValues[4].trim()
+            if (label.startsWith("提醒我")) {
+                label = label.removePrefix("提醒我").trim()
+                label = label.removePrefix("后").trim()
+            }
+            label = label.removeSuffix("闹钟").trim()
+            // 只有「提醒我」句式或明确带事项才算提醒；纯「计时10分钟」就是普通倒计时
+            val isReminder = a.groupValues[1] == "提醒我" || (label.isNotBlank() && label != "闹钟")
+            return sec to if (isReminder) label else ""
+        }
+
+        // B：N 单位 后 提醒我 [事项]（「15分钟后提醒我关火」）
+        Regex("(\\d{1,3})\\s*(?:个)?(小时|时|分钟|分|秒)(?:之?后|以后?)提醒我\\s*(.*)").find(t)?.let { b ->
+            val sec = toSec(b.groupValues[1].toIntOrNull() ?: return null, b.groupValues[2])
+            if (sec !in 1..86_400) return null
+            return sec to b.groupValues[3].trim()
+        }
+        return null
     }
 
     /** 记事短句本地匹配：「记一下，明天九点开会」→内容提取；「记忆里…」等以记开头但非记事的放行给 AI */
@@ -1136,7 +1218,16 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             SpeechInput.transcribeFile(wav, cur.asrKey.trim(), cur.dialectMode).getOrNull()
         }
         wav.delete()
-        if (isWakeWord(spoken.orEmpty().trim()) && !_isContinuous.value && activeRecording == null) {
+        val text = spoken.orEmpty().trim()
+        // 铃响时待机喊「别响了」也能停（唤醒监听收得到），先于唤醒词判断
+        if (text.isNotBlank() && _alarmActive.value && matchAlarmStop(text)) {
+            stopAlarm()
+            appendMessage(SparkMessage("assistant", "好的，不响了"))
+            _statusHint.value = null
+            speakHint(appContext, "好的，不响了")
+            return@launch
+        }
+        if (isWakeWord(text) && !_isContinuous.value && activeRecording == null) {
             // 命中唤醒词：麦克风权限必然已授予（监听本来就开着），直接进连续对话
             _showEyes.value = true
             startContinuous(appContext) {}
