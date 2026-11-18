@@ -848,6 +848,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             onRequestRecordPermission()
             return
         }
+        // 唤醒监听若在跑必须先彻底停掉再开连聊采集：Android 10+ 三方应用不允许并发录音，
+        // 后开的 AudioRecord 会被静音——v0.8.94 喊「小源小源」后连聊收不到声音（问啥都没反应、
+        // 也无法再唤醒）的根因。手动点「连聊」按钮时唤醒监听同样在跑，两路都要先停
+        wakeSession?.stop()
+        wakeSession = null
         idleToEyesJob?.cancel()
         TtsPlayer.stop()
         _showEyes.value = true
