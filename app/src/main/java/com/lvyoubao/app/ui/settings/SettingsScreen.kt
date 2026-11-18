@@ -829,7 +829,13 @@ fun SettingsScreen(
                         FieldLabel("机器人中枢地址（机器人本机可填 127.0.0.1）")
                         OutlinedTextField(
                             value = state.draft.robotHost,
-                            onValueChange = { value -> vm.updateDraft { it.copy(robotHost = value.trim()) } },
+                            // 地址填完即时保存（对话界面读的是持久化配置）：v0.8.83 只存草稿——
+                            // 测试连接读草稿能通，但没按底部「保存」就退出，灵动屏会报「地址还没填」。
+                            // 对齐开关的即时保存，输入即持久化，不靠用户记得按保存
+                            onValueChange = { value ->
+                                vm.updateDraft { it.copy(robotHost = value.trim()) }
+                                vm.save(onSaved = {})
+                            },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             placeholder = { Text("机器人局域网 IP，如 192.168.3.102（端口默认 8899）") },
@@ -877,7 +883,7 @@ fun SettingsScreen(
             }
         }
         Text(
-            "机器人上需安装 xrobotctl 控制中枢（github.com/jingrongx/xrobotctl）并打开一次启动常驻服务；两台设备需连同一个 Wi-Fi。",
+            "地址填完自动保存，无需按底部「保存」。机器人上需安装 xrobotctl 控制中枢（github.com/jingrongx/xrobotctl）并打开一次启动常驻服务；两台设备需连同一个 Wi-Fi。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
