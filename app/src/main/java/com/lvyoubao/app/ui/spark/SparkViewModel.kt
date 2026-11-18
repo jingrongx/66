@@ -5,8 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
-import android.media.AudioManager
-import android.media.ToneGenerator
 import android.os.BatteryManager
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
@@ -131,9 +129,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private val _timerRemainingSec = MutableStateFlow<Int?>(null)
     val timerRemainingSec: StateFlow<Int?> = _timerRemainingSec.asStateFlow()
 
-    // 到点告警：滴滴滴循环（ToneGenerator），点屏幕任意处或说「别响了」停止
+    // 到点告警：滴滴滴循环（AudioTrack 手工 PCM，ToneGenerator 在低端机连发几次就哑），点屏幕/说「别响了」停止
     private var alarmJob: Job? = null
-    private var tone: ToneGenerator? = null
+    private var alarmTrack: android.media.AudioTrack? = null
     private val _alarmActive = MutableStateFlow(false)
     val alarmActive: StateFlow<Boolean> = _alarmActive.asStateFlow()
     private val _alarmText = MutableStateFlow("")
@@ -696,28 +694,91 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
-    /** 滴滴滴循环告警：等语音告知播完再响（不掐自己的话），点屏幕/语音停止 */
+    /**
+     * 滴滴滴循环告警（经典闹钟音色：三连短音 1600Hz + 停顿，AudioTrack 写 PCM 循环）。
+     * 之前用 ToneGenerator：低端机连发几次就哑（startTone 静默失败）且音色软趴趴不像闹钟。
+     * 走 USAGE_ALARM 音量流（独立的闹钟音量，不受媒体静音影响）；等语音告知播完再响不掐自己的话。
+     */
     private fun startAlarm() {
         alarmJob?.cancel()
         _alarmActive.value = true
-        alarmJob = viewModelScope.launch {
+        alarmJob = viewModelScope.launch(Dispatchers.IO) {
             var waited = 0
             while (TtsPlayer.state.value is TtsPlayer.State.Speaking && waited < 8_000) {
                 delay(200)
                 waited += 200
             }
-            val gen = runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 85) }.getOrNull()
-            tone = gen
+            if (!_alarmActive.value) return@launch
+            val sampleRate = 16_000
+            val minBuf = android.media.AudioTrack.getMinBufferSize(
+                sampleRate,
+                android.media.AudioFormat.CHANNEL_OUT_MONO,
+                android.media.AudioFormat.ENCODING_PCM_16BIT,
+            )
+            val track = try {
+                android.media.AudioTrack.Builder()
+                    .setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_ALARM)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build(),
+                    )
+                    .setAudioFormat(
+                        android.media.AudioFormat.Builder()
+                            .setSampleRate(sampleRate)
+                            .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                            .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                            .build(),
+                    )
+                    .setBufferSizeInBytes(maxOf(minBuf, 8192))
+                    .setTransferMode(android.media.AudioTrack.MODE_STREAM)
+                    .build()
+            } catch (e: Exception) {
+                return@launch
+            }
+            if (track.state != android.media.AudioTrack.STATE_INITIALIZED) {
+                track.release()
+                return@launch
+            }
+            alarmTrack = track
+            val cycle = alarmCyclePcm(sampleRate)
             try {
+                track.play()
                 while (_alarmActive.value) {
-                    runCatching { gen?.startTone(ToneGenerator.TONE_PROP_BEEP, 280) }
-                    delay(750)
+                    val written = track.write(cycle, 0, cycle.size)
+                    if (written < 0) break // 被 stop/release：退出
                 }
             } finally {
-                runCatching { gen?.release() }
-                if (tone === gen) tone = null
+                if (alarmTrack === track) alarmTrack = null
+                runCatching { track.stop() }
+                runCatching { track.release() }
             }
         }
+    }
+
+    /** 一轮「滴滴滴」PCM：三连 150ms 短音（1600Hz 正弦，首尾渐变防爆音）+ 1 秒停顿 */
+    private fun alarmCyclePcm(sampleRate: Int): ShortArray {
+        val out = ShortArray(sampleRate * 1650 / 1000)
+        var idx = 0
+        fun beep(ms: Int) {
+            val n = sampleRate * ms / 1000
+            val fade = (sampleRate * 0.005).toInt().coerceAtLeast(1)
+            for (i in 0 until n) {
+                if (idx >= out.size) return
+                val env = minOf(1.0, i.toDouble() / fade, (n - i).toDouble() / fade).coerceIn(0.0, 1.0)
+                val v = (Math.sin(2 * Math.PI * 1600.0 * i / sampleRate) * 0.55 * env * Short.MAX_VALUE).toInt().toShort()
+                out[idx++] = v
+            }
+        }
+        fun silence(ms: Int) {
+            repeat(sampleRate * ms / 1000) {
+                if (idx < out.size) out[idx++] = 0
+            }
+        }
+        beep(150); silence(100)
+        beep(150); silence(100)
+        beep(150); silence(1000)
+        return out
     }
 
     /** 停止滴滴滴告警（点屏幕任意处 / 说「别响了」） */
@@ -725,8 +786,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         _alarmActive.value = false
         alarmJob?.cancel()
         alarmJob = null
-        runCatching { tone?.release() }
-        tone = null
+        // 直接停/释放音轨：writer 阻塞中的 write 会立刻报错退出，不会拖泥带水多响一轮
+        val track = alarmTrack
+        alarmTrack = null
+        runCatching { track?.pause() }
+        runCatching { track?.flush() }
+        runCatching { track?.release() }
     }
 
     /** 告警停止口令（仅响铃时判定）：说停/退出/关闭/小源小源 都算，宽容到「开口就是想让它安静」 */
