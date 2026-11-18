@@ -20,6 +20,7 @@ import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.RobotIntent
+import com.lvyoubao.app.data.WeatherClient
 import com.lvyoubao.app.ui.common.ContinuousConversation
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
@@ -730,12 +731,22 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 return@launch
             }
 
+            // 位置：读缓存快照；没有（无 GPS 设备首次/过期）就快速要一次（含 IP 定位兜底，城市级联网反查）
+            // 天气类问题：主动拉实时天气注入——灵动屏聊天不带工具/搜索，不注入模型只能瞎编或答「查不了」
+            val wantsWeather = listOf("天气", "气温", "温度", "下雨", "下雪", "刮风", "风力", "湿度", "穿什么", "热不热", "冷不冷", "带伞", "防晒")
+                .any { userText.contains(it) }
+            val place = LocationContext.current(context)
+                ?: runCatching { LocationContext.fresh(context, timeoutMs = 2_500) }.getOrNull()
+            val weatherLine = if (wantsWeather && place != null) {
+                runCatching { WeatherClient.current(place.lon, place.lat) }.getOrNull()
+            } else {
+                null
+            }
             val contextInfo = buildString {
                 val cal = CalendarContext.block()
                 if (!cal.isNullOrBlank()) appendLine(cal)
-                if (LocationContext.hasPermission(context)) {
-                    LocationContext.current(context)?.description?.let { appendLine("位置：$it") }
-                }
+                place?.description?.let { appendLine("位置：$it") }
+                if (weatherLine != null) appendLine("【实时天气】$weatherLine")
             }
 
             val systemPrompt = """

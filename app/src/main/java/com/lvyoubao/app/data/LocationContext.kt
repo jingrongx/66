@@ -18,6 +18,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.Locale
 import kotlin.coroutines.resume
 
@@ -50,6 +54,12 @@ object LocationContext {
     /** 感知服务定位的采纳上限：停录超过 10 分钟的点不再当实时位置用 */
     private const val SENSING_TTL_MS = 10 * 60_000L
 
+    /** IP 定位缓存有效期：城市级位置极少变，30 分钟内不重查 */
+    private const val IP_TTL_MS = 30 * 60_000L
+
+    /** IP 定位失败冷却：网络不通时别每条消息都撞一次 */
+    private const val IP_FAIL_TTL_MS = 5 * 60_000L
+
     fun hasPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, PERMISSION) == PackageManager.PERMISSION_GRANTED
 
@@ -65,15 +75,27 @@ object LocationContext {
     @Volatile
     private var ownFix: Location? = null
 
+    /** IP 定位缓存：无 GPS/定位服务的设备（无定位模块的机器人屏/平板）联网反查城市级位置 */
+    @Volatile
+    private var ipPlace: Place? = null
+    @Volatile
+    private var ipPlaceAt = 0L
+    @Volatile
+    private var ipFailAt = 0L
+
     /** 并发的 fresh 请求共用一次主动定位：预热和发送撞车时不会重复定位 */
     private val refreshMutex = Mutex()
 
     private val prewarmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun current(context: Context): Place? {
-        if (!hasPermission(context)) return null
-        val loc = latestFix(context) ?: return null
-        return toPlace(context, loc)
+        if (hasPermission(context)) {
+            latestFix(context)?.let { return toPlace(context, it) }
+        }
+        // 无 GPS/无权限：读 IP 定位缓存（fresh 填充）。缓存过期这里不联网——同步签名，等 fresh
+        val ip = ipPlace
+        if (ip != null && System.currentTimeMillis() - ipPlaceAt < IP_TTL_MS) return ip
+        return null
     }
 
     suspend fun fresh(
@@ -88,8 +110,10 @@ object LocationContext {
                 return@withLock toPlace(context, cached)
             }
             val got = requestFreshFix(context, timeoutMs)
-            val best = got ?: cached ?: return@withLock null
-            toPlace(context, best)
+            val best = got ?: cached
+            if (best != null) return@withLock toPlace(context, best)
+            // 原生定位要不到（无 GPS/定位服务不可用的设备）：IP 定位兜底，联网反查城市级
+            ipLocate()
         }
     }
 
@@ -190,6 +214,43 @@ object LocationContext {
             }
         }
         return fix ?: best.get()
+    }
+
+    /**
+     * IP 定位兜底：ipwho.is 免 Key HTTPS，返回城市级经纬度（设备没有 GPS/定位服务时唯一的定位手段）。
+     * 精度只有城市级——描述里明确标注，AI 不会拿它去精确指路；30 分钟缓存，失败 5 分钟内不重试。
+     */
+    private suspend fun ipLocate(): Place? = withContext(Dispatchers.IO) {
+        val cached = ipPlace
+        val now = System.currentTimeMillis()
+        if (cached != null && now - ipPlaceAt < IP_TTL_MS) return@withContext cached
+        if (now - ipFailAt < IP_FAIL_TTL_MS) return@withContext null
+        val place = runCatching {
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+            val body = client.newCall(
+                okhttp3.Request.Builder().url("https://ipwho.is/").get().build(),
+            ).execute().use { it.body?.string().orEmpty() }
+            val obj = Json.parseToJsonElement(body).jsonObject
+            if (obj["success"]?.jsonPrimitive?.booleanOrNull != true) return@runCatching null
+            val lat = obj["latitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@runCatching null
+            val lon = obj["longitude"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@runCatching null
+            val area = listOf(obj["region"]?.jsonPrimitive?.content.orEmpty(), obj["city"]?.jsonPrimitive?.content.orEmpty())
+                .filter { it.isNotBlank() }
+                .distinct()
+                .joinToString("")
+            if (area.isBlank() || lat == 0.0 || lon == 0.0) return@runCatching null
+            Place(lat = lat, lon = lon, description = "网络定位（IP）：$area（城市级，仅供参考）")
+        }.getOrNull()
+        if (place != null) {
+            ipPlace = place
+            ipPlaceAt = System.currentTimeMillis()
+        } else {
+            ipFailAt = System.currentTimeMillis()
+        }
+        place
     }
 
     private fun describe(context: Context, loc: Location): String {

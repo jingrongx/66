@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -402,6 +403,24 @@ fun SparkModeScreen(
             }
         }
         val onGallery: () -> Unit = { galleryLauncher.launch("image/*") }
+        // 连聊中的整颗呼吸青光（边框描边 1.1s 往复）
+        val glowTransition = rememberInfiniteTransition(label = "convGlow")
+        val glowAlpha by glowTransition.animateFloat(
+            initialValue = 0.15f,
+            targetValue = 0.6f,
+            animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Reverse),
+            label = "glowAlpha",
+        )
+        val convCapsuleBg = when {
+            isRecording -> Color(0xFFD32F2F)
+            isContinuous -> Color(0xFF00838F)
+            else -> MaterialTheme.colorScheme.primary
+        }
+        val convGlowBorder = if (isContinuous) {
+            Modifier.border(2.dp, Color(0xFF00E5FF).copy(alpha = glowAlpha), RoundedCornerShape(percent = 50))
+        } else {
+            Modifier
+        }
         val talkGesture = Modifier.pointerInput(Unit) {
             detectTapGestures(
                 onPress = {
@@ -444,48 +463,62 @@ fun SparkModeScreen(
                     ) { Text("🖼️", fontSize = (15 * scale).sp) }
                 }
                 Spacer(Modifier.height((5 * scale).dp))
-                // 嘴形胶囊分区：左侧「连聊」轻点开关（连续中青底发光），右侧按住临时说话——功能一目了然不误触
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy((6 * scale).dp),
+                // 一体胶囊：左端内嵌「连聊」小钮（点按开关），右侧按住说话；连聊中整颗青色呼吸发光
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height((40 * scale).dp)
+                        .clip(RoundedCornerShape(percent = 50))
+                        .background(convCapsuleBg)
+                        .then(convGlowBorder),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height((40 * scale).dp)
-                            .clip(RoundedCornerShape(percent = 50))
-                            .background(if (isContinuous) Color(0xFF00ACC1) else Color.White.copy(alpha = 0.10f))
-                            .clickable {
-                                vm.startContinuous(context) {
-                                    recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    Row(Modifier.fillMaxSize()) {
+                        // 内嵌连聊小钮
+                        Box(
+                            modifier = Modifier
+                                .padding((4 * scale).dp)
+                                .width((78 * scale).dp)
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(
+                                    if (isContinuous) Color(0xFF00E5FF).copy(alpha = 0.30f)
+                                    else Color.White.copy(alpha = 0.12f)
+                                )
+                                .clickable {
+                                    vm.startContinuous(context) {
+                                        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
                                 }
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = if (isContinuous) "连聊中" else "连聊",
-                            fontSize = (14 * scale).sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
-                            maxLines = 1,
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .weight(2f)
-                            .height((40 * scale).dp)
-                            .clip(RoundedCornerShape(percent = 50))
-                            .background(if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary)
-                            .then(talkGesture),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
-                            fontSize = (16 * scale).sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            maxLines = 1,
-                        )
+                                .fillMaxHeight(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = if (isContinuous) "◉ 连聊中" else "▸ 连聊",
+                                fontSize = (13 * scale).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
+                                maxLines = 1,
+                            )
+                        }
+                        // 嘴：按住临时说一句
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .then(talkGesture),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = when {
+                                    isRecording -> "松手发送 (${recordTick}s)"
+                                    isContinuous -> "说吧，我在听"
+                                    else -> "🎙 按住说话"
+                                },
+                                fontSize = (16 * scale).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                            )
+                        }
                     }
                 }
             }
@@ -506,45 +539,61 @@ fun SparkModeScreen(
                         .clickable(onClick = onCamera),
                     contentAlignment = Alignment.Center,
                 ) { Text("📷", fontSize = (19 * scale).sp) }
-                // 会话态：连聊小段 + 按住说话段（与萌眼态同构，紧凑窄版）
-                Box(
-                    modifier = Modifier
-                        .width((52 * scale).dp)
-                        .height((40 * scale).dp)
-                        .clip(RoundedCornerShape(percent = 50))
-                        .background(if (isContinuous) Color(0xFF00ACC1) else Color.White.copy(alpha = 0.10f))
-                        .clickable {
-                            vm.startContinuous(context) {
-                                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = if (isContinuous) "连聊中" else "连聊",
-                        fontSize = (12 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
-                        maxLines = 1,
-                    )
-                }
-                Spacer(Modifier.width((4 * scale).dp))
+                // 会话态：连聊小钮 + 按住说话拼成一颗胶囊（与萌眼态同构，紧凑窄版）
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .height((40 * scale).dp)
                         .clip(RoundedCornerShape(percent = 50))
-                        .background(if (isRecording) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary)
-                        .then(talkGesture),
-                    contentAlignment = Alignment.Center,
+                        .background(convCapsuleBg)
+                        .then(convGlowBorder),
                 ) {
-                    Text(
-                        text = if (isRecording) "松手发送 (${recordTick}s)" else "🎙 按住说话",
-                        fontSize = (15 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        maxLines = 1,
-                    )
+                    Row(Modifier.fillMaxSize()) {
+                        Box(
+                            modifier = Modifier
+                                .padding((3 * scale).dp)
+                                .width((52 * scale).dp)
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(
+                                    if (isContinuous) Color(0xFF00E5FF).copy(alpha = 0.30f)
+                                    else Color.White.copy(alpha = 0.12f)
+                                )
+                                .clickable {
+                                    vm.startContinuous(context) {
+                                        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                }
+                                .fillMaxHeight(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = if (isContinuous) "连聊中" else "连聊",
+                                fontSize = (11 * scale).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
+                                maxLines = 1,
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .then(talkGesture),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = when {
+                                    isRecording -> "松手发送 (${recordTick}s)"
+                                    isContinuous -> "说吧，我在听"
+                                    else -> "🎙 按住说话"
+                                },
+                                fontSize = (15 * scale).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
                 Box(
                     modifier = Modifier
