@@ -28,6 +28,22 @@ object SparkChatStore {
         }
     }
 
+    /**
+     * 全双工通话的一轮落地（用户识别 + 小源回答）：
+     * 通话界面自己没有会话流，挂断后到「聊天」里能回看，LLM 下一轮也带得上。
+     */
+    fun appendDuplexTurn(asr: String, answer: String) {
+        if (asr.isBlank() && answer.isBlank()) return
+        if (asr.isNotBlank()) {
+            append(SparkMessage(role = "user", text = asr))
+            appendHistory(OutMessage(role = "user", text = asr))
+        }
+        if (answer.isNotBlank()) {
+            append(SparkMessage(role = "assistant", text = answer))
+            appendHistory(OutMessage(role = "assistant", text = answer))
+        }
+    }
+
     @Synchronized
     fun appendHistory(msg: OutMessage) {
         history.add(msg)

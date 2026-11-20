@@ -50,6 +50,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -82,6 +83,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
+import com.lvyoubao.app.ui.common.SpeechInput
+import com.lvyoubao.app.ui.largetext.DoubaoCallOverlay
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import kotlinx.coroutines.delay
 import java.io.File
@@ -112,6 +116,73 @@ fun SparkModeScreen(
 
     // 右上角「设置」进设置页（模式互斥，退出灵动模式只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
+
+    // ---------- 豆包全双工实时通话（端到端 S2S，灵动模式顶栏 📞 直达） ----------
+    // 灵动模式没有大字模式那排「通话」按钮，这里给一条独立入口：
+    // 通话期间麦克风整条让给豆包（停朗读/连聊/待机唤醒），挂断后恢复。
+    val settings by vm.settings.collectAsState()
+    var showDuplexCall by remember { mutableStateOf(false) }
+    val duplexClient = remember { DoubaoDuplexClient(context) }
+    val duplexState by duplexClient.state.collectAsState()
+    var duplexAsr by remember { mutableStateOf("") }
+    var duplexAnswer by remember { mutableStateOf("") }
+    var duplexHint by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        duplexClient.onEvent.collect { ev ->
+            when (ev) {
+                is DoubaoDuplexClient.Event.Asr -> duplexAsr = if (ev.isFinal) ev.text else duplexAsr + ev.text
+                is DoubaoDuplexClient.Event.Answer -> {
+                    if (ev.isFinal) {
+                        duplexAnswer = ev.text
+                        // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
+                        SparkChatStore.appendDuplexTurn(duplexAsr, ev.text)
+                    } else {
+                        duplexAnswer += ev.text
+                    }
+                }
+                is DoubaoDuplexClient.Event.SessionReady -> {
+                    duplexAsr = ""
+                    duplexAnswer = ""
+                    duplexHint = null
+                }
+                is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
+                    "CONFIG" -> "未配置豆包实时语音 Key，请到设置 → 凭证中心 → 豆包 填写"
+                    else -> "通话出错：${ev.message}"
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    DisposableEffect(showDuplexCall) {
+        if (showDuplexCall) {
+            vm.setDuplexAudioActive(true)
+            duplexAsr = ""
+            duplexAnswer = ""
+            duplexHint = null
+            if (settings.duplexApiKey.isBlank()) {
+                duplexHint = "未配置豆包实时语音 Key，请到设置 → 凭证中心 → 豆包 填写"
+            } else if (!SpeechInput.hasRecordPermission(context)) {
+                duplexHint = "需要麦克风权限才能全双工通话"
+            } else {
+                duplexClient.start(settings.duplexApiKey, settings.duplexVoice)
+            }
+        }
+        onDispose {
+            duplexClient.close()
+            vm.setDuplexAudioActive(false)
+        }
+    }
+    // 彻底退出应用时释放 OkHttp 线程池（与大字模式同口径）
+    DisposableEffect(Unit) {
+        onDispose { duplexClient.destroy() }
+    }
+    // 通话中返回键 = 挂断（不能直接退出应用）
+    BackHandler(enabled = showDuplexCall) {
+        duplexClient.close()
+        showDuplexCall = false
+    }
 
     // 长按会话消息弹出的操作面板（收藏/分享）
     var actionMsg by remember { mutableStateOf<SparkMessage?>(null) }
@@ -240,6 +311,25 @@ fun SparkModeScreen(
 
             // 右侧操作：切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 实时通话：豆包全双工（端到端 S2S，免按键、随时插话）
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape((8 * scale).dp))
+                        .background(Color(0xFF00E5FF).copy(alpha = 0.18f))
+                        .clickable { showDuplexCall = true }
+                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "📞",
+                        color = Color(0xFF80DEEA),
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+
+                Spacer(Modifier.width((6 * scale).dp))
+
                 // 切换眼睛 / 会话文字
                 Box(
                     modifier = Modifier
@@ -740,6 +830,28 @@ fun SparkModeScreen(
                         }
                     }
                 }
+            }
+        }
+
+        // ---------- 豆包全双工通话覆盖层：顶栏 📞 进入，挂断回萌眼 ----------
+        if (showDuplexCall) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                DoubaoCallOverlay(
+                    state = duplexState,
+                    asrText = duplexAsr,
+                    answerText = duplexAnswer,
+                    hint = duplexHint,
+                    photos = emptyList(),
+                    onPickCamera = {},
+                    onPickGallery = {},
+                    onRemovePhoto = {},
+                    onBargeIn = { duplexClient.bargeIn() },
+                    onHangUp = {
+                        duplexClient.close()
+                        showDuplexCall = false
+                    },
+                    showPhotoActions = false,
+                )
             }
         }
 

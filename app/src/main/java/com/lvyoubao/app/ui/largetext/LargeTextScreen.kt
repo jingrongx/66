@@ -1163,7 +1163,7 @@ private fun LargeTextHistoryOverlay(
  * 插话按一下（bargeIn）即可打断播报。 fab 按钮常驻，无需按住说话。
  */
 @Composable
-private fun DoubaoCallOverlay(
+internal fun DoubaoCallOverlay(
     state: DoubaoDuplexClient.State,
     asrText: String,
     answerText: String,
@@ -1174,6 +1174,7 @@ private fun DoubaoCallOverlay(
     onRemovePhoto: (Int) -> Unit,
     onBargeIn: () -> Unit,
     onHangUp: () -> Unit,
+    showPhotoActions: Boolean = true,
 ) {
     val seconds = remember { mutableStateOf(0) }
     LaunchedEffect(state) {
@@ -1278,18 +1279,20 @@ private fun DoubaoCallOverlay(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Button(
-                    onClick = onPickCamera,
-                    modifier = Modifier.height(56.dp),
-                    shape = RoundedCornerShape(28.dp),
-                ) { Text("拍照", fontSize = 16.sp) }
-                Spacer(Modifier.width(8.dp))
-                Button(
-                    onClick = onPickGallery,
-                    modifier = Modifier.height(56.dp),
-                    shape = RoundedCornerShape(28.dp),
-                ) { Text("相册", fontSize = 16.sp) }
-                Spacer(Modifier.width(8.dp))
+                if (showPhotoActions) {
+                    Button(
+                        onClick = onPickCamera,
+                        modifier = Modifier.height(56.dp),
+                        shape = RoundedCornerShape(28.dp),
+                    ) { Text("拍照", fontSize = 16.sp) }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = onPickGallery,
+                        modifier = Modifier.height(56.dp),
+                        shape = RoundedCornerShape(28.dp),
+                    ) { Text("相册", fontSize = 16.sp) }
+                    Spacer(Modifier.width(8.dp))
+                }
                 Button(
                     onClick = onBargeIn,
                     enabled = state == DoubaoDuplexClient.State.SPEAKING || state == DoubaoDuplexClient.State.LISTENING,

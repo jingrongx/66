@@ -114,6 +114,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     // 唤醒词监听（待机时喊「小源小源」进连续对话）：与连续对话共用一套引擎，状态机决定开谁
     private var wakeSession: ContinuousConversation? = null
     private var sparkActive = false
+    // 全双工通话占用麦克风期间，唤醒监听让路（一台设备同一时刻只能有一个 AudioRecord）
+    private var duplexAudioActive = false
     private var lastConvUploadAt = 0L
     private var lastWakeUploadAt = 0L
     private var wakeUploadCount = 0
@@ -1247,6 +1249,22 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
+     * 全双工通话开关：通话期间把麦克风整条链路让给豆包客户端，
+     * 停朗读、停连聊、停待机唤醒监听；挂断后按原设置恢复唤醒监听。
+     */
+    fun setDuplexAudioActive(active: Boolean) {
+        duplexAudioActive = active
+        if (active) {
+            TtsPlayer.stop()
+            stopContinuous()
+            wakeSession?.stop()
+            wakeSession = null
+        } else {
+            syncWakeEngine()
+        }
+    }
+
+    /**
      * 唤醒监听状态机：灵动模式前台 + 开关开 + 有 ASR Key + 有麦克风权限 + 不在连聊 + 不在按住说话 → 开引擎；
      * 其余一律关。与连续对话共用 ContinuousConversation，但一台设备同一时刻只允许一个采集会话。
      */
@@ -1257,6 +1275,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             cur.asrKey.isNotBlank() &&
             SpeechInput.hasRecordPermission(appContext) &&
             !_isContinuous.value &&
+            !duplexAudioActive &&
             activeRecording == null
         if (shouldRun && wakeSession == null) {
             val session = ContinuousConversation(
