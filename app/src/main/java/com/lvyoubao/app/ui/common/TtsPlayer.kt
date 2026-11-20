@@ -262,7 +262,13 @@ object TtsPlayer {
         val s = sink ?: return playFileAwait(file, gen)
         // 解码和阻塞写入都不能占主线程（AudioTrack 缓冲满时 write 会等）
         return withContext(Dispatchers.IO) {
-            val clip = decodeMp3File(file) ?: return@withContext playFileAwait(file, gen)
+            val clip = decodeMp3File(file)
+            if (clip == null) {
+                // 解码失败（极少见）：先把共用音轨里排队的音频放完再回退单文件播放，
+                // 否则两条音轨会同时出声、叠成一团
+                s.awaitDrained()
+                return@withContext playFileAwait(file, gen)
+            }
             val pcm = trimSilence(clip)
             if (pcm.isEmpty()) {
                 ttsLog("整段音频全是静音，已丢弃")
