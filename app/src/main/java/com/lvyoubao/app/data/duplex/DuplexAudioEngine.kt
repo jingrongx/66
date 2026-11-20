@@ -12,6 +12,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -19,12 +20,14 @@ import kotlin.math.abs
 
 /**
  * 全双工语音的本地音频引擎：
- * - 上行：AudioRecord 16kHz / mono / PCM16 小端，按 20ms（640 字节）分片回调；
+ * - 上行：AudioRecord → 统一降采样到 16kHz / mono / PCM16 小端，按 20ms（640 字节）分片回调；
  * - 下行：AudioTrack 24kHz / mono / PCM16 小端，边收边播；
  * - 插话：收到打断时 [flushPlayback] 立刻清空播放队列，实现"按住即停"。
  *
- * 与项目现有 SpeechInput（按键录音→云端识别）和 TtsPlayer（整段朗读）不同，
- * 这里必须持续流式收发，不能等一整段说完再说，所以单独实现。
+ * 采集兼容性：不同车机/机器人 BSP 对采样率与采集源的实现差异很大。
+ * 有的只认 48k（16k 直接返回满量程 -32768 的垃圾数据，识别只会出幻觉），
+ * 有的 voip 通道增益被打满。这里按「48k/voip → 48k/mic → 16k/mic → 16k/voip」
+ * 逐组降级：任一组连续 3 秒贴满量程就换下一组，保证总能拿到可用波形。
  */
 internal class DuplexAudioEngine(
     private val context: Context,
@@ -34,18 +37,26 @@ internal class DuplexAudioEngine(
 ) {
     companion object {
         private const val TAG = "DuplexAudio"
-        private const val CAPTURE_RATE = 16000
+        private const val TARGET_RATE = 16000
         private const val PLAYBACK_RATE = 24000
+        private const val FRAME_MS = 20
     }
+
+    /** 一组采集配置：采样率 × 采集源 */
+    private data class CaptureCfg(val rate: Int, val source: Int, val label: String)
+
+    private val ladder = listOf(
+        CaptureCfg(48000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "48k/voip"),
+        CaptureCfg(48000, MediaRecorder.AudioSource.MIC, "48k/mic"),
+        CaptureCfg(16000, MediaRecorder.AudioSource.MIC, "16k/mic"),
+        CaptureCfg(16000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "16k/voip"),
+    )
+    private var cfgIndex = 0
+    private var saturatedSeconds = 0
+    private var needNextCfg = false
 
     private val audioManager = context.getSystemService(AudioManager::class.java)
     private var prevAudioMode: Int? = null
-    // 采集源：默认 VOICE_COMMUNICATION（带回波消除）；若发现持续满量程削顶，
-    // 自动退到 MIC —— 部分车机/机器人 BSP 的 voip 通道增益被打满，采出来全是方波
-    @Volatile private var source = MediaRecorder.AudioSource.VOICE_COMMUNICATION
-    private var saturatedSeconds = 0
-    private var triedMicFallback = false
-    private var needMicFallback = false
     private var aec: AcousticEchoCanceler? = null
     private var recorder: AudioRecord? = null
     private var player: AudioTrack? = null
@@ -53,6 +64,32 @@ internal class DuplexAudioEngine(
     @Volatile private var capturing = false
     private val pcmQueue = ConcurrentLinkedQueue<ByteArray>()
     private val playLock = Any()
+
+    /** 48k/32k 采集降采样到 16k（factor 点均值，够 ASR 用，还能压掉部分高频噪声） */
+    private fun downsampleTo16k(src: ByteArray, factor: Int): ByteArray {
+        if (factor <= 1) return src
+        val samples = src.size / 2
+        val outSamples = samples / factor
+        val out = ByteArray(outSamples * 2)
+        var o = 0
+        var i = 0
+        while (i + factor <= samples) {
+            var sum = 0
+            var k = 0
+            while (k < factor) {
+                val idx = (i + k) * 2
+                val v = (src[idx].toInt() and 0xff) or (src[idx + 1].toInt() shl 8)
+                sum += v
+                k++
+            }
+            val v = (sum / factor).coerceIn(-32768, 32767)
+            out[o] = (v and 0xff).toByte()
+            out[o + 1] = ((v shr 8) and 0xff).toByte()
+            o += 2
+            i += factor
+        }
+        return out
+    }
 
     /** 开始采集。调用前需已拿到 RECORD_AUDIO 权限。 */
     fun startCapture(): Boolean {
@@ -62,34 +99,37 @@ internal class DuplexAudioEngine(
             prevAudioMode = audioManager?.mode
             runCatching { audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION }
         }
+        val cfg = ladder[cfgIndex.coerceIn(0, ladder.lastIndex)]
+        val frameBytes = cfg.rate * FRAME_MS / 1000 * 2
         val minBuf = AudioRecord.getMinBufferSize(
-            CAPTURE_RATE,
+            cfg.rate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
         if (minBuf <= 0) {
-            Log.e(TAG, "AudioRecord.getMinBufferSize 返回 $minBuf，设备不支持 16k 采集")
-            return false
+            Log.w(TAG, "配置 ${cfg.label} 不支持（minBuf=$minBuf），换下一组")
+            return advanceCfg()
         }
         val rec = try {
             AudioRecord(
-                source, // 默认 VOICE_COMMUNICATION（回波消除，全双工必备）
-                CAPTURE_RATE,
+                cfg.source,
+                cfg.rate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf * 2, DuplexProtocol.FRAME_BYTES * 4),
+                maxOf(minBuf * 2, frameBytes * 4),
             )
         } catch (e: SecurityException) {
             Log.e(TAG, "录音权限被拒绝", e)
             return false
         }
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord 初始化失败 state=${rec.state}")
+            Log.w(TAG, "配置 ${cfg.label} 初始化失败 state=${rec.state}，换下一组")
             rec.release()
-            return false
+            return advanceCfg()
         }
+        Log.i(TAG, "开始采集 ${cfg.label}")
         recorder = rec
-        // 显式打开 AEC（VOICE_COMMUNICATION 一般自带，切到 MIC 后必须自己开，否则会把自己的声音当成用户说话）
+        // 显式打开 AEC（VOICE_COMMUNICATION 一般自带；切到 MIC 后必须自己开，否则会把播报当成用户说话）
         if (AcousticEchoCanceler.isAvailable()) {
             aec = runCatching { AcousticEchoCanceler.create(rec.audioSessionId) }.getOrNull()
             runCatching { aec?.enabled = true }
@@ -105,7 +145,7 @@ internal class DuplexAudioEngine(
             return false
         }
         captureJob = scope.launch(Dispatchers.IO) {
-            val frame = ByteArray(DuplexProtocol.FRAME_BYTES)
+            val frame = ByteArray(frameBytes)
             var frames = 0
             var secPeak = 0
             while (isActive && capturing) {
@@ -117,47 +157,62 @@ internal class DuplexAudioEngine(
                     filled += n
                 }
                 if (filled == frame.size) {
-                    // 峰值估算输入音量（0..1），供 UI 声波用；避免逐样本开方
+                    val pcm16 = downsampleTo16k(frame, cfg.rate / TARGET_RATE)
                     var peak = 0
                     var i = 0
-                    while (i < frame.size) {
-                        val v = (frame[i].toInt() shl 8) or (frame[i + 1].toInt() and 0xff)
+                    while (i < pcm16.size) {
+                        val v = (pcm16[i].toInt() and 0xff) or (pcm16[i + 1].toInt() shl 8)
                         val a = abs(v)
                         if (a > peak) peak = a
                         i += 2
                     }
                     onLevel((peak / 32768f).coerceIn(0f, 1f))
-                    // 每秒打一次上行峰值：现场排查「没说话却一直出识别文字」时看麦克风底噪
                     if (peak > secPeak) secPeak = peak
                     frames++
                     if (frames % 50 == 0) {
-                        Log.i(TAG, "上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)}) source=$source")
-                        // 连续 3 秒贴满量程 = 采集饱和（波形已被削平，识别只会出幻觉文字）
+                        Log.i(TAG, "上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)}) ${cfg.label}")
+                        // 连续 3 秒贴满量程 = 波形已被削平，识别只会出幻觉文字 → 换下一组配置
                         if (secPeak >= 32000) saturatedSeconds++ else saturatedSeconds = 0
-                        if (!triedMicFallback && saturatedSeconds >= 3) {
-                            triedMicFallback = true
-                            needMicFallback = true
-                            Log.w(TAG, "上行持续削顶，切换到 MIC 采集源重试")
-                            capturing = false
+                        if (saturatedSeconds >= 3) {
+                            saturatedSeconds = 0
+                            if (cfgIndex < ladder.lastIndex) {
+                                needNextCfg = true
+                                Log.w(TAG, "上行持续削顶，${cfg.label} 换下一组采集配置")
+                                capturing = false
+                            }
                         }
                         secPeak = 0
                     }
-                    onPcmFrame(frame.copyOf())
+                    onPcmFrame(pcm16)
                 }
             }
-            Log.d(TAG, "采集循环结束")
-            if (needMicFallback) {
-                needMicFallback = false
-                runCatching { recorder?.stop() }
-                recorder?.release()
-                recorder = null
-                runCatching { aec?.release() }
-                aec = null
-                source = MediaRecorder.AudioSource.MIC
-                startCapture()
+            Log.d(TAG, "采集循环结束 ${cfg.label}")
+            if (needNextCfg) {
+                needNextCfg = false
+                releaseRecorder()
+                advanceCfg()
             }
         }
         return true
+    }
+
+    private fun releaseRecorder() {
+        runCatching { if (recorder?.state == AudioRecord.STATE_INITIALIZED) recorder?.stop() }
+        runCatching { aec?.release() }
+        aec = null
+        recorder?.release()
+        recorder = null
+    }
+
+    /** 换下一组采集配置并重启；已是最后一组返回 false */
+    private fun advanceCfg(): Boolean {
+        if (cfgIndex >= ladder.lastIndex) {
+            Log.e(TAG, "所有采集配置都不可用")
+            return false
+        }
+        cfgIndex++
+        releaseRecorder()
+        return startCapture()
     }
 
     /** 启动播放（24k）。在 session.created 后调用即可，先启动避免首包丢失。 */
@@ -198,7 +253,7 @@ internal class DuplexAudioEngine(
             while (isActive) {
                 val pcm = pcmQueue.poll()
                 if (pcm == null) {
-                    kotlinx.coroutines.delay(10)
+                    delay(10)
                     continue
                 }
                 var offset = 0
@@ -239,15 +294,7 @@ internal class DuplexAudioEngine(
         capturing = false
         captureJob?.cancel()
         captureJob = null
-        try {
-            if (recorder?.state == AudioRecord.STATE_INITIALIZED) recorder?.stop()
-        } catch (e: IllegalStateException) {
-            Log.w(TAG, "recorder.stop 异常", e)
-        }
-        runCatching { aec?.release() }
-        aec = null
-        recorder?.release()
-        recorder = null
+        releaseRecorder()
         synchronized(playLock) {
             pcmQueue.clear()
             try {
