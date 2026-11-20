@@ -274,22 +274,25 @@ object TtsPlayer {
                 ttsLog("整段音频全是静音，已丢弃")
                 return@withContext true
             }
+            // 段首段尾做几毫秒淡入淡出：句与句是两段独立合成的 PCM，直接首尾相接时波形在
+            // 接缝处可能是个陡台阶，放大出来就是一声"啪"——听感上被当成某个字破了。
+            applyEdgeFade(pcm, clip.channels, clip.sampleRate, fadeInMs = 4, fadeOutMs = 10)
             s.ensureTrack(clip.sampleRate, clip.channels)
             if (!s.formatMatches(clip.sampleRate, clip.channels)) {
-                // 轨道已经按首句的格式建好了，这一段的采样率/声道数却不一样：
-                // 硬写进去会被按错误的帧长解释，听感就是刺耳的破音。正常不会发生
-                // （Edge 固定 24kHz 单声道），真出现就先记清楚，便于定位。
-                ttsLog("段格式与音轨不一致：${clip.sampleRate}Hz ${clip.channels}ch，已按轨道格式写入")
+                // 声道数变了：上采样只按声道交错排布，声道对不上会彻底错位（刺耳破音）。
+                // 正常不会发生（Edge 固定单声道），真出现就先记清楚，便于定位。
+                ttsLog("段声道数与音轨不一致：${clip.channels}ch（轨道 ${s.channelCount}ch），已按轨道格式写入")
             }
             var off = 0
             while (off < pcm.size) {
                 if (gen != generation || !s.alive) return@withContext false
-                val w = s.writePcm(pcm, off, pcm.size - off)
+                val w = s.writePcm(pcm, off, pcm.size - off, clip.sampleRate)
                 if (w <= 0) return@withContext false
                 off += w
             }
             // 这一句写完：短句可能没攒到预滚量，兜底起播（否则要等下一句才出声）
             s.ensureStarted()
+            s.reportSegment("句")
             true
         }
     }
@@ -642,15 +645,26 @@ object TtsPlayer {
         private val onStarted: () -> Unit,
     ) {
         @Volatile private var track: AudioTrack? = null
-        private var sampleRate = 24_000
         private var channels = 1
         private var writtenBytes = 0L
         private var started = false
+
+        /** 轨道声道数（判断某一段能不能原样写进去） */
+        val channelCount: Int get() = channels
 
         @Volatile var alive = true
             private set
 
         private val writtenFrames: Long get() = writtenBytes / (2L * channels)
+
+        /** 上采样跨 buffer 的接续样本（每声道一份）：不接着上一块算，块边界就会出现台阶 */
+        private val lastSamples = IntArray(2)
+
+        /** 本段诊断累计：削波 / 突变次数，用来判断破音是"数据本身坏了"还是"播放链路坏了" */
+        private var segBytes = 0L
+        private var segClip = 0
+        private var segJump = 0
+        private var segMaxJump = 0
 
         /**
          * 起播前要攒够的 PCM：450ms。
@@ -659,44 +673,146 @@ object TtsPlayer {
          * 网络稍抖立刻欠载，听感就是某个字突然「破」了（用户反馈的破音就是这么来的）。
          * 450ms 是折中：足够盖住常见抖动，又不会让首句明显变慢。
          */
-        private val prerollBytes: Long get() = sampleRate * 2L * channels * 450 / 1000
+        private val prerollBytes: Long get() = OUT_RATE * 2L * channels * PREROLL_MS / 1000
 
+        /**
+         * 建轨：**固定用 48000Hz**（设备 native 输出率），源音频（Edge 固定 24kHz）在写入前
+         * 自己线性上采样。
+         *
+         * 为什么不再直接把 24kHz 交给 AudioTrack：那是让 AudioFlinger 的混音线程替我们重采样，
+         * 而这台 MTK 机（Android 8.1）的音频链路在「24kHz 播放 + 同时录音（唤醒词常驻）」
+         * 并发时，重采样 + 厂商音效（BesLoudness）会偶发处理出错，听感就是某个字劈开。
+         * 自己按整数倍（24k→48k 正好 2 倍）插值，交给系统的永远是它原生的 48kHz，
+         * 这一层不确定性就没了。
+         */
         fun ensureTrack(rate: Int, ch: Int) {
             if (!alive || track != null) return
-            sampleRate = if (rate > 0) rate else 24_000
             channels = if (ch > 0) ch else 1
             val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-            val minBuf = AudioTrack.getMinBufferSize(sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT)
-            // 缓冲 ≈4 秒：解码耗时、网络抖动都靠它吸收，写入端永远不会卡住播放头。
-            // 0.9.31 起是 96KB（≈2 秒），实测仍会在录音抢麦时出现瞬间欠载，这里加厚到 4 秒。
-            val bufSize = maxOf(minBuf * 4, 192_000)
+            val minBuf = AudioTrack.getMinBufferSize(OUT_RATE, chMask, AudioFormat.ENCODING_PCM_16BIT)
+            // 缓冲 ≈4 秒 @48kHz：解码耗时、合成空档、录音抢麦都靠它吸收
+            val bufSize = maxOf(minBuf * 4, 384_000)
             track = runCatching {
                 AudioTrack(
-                    AudioManager.STREAM_MUSIC, sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT,
+                    AudioManager.STREAM_MUSIC, OUT_RATE, chMask, AudioFormat.ENCODING_PCM_16BIT,
                     bufSize, AudioTrack.MODE_STREAM,
                 )
             }.getOrNull()
-            ttsLog("共用音轨就绪：${sampleRate}Hz ${channels}ch 缓冲 ${bufSize}B")
+            ttsLog("共用音轨就绪：${OUT_RATE}Hz ${channels}ch 缓冲 ${bufSize}B（源 ${rate}Hz → 线性上采样）")
         }
 
-        /** 这一段解码出来的格式跟已建的轨道一致吗（不一致会被按轨道格式解释，直接破音） */
+        /** 这一段能不能原样写进已建的轨道（声道数不一致会彻底错位，直接刺耳破音） */
         fun formatMatches(rate: Int, ch: Int): Boolean =
-            track == null || (rate == sampleRate && ch == channels)
+            track == null || ch == channels
 
-        fun writePcm(buf: java.nio.ByteBuffer, size: Int): Int {
+        fun writePcm(buf: java.nio.ByteBuffer, size: Int, srcRate: Int): Int {
             val t = track ?: return -1
             if (!alive) return -1
-            val w = runCatching { t.write(buf, size, AudioTrack.WRITE_BLOCKING) }.getOrDefault(-1)
-            if (w > 0) count(w)
-            return if (alive) w else -1
+            val frame = 2 * channels
+            val n = (size / frame) * frame // 帧对齐：奇数字节会让后面所有样本高低字节错位
+            if (n <= 0) return 0
+            val raw = ByteArray(n)
+            val pos = buf.position()
+            val lim = buf.limit()
+            runCatching {
+                buf.limit(minOf(lim, pos + n))
+                buf.get(raw, 0, n)
+            }
+            runCatching {
+                buf.limit(lim)
+                buf.position(pos)
+            }
+            return push(t, raw, 0, n, srcRate)
         }
 
-        fun writePcm(pcm: ByteArray, offset: Int, len: Int): Int {
+        fun writePcm(pcm: ByteArray, offset: Int, len: Int, srcRate: Int): Int {
             val t = track ?: return -1
             if (!alive) return -1
-            val w = runCatching { t.write(pcm, offset, len, AudioTrack.WRITE_BLOCKING) }.getOrDefault(-1)
-            if (w > 0) count(w)
-            return if (alive) w else -1
+            val frame = 2 * channels
+            val n = (len / frame) * frame
+            if (n <= 0) return 0
+            return push(t, pcm, offset, n, srcRate)
+        }
+
+        /** 上采样后整块写进音轨；返回消费掉的**源**字节数（调用方按它推进 offset） */
+        private fun push(t: AudioTrack, src: ByteArray, offset: Int, len: Int, srcRate: Int): Int {
+            val up = resample(src, offset, len, srcRate)
+            var off = 0
+            while (off < up.size) {
+                if (!alive) return -1
+                val w = runCatching {
+                    t.write(up, off, up.size - off, AudioTrack.WRITE_BLOCKING)
+                }.getOrDefault(-1)
+                if (w <= 0) return -1
+                off += w
+            }
+            count(up.size)
+            return len
+        }
+
+        /**
+         * 线性上采样到 [OUT_RATE]。24k→48k 是 2 倍：在「上一个样本 → 当前样本」之间插
+         * 1 个中点，等效延迟半个源样本（20µs，听不出来），换来的是波形连续、块边界无台阶。
+         * 非整数倍（罕见）就原样放行，交给系统重采样——那种情况至少不会因为我们的插值出错。
+         */
+        private fun resample(src: ByteArray, offset: Int, len: Int, srcRate: Int): ByteArray {
+            val frame = 2 * channels
+            val ratio = if (srcRate > 0) OUT_RATE / srcRate else 1
+            if (ratio <= 1 || ratio * srcRate != OUT_RATE) {
+                return if (offset == 0 && len == src.size) src else src.copyOfRange(offset, offset + len)
+            }
+            val srcFrames = len / frame
+            val dst = ByteArray(srcFrames * ratio * frame)
+            var di = 0
+            for (f in 0 until srcFrames) {
+                val base = offset + f * frame
+                var jump = 0
+                for (k in 1..ratio) {
+                    for (c in 0 until channels) {
+                        val x = readS16(src, base + c * 2)
+                        val p = lastSamples[c]
+                        val v = p + ((x - p) * k) / ratio
+                        writeS16(dst, di, v)
+                        di += 2
+                        if (c == 0) {
+                            if (v >= CLIP_LEVEL || v <= -CLIP_LEVEL) segClip++
+                            val d = if (v >= p) v - p else p - v
+                            if (d > jump) jump = d
+                        }
+                    }
+                }
+                for (c in 0 until channels) lastSamples[c] = readS16(src, base + c * 2)
+                if (jump > JUMP_LEVEL) {
+                    segJump++
+                    if (jump > segMaxJump) segMaxJump = jump
+                }
+            }
+            segBytes += dst.size
+            return dst
+        }
+
+        private fun readS16(a: ByteArray, i: Int): Int =
+            ((a[i + 1].toInt() shl 8) or (a[i].toInt() and 0xFF)).toShort().toInt()
+
+        private fun writeS16(a: ByteArray, i: Int, v: Int) {
+            val s = if (v > 32767) 32767 else if (v < -32768) -32768 else v
+            a[i] = (s and 0xFF).toByte()
+            a[i + 1] = ((s shr 8) and 0xFF).toByte()
+        }
+
+        /**
+         * 打一行本段统计再清零。
+         * 削波（贴顶的样本）= 源音频本身爆了；跳变（相邻样本差 > 12000 ≈ 满量程 37%）
+         * = 波形断裂。两项都接近 0 却仍听到破音，就说明问题不在数据，在播放链路/音量链。
+         */
+        fun reportSegment(tag: String) {
+            if (segBytes <= 0) return
+            val ms = segBytes * 1000 / (2L * channels * OUT_RATE)
+            ttsLog("${tag}段统计：${ms}ms 削波=${segClip} 跳变=${segJump}(峰${segMaxJump})")
+            segBytes = 0
+            segClip = 0
+            segJump = 0
+            segMaxJump = 0
         }
 
         private fun count(bytes: Int) {
@@ -717,7 +833,7 @@ object TtsPlayer {
             val t = track ?: return
             started = true
             // 记下起播时的预滚量：太小 = 后面容易欠载破音，太大 = 首句变慢，调参全靠这行
-            val prerollMs = (writtenBytes * 1000 / (2L * channels * sampleRate)).toInt()
+            val prerollMs = (writtenBytes * 1000 / (2L * channels * OUT_RATE)).toInt()
             ttsLog("共用音轨起播：预滚 ${prerollMs}ms")
             runCatching { t.play() }
             onStarted()
@@ -752,6 +868,16 @@ object TtsPlayer {
             runCatching { t?.pause() }
             runCatching { t?.flush() }
             runCatching { t?.release() }
+        }
+
+        companion object {
+            /** 设备 native 输出采样率：AudioFlinger 混音线程固定 48kHz，喂它 48k 就不再重采样 */
+            private const val OUT_RATE = 48_000
+            private const val PREROLL_MS = 450L
+            /** 贴顶（≈-0.3dBFS）算削波 */
+            private const val CLIP_LEVEL = 32_000
+            /** 相邻样本差超过满量程 37% 算一次波形断裂 */
+            private const val JUMP_LEVEL = 12_000
         }
     }
 
@@ -826,14 +952,17 @@ object TtsPlayer {
 
     /**
      * 掐掉一段音频首尾的静音。Edge 每段合成都带一截首尾静音，短句一句一段地拼起来时，
-     * 这些静音就是听感里那些莫名其妙的停顿。首留 60ms（别削掉字头）、尾留 150ms（自然收尾）。
+     * 这些静音就是听感里那些莫名其妙的停顿。首留 100ms（别削掉字头）、尾留 240ms（自然收尾）。
+     *
+     * 阈值从 500(-36dBFS) 降到 260(-42dBFS)：句首的 s/sh/x/zh 这类弱辅音经常就在 -38~-40dBFS，
+     * 老阈值会把它们当底噪削掉，"这是一个好东西"的"这"就成了半个音——用户听成"破音"。
      */
     private fun trimSilence(clip: PcmClip): ByteArray {
         val pcm = clip.data
         val frameBytes = 2 * clip.channels
         val frames = pcm.size / frameBytes
         if (frames < 200) return pcm
-        val threshold = 500 // ≈ -36dBFS：比这还轻的就是底噪
+        val threshold = 260 // ≈ -42dBFS：比这还轻的才是底噪
         fun ampAt(i: Int): Int {
             var m = 0
             val base = i * frameBytes
@@ -851,11 +980,41 @@ object TtsPlayer {
         if (first >= frames) return ByteArray(0) // 整段静音（合成出错），丢掉别占时间
         var last = frames - 1
         while (last > first && ampAt(last) < threshold) last--
-        val lead = clip.sampleRate * 60 / 1000
-        val tail = clip.sampleRate * 150 / 1000
+        val lead = clip.sampleRate * 100 / 1000
+        val tail = clip.sampleRate * 240 / 1000
         val start = maxOf(0, first - lead)
         val end = minOf(frames, last + tail)
         return pcm.copyOfRange(start * frameBytes, end * frameBytes)
+    }
+
+    /**
+     * 段首段尾做几毫秒线性淡入淡出。句与句是两次独立合成的 PCM，直接首尾相接时，
+     * 接缝两端的波形可能相差很大（一个高电平直接跳到另一个高电平），传进扬声器就是一声
+     * "啪"，很容易被听成某个字破了。淡入 4ms / 淡出 10ms 在听感上完全无感，但接缝处
+     * 一定从 0 起、到 0 落，波形不会再跳。原地改 [pcm]。
+     */
+    private fun applyEdgeFade(pcm: ByteArray, channels: Int, sampleRate: Int, fadeInMs: Int, fadeOutMs: Int) {
+        val frame = 2 * channels
+        val total = pcm.size / frame
+        if (total < 16) return
+        fun applyFade(from: Int, count: Int, gainAt: (Int) -> Int) {
+            if (count <= 0) return
+            for (k in 0 until count) {
+                val base = (from + k) * frame
+                val g = gainAt(k)
+                for (c in 0 until channels) {
+                    val i = base + c * 2
+                    val v = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toInt()
+                    val s = (v.toLong() * g / 1000).toInt()
+                    pcm[i] = (s and 0xFF).toByte()
+                    pcm[i + 1] = ((s shr 8) and 0xFF).toByte()
+                }
+            }
+        }
+        val inFrames = minOf(total, sampleRate * fadeInMs / 1000)
+        applyFade(0, inFrames) { k -> ((k + 1).toLong() * 1000 / inFrames).toInt() }
+        val outFrames = minOf(total, sampleRate * fadeOutMs / 1000)
+        applyFade(total - outFrames, outFrames) { k -> ((outFrames - k).toLong() * 1000 / outFrames).toInt() }
     }
 
     /**
@@ -982,7 +1141,7 @@ object TtsPlayer {
                                 out.limit(info.offset + info.size)
                                 // 有流水线会话：PCM 续写进共用音轨，段间不留缝
                                 val w = if (sink != null) {
-                                    sink.writePcm(out, info.size)
+                                    sink.writePcm(out, info.size, sampleRate)
                                 } else {
                                     t!!.write(out, info.size, AudioTrack.WRITE_BLOCKING)
                                 }
@@ -1016,7 +1175,10 @@ object TtsPlayer {
                     if (eosQueued && drained) break
                 }
                 // 流式段收尾：短句可能一直攒不到预滚量，强制起播，别让这一句憋着不出声
-                if (sink != null) sink.ensureStarted()
+                if (sink != null) {
+                    sink.ensureStarted()
+                    sink.reportSegment("流式")
+                }
                 // 等播完：播放头追上写入量（部分 ROM 的回调不可靠，与 playFileAwait 同样用轮询）
                 // 共用音轨时不在这里等——整段回答的收尾由 awaitPlaybackDone 统一等
                 val t = track
