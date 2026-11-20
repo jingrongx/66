@@ -116,7 +116,6 @@ fun SparkModeScreen(
     val messages by vm.messages.collectAsState()
     val statusHint by vm.statusHint.collectAsState()
     val pendingPhotos by vm.pendingPhotos.collectAsState()
-    val isContinuous by vm.isContinuous.collectAsState()
     val timerLeft by vm.timerRemainingSec.collectAsState()
     val alarmActive by vm.alarmActive.collectAsState()
     val alarmText by vm.alarmText.collectAsState()
@@ -126,7 +125,7 @@ fun SparkModeScreen(
 
     // ---------- 豆包全双工实时通话（端到端 S2S，灵动模式顶栏 📞 直达） ----------
     // 灵动模式没有大字模式那排「通话」按钮，这里给一条独立入口：
-    // 通话期间麦克风整条让给豆包（停朗读/连聊/待机唤醒），挂断后恢复。
+    // 通话期间麦克风整条让给豆包（停朗读/待机唤醒），挂断后恢复。
     val settings by vm.settings.collectAsState()
     var showDuplexCall by remember { mutableStateOf(false) }
     // 通话进行中但界面已收起（回萌眼待机）：**通话不挂断**，人再开口或点电话键就重新展开
@@ -534,7 +533,6 @@ fun SparkModeScreen(
                             Text(
                                 text = when {
                                     showDuplexCall -> "通话中 · 直接说话就行"
-                                    isContinuous -> "我在听，直接说"
                                     isRecording -> "松手发送"
                                     else -> "说「小源小源」，或按住下面说话"
                                 },
@@ -792,7 +790,6 @@ fun SparkModeScreen(
                             Text(
                                 text = when {
                                     isRecording -> "松手发送 (${recordTick}s)"
-                                    isContinuous -> "说吧，我在听"
                                     else -> "按住说话"
                                 },
                                 fontSize = (11 * scale).sp,

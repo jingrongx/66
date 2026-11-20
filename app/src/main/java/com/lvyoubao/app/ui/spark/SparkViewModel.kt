@@ -358,22 +358,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     if (clean.isNotBlank()) {
                         // 按住说话时若缓冲里有照片，随这个问题一起发出去
                         val pending = _pendingPhotos.value
-                        appendMessage(SparkMessage("user", clean, pending.map { it.bitmap }))
                         _pendingPhotos.value = emptyList()
-                        _showEyes.value = false // 提问完成，自动切换为会话流展示
-                        // 电量/音量走本地快路（读系统，零延迟零联网），其余再过机器人意图 / 聊天
-                        if (matchBatteryQuestion(clean)) {
-                            answerBattery(context)
-                            return@launch
-                        }
-                        matchVolumeFast(clean)?.let { action ->
-                            answerVolume(context, action)
-                            return@launch
-                        }
-                        // 语音助手指令优先（机器人控制 + 计时/记事/查记忆等，AI 统一判断），否则照常聊天
-                        if (!handleAssistantIntent(context, clean)) {
-                            sendAiRequest(context, clean, pending.map { it.dataUrl })
-                        }
+                        // 与唤醒单次同一条链路（本地快路 → 本机意图 → 聊天）
+                        answerVoiceQuestion(clean, pending)
                     } else {
                         _eyeState.value = SparkEyeState.IDLE
                         _statusHint.value = "没听清楚，请再试一次"
@@ -1166,79 +1153,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
-    // ---------- 连续对话（免按住、语音打断） ----------
-
-    /**
-     * 连续对话开关：开=麦克风常听（说完自动断句→回答→播完接着听，播报中开口即打断）；再点一次关。
-     * 灵动模式是语音优先设备，这里用 applicationContext 全程驱动，界面只是状态展示。
-     */
-    fun startContinuous(context: Context, onRequestRecordPermission: () -> Unit) {
-        if (_isContinuous.value) {
-            stopContinuous()
-            _statusHint.value = "连续对话已关"
-            return
-        }
-        if (!SpeechInput.hasRecordPermission(context)) {
-            onRequestRecordPermission()
-            return
-        }
-        // 唤醒监听若在跑必须先彻底停掉再开连聊采集：Android 10+ 三方应用不允许并发录音，
-        // 后开的 AudioRecord 会被静音——v0.8.94 喊「小源小源」后连聊收不到声音（问啥都没反应、
-        // 也无法再唤醒）的根因。手动点「连聊」按钮时唤醒监听同样在跑，两路都要先停
-        wakeSession?.stop()
-        wakeSession = null
-        stopAlarm() // 用户主动开连聊，铃响也先安静
-        idleToEyesJob?.cancel()
-        TtsPlayer.stop()
-        _showEyes.value = true
-        _eyeState.value = SparkEyeState.LISTENING
-        _statusHint.value = "连续对话：直接说就行"
-        val session = ContinuousConversation(
-            appContext,
-            config = ContinuousConversation.Config(
-                bargeInSensitivity = settings.value.voiceBargeIn,
-                idleTimeoutMs = 180_000L, // 空闲 3 分钟才休息（老人聊会儿歇会儿很正常），退出前会先告辞
-            ),
-            listener = object : ContinuousConversation.Listener {
-                override fun onUtterance(wav: java.io.File) {
-                    handleContinuousUtterance(wav)
-                }
-
-                override fun onBargeIn() {
-                    // 播报中真人开口：掐 TTS、取消在途回答，回到聆听（音频线程触发，切主协程）
-                    viewModelScope.launch {
-                        aiRequestJob?.cancel()
-                        _isStreaming.value = false
-                        TtsPlayer.stop()
-                        _eyeState.value = SparkEyeState.LISTENING
-                        _statusHint.value = "听你说…"
-                    }
-                }
-
-                override fun onAutoTimeout() {
-                    viewModelScope.launch {
-                        stopContinuousInternal()
-                        _statusHint.value = "连续对话休息了，点「连聊」或喊「小源小源」唤醒"
-                        speakHint(appContext, "我先休息啦，点连聊再叫我")
-                    }
-                }
-
-                override fun onError(message: String) {
-                    viewModelScope.launch {
-                        stopContinuousInternal()
-                        _statusHint.value = message
-                        speakHint(appContext, message)
-                    }
-                }
-            },
-        )
-        // start 改后台重试（音频策略交接期 startRecording 会不生效）；若最终失败由 onError 清理
-        session.start()
-        continuous = session
-        _isContinuous.value = true
-        speakHint(context, "连续对话模式，直接说就行")
-        syncWakeEngine() // 连聊开着时待机唤醒监听让路（一台设备同一时刻只有一个 AudioRecord 采集）
-    }
+    // ---------- 连续对话：已并入「按住说话 / 唤醒单次」同一条链路（v0.9.16 起不再有独立「连聊」模式） ----------
 
     fun stopContinuous() {
         stopContinuousInternal()
@@ -1253,7 +1168,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         syncWakeEngine()
     }
 
-    // ---------- 唤醒词（待机时喊「小源小源」直接进连续对话） ----------
+    // ---------- 唤醒词（待机时喊「小源小源」→ 单次聆听一句话，与按住说话同一逻辑） ----------
 
     /** 灵动模式进入前台时调用：待机唤醒监听随页面开关 */
     fun onSparkActive() {
@@ -1391,7 +1306,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
             if (ask.length >= 2) {
                 // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
-                answerOneShot(ask)
+                answerVoiceQuestion(ask)
             } else {
                 // 只喊了唤醒词：开一轮单次聆听，说完（约 1 秒静音）就收，下次还要喊唤醒词
                 startWakeOneShot()
@@ -1436,22 +1351,24 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         return if (hit) t.trim('，', ',', '。', '.', '！', '!', '、', ' ', '　') else null
     }
 
-    /** 一句话走完整条问答链（唤醒单次交互用）：本地快路 → 机器意图 → AI */
-    private suspend fun answerOneShot(question: String) {
-        appendMessage(SparkMessage("user", question))
-        _showEyes.value = false
+    /**
+     * 一句话走完整条问答链：**按住说话**与**唤醒后的单次聆听**共用这一个入口（同一个逻辑）。
+     * 顺序：本地快路（电量 / 音量）→ 本机意图（机器人、计时、记事、记忆查找）→ 聊天。
+     */
+    private suspend fun answerVoiceQuestion(clean: String, photos: List<PendingPhoto> = emptyList()) {
+        appendMessage(SparkMessage(role = "user", text = clean, photos = photos.map { it.bitmap }))
+        _showEyes.value = false // 提问完成，自动切到会话流展示
         _eyeState.value = SparkEyeState.THINKING
-        if (matchBatteryQuestion(question)) {
+        if (matchBatteryQuestion(clean)) {
             answerBattery(appContext)
             return
         }
-        val vol = matchVolumeFast(question)
-        if (vol != null) {
-            answerVolume(appContext, vol)
+        matchVolumeFast(clean)?.let { action ->
+            answerVolume(appContext, action)
             return
         }
-        if (!handleAssistantIntent(appContext, question)) {
-            sendAiRequest(appContext, question, emptyList())
+        if (!handleAssistantIntent(appContext, clean)) {
+            sendAiRequest(appContext, clean, photos.map { it.dataUrl })
         }
     }
 
@@ -1531,7 +1448,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     _eyeState.value = SparkEyeState.IDLE
                     _statusHint.value = "没听清，再喊一次「小源小源」"
                 } else {
-                    answerOneShot(clean)
+                    answerVoiceQuestion(clean)
                 }
             },
             onFailure = { err ->
@@ -1548,77 +1465,6 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 与按住说话的区别：空结果/失败不朗读——TTS 会回灌麦克风形成正反馈，只给状态条静默续听；
      * 连续 ≥2 次失败才出声提醒，≥4 次自动退出（省电+别折磨用户）。
      */
-    private fun handleContinuousUtterance(wav: java.io.File) = viewModelScope.launch {
-        val cur = repo.settings.firstOrNull() ?: settings.value
-        val asrKey = cur.asrKey.trim()
-        if (asrKey.isBlank()) {
-            appendMessage(SparkMessage("assistant", "请先在「设置」中配置语音识别 Key，连续对话才能听懂你。"))
-            speakHint(appContext, "请先在设置中配置语音识别 Key")
-            stopContinuousInternal()
-            return@launch
-        }
-        continuous?.setBusy(true)
-        // 1 秒冷却：静音/噪声段间隔着触发切段时别连着刷 ASR（真说话的切段天然间隔 >800ms，不受影响）
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastConvUploadAt < 1_000) {
-            wav.delete()
-            continuous?.setBusy(false)
-            return@launch
-        }
-        lastConvUploadAt = now
-        val result = withContext(Dispatchers.IO) { SpeechInput.transcribeFile(wav, asrKey, cur.dialectMode) }
-        wav.delete()
-        result.fold(
-            onSuccess = { spoken ->
-                consecutiveAsrFailures = 0
-                val clean = HotwordCorrector.correct(spoken.trim())
-                if (clean.isBlank()) {
-                    _statusHint.value = "没听清，再说一次"
-                    _eyeState.value = SparkEyeState.LISTENING
-                    continuous?.setBusy(false)
-                } else {
-                    appendMessage(SparkMessage("user", clean))
-                    _showEyes.value = false
-                    _eyeState.value = SparkEyeState.THINKING
-                    if (matchBatteryQuestion(clean)) {
-                        answerBattery(appContext)
-                        return@launch // answerBattery 会朗读，TTS 收集器恢复计时
-                    }
-                    matchVolumeFast(clean)?.let { action ->
-                        answerVolume(appContext, action)
-                        return@launch
-                    }
-                    if (!handleAssistantIntent(appContext, clean)) {
-                        sendAiRequest(appContext, clean, emptyList())
-                    }
-                }
-            },
-            onFailure = { err ->
-                // 「没听清」类（静音/噪声段被当成话传上去，云识别返回空）：静默续听——
-                // 朗读提示会回灌麦克风自激，还会反复念叨（v0.8.93「没听清楚」连说三次后退出连聊的根因）
-                val failure = (err as? SpeechInput.SpeechException)?.failure
-                if (failure == SpeechInput.SpeechFailure.NOT_HEARD) {
-                    _statusHint.value = "没听清，再说一次"
-                    _eyeState.value = SparkEyeState.LISTENING
-                    continuous?.setBusy(false)
-                    return@launch
-                }
-                // 真失败（网络/服务/配置）才计数：≥2 次出声提醒、≥4 次退出
-                consecutiveAsrFailures++
-                _eyeState.value = SparkEyeState.LISTENING
-                if (consecutiveAsrFailures >= 2) {
-                    val spoken = SpeechInput.spokenHint(err)
-                    _statusHint.value = spoken
-                    speakHint(appContext, spoken)
-                    if (consecutiveAsrFailures >= 4) stopContinuousInternal()
-                } else {
-                    _statusHint.value = err.message ?: "没听清"
-                }
-                continuous?.setBusy(false)
-            },
-        )
-    }
-
     override fun onCleared() {
         super.onCleared()
         sparkActive = false
