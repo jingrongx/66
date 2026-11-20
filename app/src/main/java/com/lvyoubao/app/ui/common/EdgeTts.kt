@@ -6,6 +6,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.OkHttpClient
@@ -140,6 +141,30 @@ object EdgeTts {
         }
         if (result != null) lastFailure = null
         return result
+    }
+
+    /**
+     * 预热到微软朗读服务的连接（DNS + TCP + TLS）。
+     * 唤醒命中那一刻调用：用户还在说问题，握手已经在后台跑完；等首句文本出来时
+     * WSS 握手直接复用连接池里的现成连接（实测首帧慢 0.6~0.9 秒主要就慢在这次握手）。
+     * 失败无所谓，正式合成时照旧新建连接。
+     */
+    fun prewarm() {
+        thread(isDaemon = true, name = "tts-prewarm") {
+            runCatching {
+                val req = Request.Builder()
+                    .url("https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1")
+                    .header("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
+                    .header(
+                        "User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                            "Chrome/143.0.0.0 Safari/537.36 Edg/143.0.3650.75",
+                    )
+                    .get()
+                    .build()
+                client.newCall(req).execute().close()
+            }
+        }
     }
 
     /**

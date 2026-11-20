@@ -35,10 +35,14 @@ class AiClient(private val settings: AiSettings) {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS)
-        .build()
+    /**
+     * v0.9.22：HTTP 客户端改成**进程级共享**。
+     * 以前每个 AiClient 自带一个 OkHttpClient，而每次问答都 new 一个 AiClient——
+     * 连接池跟着一起新建，等于每次提问都要重走 DNS + TCP + TLS 握手（这台设备上 200~500ms，
+     * 网络差时更久），而且 HTTP/2 会话完全无法复用。语音问答对这个特别敏感：
+     * 用户说完话到听见回答之间，这段握手是纯浪费。
+     */
+    private val client: OkHttpClient get() = shared
 
     private val preset = presetById(settings.presetId)
     private val isDeepSeek get() = preset.id == "deepseek"
@@ -927,6 +931,32 @@ class AiClient(private val settings: AiSettings) {
     }
 
     companion object {
+        /** 全局共享客户端：连接池 + HTTP/2 会话常驻，问答之间不再重复握手 */
+        private val shared: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(180, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+        }
+
+        /**
+         * 预热到模型服务的连接（DNS/TCP/TLS）：唤醒命中那一刻就调用，
+         * 用户还在说问题，握手已经在后台做完，等 ASR 回来发请求时直接复用。
+         */
+        fun prewarm(settings: AiSettings) {
+            val base = settings.baseUrl.trimEnd('/')
+            if (base.isBlank()) return
+            runCatching {
+                kotlin.concurrent.thread(isDaemon = true, name = "ai-prewarm") {
+                    runCatching {
+                        val req = Request.Builder().url(base).head().build()
+                        shared.newCall(req).execute().close()
+                    }
+                }
+            }
+        }
+
         /** answer 被清洗成空时的诚实提示：绝不把空卡片摆给用户（也是自动重试的触发标记） */
         internal val DEGENERATE_ANSWER = "这句我没答上来，请再问一次或换个问法。"
 

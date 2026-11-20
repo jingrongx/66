@@ -23,6 +23,7 @@ import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.RobotIntent
 import com.lvyoubao.app.data.WeatherClient
 import com.lvyoubao.app.ui.common.ContinuousConversation
+import com.lvyoubao.app.ui.common.EdgeTts
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import kotlinx.coroutines.CancellationException
@@ -126,6 +127,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     // 待机监听里「这次开口」的时刻：用来量化唤醒链路每一段耗时（判活 → 转写 → 命中）
     @Volatile
     private var wakeSpeechStartedAt = 0L
+    // 唤醒命中时刻：用来量「从喊中到听见第一声」的总延迟
+    @Volatile
+    private var wakeHitAt = 0L
     // 流式播报进行中：句与句之间的 TtsPlayer「Idle」不算播完，别把眼睛提前顶出来
     @Volatile
     private var ttsStreaming = false
@@ -1046,6 +1050,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         aiRequestJob?.cancel()
         // 先占一条 assistant 消息，后续流式/结果/出错都更新它
         appendMessage(SparkMessage("assistant", ""))
+        val tEnter = SystemClock.elapsedRealtime()
         val requestJob = viewModelScope.launch(Dispatchers.IO) {
             val curSettings = repo.settings.firstOrNull() ?: AiSettings()
             if (curSettings.apiKey.isBlank()) {
@@ -1057,12 +1062,20 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 return@launch
             }
 
-            // 位置：读缓存快照；没有（无 GPS 设备首次/过期）就快速要一次（含 IP 定位兜底，城市级联网反查）
-            // 天气类问题：主动拉实时天气注入——灵动模式聊天不带工具/搜索，不注入模型只能瞎编或答「查不了」
+            // 位置：读缓存快照。**只有问天气/附近这类真需要位置的问题**才主动要一次，
+            // 其余问题直接放行——老逻辑是「缓存没有就等 2.5 秒定位」，这台设备没有 GPS，
+            // 等于每句话都先白等 2.5 秒才开始问模型，这才是「回应特别慢」的大头。
             val wantsWeather = listOf("天气", "气温", "温度", "下雨", "下雪", "刮风", "风力", "湿度", "穿什么", "热不热", "冷不冷", "带伞", "防晒")
                 .any { userText.contains(it) }
-            val place = LocationContext.current(context)
-                ?: runCatching { LocationContext.fresh(context, timeoutMs = 2_500) }.getOrNull()
+            val wantsPlace = wantsWeather ||
+                listOf("附近", "周边", "在哪", "哪儿", "多远", "怎么走", "导航", "位置", "这是哪").any { userText.contains(it) }
+            val cachedPlace = LocationContext.current(context)
+            val place = cachedPlace
+                ?: if (wantsPlace) {
+                    runCatching { LocationContext.fresh(context, timeoutMs = 1_200) }.getOrNull()
+                } else {
+                    null
+                }
             val weatherLine = if (wantsWeather && place != null) {
                 runCatching { WeatherClient.current(place.lon, place.lat) }.getOrNull()
             } else {
@@ -1101,16 +1114,26 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             val speechBuffer = StringBuilder()
             var spokenUpTo = 0
             _isStreaming.value = true
+            val tSend = SystemClock.elapsedRealtime()
 
             // 流式播报：拿到的字按句子切开，一句一句送合成、顺序播，不再等全文再开口。
             // 旧逻辑要等 onSuccess 才 TtsPlayer.speak(全文)，长回答要干等好几秒。
             ttsStreaming = true
             val speechChannel = Channel<String>(Channel.UNLIMITED)
+            var spokeAny = false
             val speaker = launch {
                 try {
                     for (piece in speechChannel) {
                         if (piece.isBlank()) continue
                         TtsPlayer.speak(context, piece)
+                        if (!spokeAny) {
+                            spokeAny = true
+                            val hitAt = wakeHitAt
+                            if (hitAt > 0) {
+                                LogStore.log("ai", "首句送播：距唤醒 ${SystemClock.elapsedRealtime() - hitAt}ms")
+                                wakeHitAt = 0L
+                            }
+                        }
                         // 等这一句播完再接下一句（TtsPlayer 是单实例，不能并发）。
                         // 带上限兜底：万一播放器状态卡在 Speaking（个别 ROM 播完不回调），
                         // 到点就往下走，下一句 speak() 的 stop() 会把卡住的那条流水线顶掉，
@@ -1132,6 +1155,13 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 thinking = false,
                 searchEnabled = false,
                 onAnswer = { chunk ->
+                    if (speechBuffer.isEmpty() && chunk.isNotBlank()) {
+                        LogStore.log(
+                            "ai",
+                            "首字 ${SystemClock.elapsedRealtime() - tSend}ms" +
+                                "（进流程到发请求 ${tSend - tEnter}ms，含位置/情境）",
+                        )
+                    }
                     speechBuffer.append(chunk)
                     SparkChatStore.updateLastAssistant(speechBuffer.toString())
                     if (_eyeState.value != SparkEyeState.SPEAKING) {
@@ -1167,6 +1197,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     if (tail.isNotEmpty()) speechChannel.trySend(tail)
                     speechChannel.close()
                     speaker.join()
+                    LogStore.log(
+                        "ai",
+                        "全文完成 总耗时 ${SystemClock.elapsedRealtime() - tEnter}ms（${finalAnswer.length} 字）",
+                    )
                     ttsStreaming = false
                     if (_eyeState.value == SparkEyeState.SPEAKING) finishSpeaking()
                 },
@@ -1462,6 +1496,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             _showEyes.value = true
             TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
             SparkChime.play(appContext) // 本地合成提示音，0 网络，确认「听见了」
+            wakeHitAt = SystemClock.elapsedRealtime()
+            // 握手预热：用户还在说问题（2~5 秒），TTS 与 AI 两条链路的 DNS/TCP/TLS
+            // 都在后台跑完，等答案出来直接复用连接——这段以前是纯等待，占总延迟 1 秒以上
+            runCatching { AiClient.prewarm(settings.value) }
+            runCatching { EdgeTts.prewarm() }
             _eyeState.value = SparkEyeState.LISTENING
             if (ask.length >= 2) {
                 // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
@@ -1564,7 +1603,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         val session = ContinuousConversation(
             appContext,
             config = ContinuousConversation.Config(
-                silenceEndMs = 850L, // 允许句中停顿，但别让人干等
+                silenceEndMs = 650L, // 允许句中停顿，但别让人干等（0.85 秒那版每句都白等 200ms）
                 minSpeechMs = 300L,
                 bargeInSensitivity = 0,
                 idleTimeoutMs = 15_000L,
@@ -1618,10 +1657,13 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return@launch
         }
         _statusHint.value = "正在识别…"
+        val tAsr = SystemClock.elapsedRealtime()
         val result = withContext(Dispatchers.IO) {
             SpeechInput.transcribeFile(wav, asrKey, cur.dialectMode)
         }
+        val asrMs = SystemClock.elapsedRealtime() - tAsr
         wav.delete()
+        LogStore.log("wake", "单次聆听：转写 ${asrMs}ms，文本「${result.getOrNull()?.trim().orEmpty()}」")
         result.fold(
             onSuccess = { spoken ->
                 val clean = HotwordCorrector.correct(spoken.trim())
