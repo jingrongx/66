@@ -76,6 +76,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         /** 同一时刻只有一个人可能说「小源小源」：这个窗口内按 SNR 挑更近的那段 */
         const val WAKE_PICK_WINDOW_MS = 1_500L
 
+        /**
+         * 待机片段短于这个长度就不发云端：叹气、咳嗽、「嗯」「啊」都在 200~500ms，
+         * 而「小源小源」四音节正常语速 700~1000ms，取 550ms 不会误伤真正的唤醒。
+         */
+        const val MIN_WAKE_SEG_MS = 550L
+
         /** 首句最少几个字就允许在逗号处切：够成一口气，又不至于让人干等 */
         const val FIRST_SENTENCE_CHARS = 10
 
@@ -173,6 +179,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     // 常常把真正那句「小源小源」扔掉；改成排队串行，宁可多跑一次转写也不丢用户的话。
     private var pendingWakeWav: java.io.File? = null
     private var wakeDrainJob: Job? = null
+
+    // 待机空转惩罚：直播/旁人聊天能过电平门槛，云端却转写为空（实测 30 秒 13 次）。
+    // 连续两次空转就把待机档的起振门槛抬 6dB，静音 90 秒；真有人对机器说话立刻恢复。
+    private var emptyWakeStreak = 0
+    private var wakeOnsetBoostDb = 0f
+    private var wakeOnsetBoostUntil = 0L
 
     // 主动提醒（电量低/充满）：键控一次（同档位只提醒一次），空闲才说，静默安睡不说
     private var lastLowKey: String? = null
@@ -1513,6 +1525,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
             session.start() // 后台重试；最终失败由 onError 清理并提示
             wakeSession = session
+            // 空转惩罚还在一半时重建了会话（切前后台/灵敏度改动），把门槛接着抬，别白罚
+            val boostLeft = wakeOnsetBoostUntil - SystemClock.elapsedRealtime()
+            if (wakeOnsetBoostDb > 0f && boostLeft > 0) {
+                session.boostOnset(wakeOnsetBoostDb, boostLeft)
+            }
             LogStore.log(
                 "wake",
                 "待机监听启动：灵敏度 $curVoiceSens 档，判活门槛 " +
@@ -1574,11 +1591,47 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /**
+     * 待机空转：连续两次「转写为空/单字」就把待机起振门槛抬 6dB，静音 90 秒。
+     * 直播里的人在说话时电平能到 -10dBFS、信噪比 20dB，靠能量判据根本挡不住；
+     * 只有「云端认不出字」这个信号最诚实——它不是对机器说话。
+     */
+    private fun registerEmptyWake() {
+        emptyWakeStreak++
+        if (emptyWakeStreak < 2) return
+        emptyWakeStreak = 0
+        wakeOnsetBoostDb = 6f
+        val dur = 90_000L
+        wakeOnsetBoostUntil = SystemClock.elapsedRealtime() + dur
+        wakeSession?.boostOnset(wakeOnsetBoostDb, dur)
+    }
+
+    /** 待机出现正常文本：立刻卸掉空转惩罚，恢复正常灵敏度 */
+    private fun clearEmptyWake() {
+        if (emptyWakeStreak == 0 && wakeOnsetBoostDb == 0f) return
+        emptyWakeStreak = 0
+        if (wakeOnsetBoostDb != 0f) {
+            wakeOnsetBoostDb = 0f
+            wakeOnsetBoostUntil = 0L
+            wakeSession?.boostOnset(0f, 0L)
+            LogStore.log("wake", "恢复正常灵敏度（识别到正常文本）")
+        }
+    }
+
     /** 处理一段待机语音：噪声闸门 → 云转写 → 唤醒词判定 → 进问答 */
     private suspend fun processWakeWav(wav: java.io.File, segSnrDb: Float): Boolean {
         val arrivedAt = SystemClock.elapsedRealtime()
         val cur = repo.settings.firstOrNull() ?: settings.value
         val wavBytes = wav.length()
+        // 极短片段（< 550ms）本地丢弃：叹气、咳嗽、「嗯」「啊」这类口头语都在这个长度，
+        // 而「小源小源」四音节正常语速也有 700~1000ms，不会误伤。
+        // 以前这些一律往云端发一次，白烧配额、白占采集通道，真人喊话时反而更容易撞车。
+        val segMs = wavBytes / 32
+        if (segMs < MIN_WAKE_SEG_MS) {
+            LogStore.log("wake", "片段过短（${segMs}ms）：口头语/环境声，本地丢弃，不发上行")
+            wav.delete()
+            return false
+        }
         // 闸门：峰值太低（远处杂音/空调/风扇）不值得跑一次云转写，省流量也省配额
         val peakDb = withContext(Dispatchers.IO) { wavPeakDbfs(wav) }
         if (peakDb < NOISE_GATE_DB) {
@@ -1604,6 +1657,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         val asrDoneAt = SystemClock.elapsedRealtime()
         wav.delete()
         val text = spoken.orEmpty().trim()
+        // 空转自适应：电平和信噪比都够、云端却认不出字——基本就是直播/旁人聊天。
+        // 一次不罚（也可能真没听清），连续两次就让待机档「装聋」90 秒；
+        // 一旦出现正常文本立刻恢复，不耽误真人喊话。
+        if (text.length <= 1) registerEmptyWake() else clearEmptyWake()
         // 唤醒链路实测：没这行 = 根本没判成一段话（门槛高/麦克风没声）；
         // 有这行但文本不对 = 识别没听清（电平、方言、噪音）；文本对却没反应 = 词表要放宽。
         val speakStart = wakeSpeechStartedAt

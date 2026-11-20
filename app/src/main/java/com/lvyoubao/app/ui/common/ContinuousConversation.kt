@@ -84,6 +84,14 @@ class ContinuousConversation(
          * 打开后会记住本句内出现过的最长停顿，收段门槛 = max(silenceEndMs, 最长停顿×1.7，上限 2.6 秒）。
          */
         val adaptiveSilence: Boolean = false,
+        /**
+         * 待机档的「这段到底像不像人话」门槛（RNNoise 语音概率 0~1）。
+         * 只靠电平分不开「用户喊小源小源」和「直播里的人在说话」——实测两者都能到 -10dBFS / 20dB 信噪比。
+         * 之前取 0.2 太松（纯背景人声常常也能擦线过），0.45 是 RNNoise 在人声/噪声上的常用分界。
+         * 播报中（barge-in）不吃这条：那时用户就是要打断，宁可松一点。
+         * RNNoise 不可用时 denoiseVad = -1，自动放行，不会把耳朵堵死。
+         */
+        val standbyVadMin: Float = 0.45f,
     )
 
     companion object {
@@ -94,7 +102,7 @@ class ContinuousConversation(
         private const val FRAME_SAMPLES = 1_280          // 80ms @ 16kHz
         private const val FRAME_MS = 80L
         private const val PREROLL_FRAMES = 4             // 320ms 前滚，保首字
-        private const val ONSET_RUN_NORMAL = 2           // 平时连续 2 帧算开口（160ms）
+        private const val ONSET_RUN_STANDBY = 3          // 待机档连续 3 帧（240ms）：配合模型概率去抖，压掉直播里的短促气口
         private const val ONSET_RUN_TTS = 3              // 播报中连续 3 帧才算真人（240ms，防回声误触发）
         private const val MIN_ABS_ONSET_DB = -45f        // 安静房间的绝对起点
         private const val BARGE_ABS_DB_STD = -35f        // 打断绝对阈值（标准档）
@@ -155,6 +163,26 @@ class ContinuousConversation(
 
     /** 当前环境噪声底（dBFS）：只给上层写日志/调参看，别拿它做判活决策 */
     fun debugNoiseFloorDb(): Float = noiseFloorDb
+
+    /** 空转惩罚：待机起振门槛临时抬高的幅度（dB）与截止时刻 */
+    @Volatile private var onsetBoostDb = 0f
+    @Volatile private var onsetBoostUntil = 0L
+
+    /**
+     * 临时抬高待机起振门槛。用在「待机反复开麦、云端却转写为空」的场景：
+     * 屋里直播/旁人聊天能过电平门槛，但根本不是对机器说话。连续空转时就把耳朵暂时捂上几十秒，
+     * 省电、省云端配额，也少占采集通道（真人喊唤醒词时不容易撞车）。传 0 立即恢复。
+     */
+    fun boostOnset(boostDb: Float, durationMs: Long) {
+        onsetBoostDb = boostDb
+        onsetBoostUntil = if (boostDb <= 0f) 0L else SystemClock.elapsedRealtime() + durationMs
+        if (boostDb > 0f) {
+            LogStore.log("wake", "待机起振门槛临时 +${boostDb.toInt()}dB（${durationMs / 1000} 秒）")
+        }
+    }
+
+    private fun standbyBoost(): Float =
+        if (onsetBoostUntil > SystemClock.elapsedRealtime()) onsetBoostDb else 0f
     private var voiceRun = 0
     private var inSpeech = false
     private var speechStartAt = 0L
@@ -422,18 +450,17 @@ class ContinuousConversation(
             } else {
                 maxOf(noiseFloorDb + 20f, BARGE_ABS_DB_STD)
             }
-            else -> maxOf(noiseFloorDb + config.onsetMarginDb, config.minOnsetDb)
+            else -> maxOf(noiseFloorDb + config.onsetMarginDb, config.minOnsetDb) + standbyBoost()
         }
         // 峰值回落：段内电平掉到峰值以下 peakDropDb，即便还高于绝对门槛也认为这句说完了。
         // 不加这条，屋里有人聊天/开着电视时，一段话永远等不到「静音」，只能靠 maxUtteranceMs 硬切。
         val peakSilent = inSpeech && config.peakDropDb > 0f && db < speechPeakDb - config.peakDropDb
-        // 模型判定「这一帧不是人声」时，即使电平够也不起振：
-        // 电视/音乐/远处聊天经常比安静人声还响，光看电平会把它们当人开口。
-        // 阈值取 0.2（RNNoise 在纯噪声上通常 <0.1，人声 >0.5），只在起振侧使用，
-        // 收段仍走能量判据，避免模型误判把一句话从中间切断。
-        val vadVeto = !inSpeech && denoiseVad >= 0f && denoiseVad < 0.2f
+        // 模型判定「这一帧不像人话」时，即使电平够也不起振：
+        // 电视/直播/旁人聊天经常比安静人声还响（实测 -10dBFS、20dB 信噪比），光看电平分不开。
+        // 播报中不做这个否决——那一刻用户就是要打断，宁可松一点。
+        val vadVeto = !inSpeech && !ttsActive && denoiseVad >= 0f && denoiseVad < config.standbyVadMin
         val isVoice = db >= onsetDb && !peakSilent && !vadVeto
-        val requiredRun = if (ttsActive) ONSET_RUN_TTS else ONSET_RUN_NORMAL
+        val requiredRun = if (ttsActive) ONSET_RUN_TTS else ONSET_RUN_STANDBY
         // 上一帧人声距今多久：用来学「这个人一句话里能停多长」
         val gapSinceVoice = if (lastVoiceAt == 0L) 0L else now - lastVoiceAt
 
