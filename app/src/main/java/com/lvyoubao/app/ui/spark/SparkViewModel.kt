@@ -1348,6 +1348,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     // 单段上限收到 6 秒：屋里电视/聊天一响就是十几秒的长段，
                     // 唤醒词埋在长段里识别容易被串音盖掉，切碎一点反而更容易命中
                     maxUtteranceMs = 6_000L,
+                    peakDropDb = 16f,
                     onsetMarginDb = if (curVoiceSens >= 2) 8f else 12f,
                     minOnsetDb = if (curVoiceSens >= 2) -46f else -42f,
                 ),
@@ -1607,6 +1608,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 minSpeechMs = 300L,
                 bargeInSensitivity = 0,
                 idleTimeoutMs = 15_000L,
+                // 一句话最多录 6 秒：嘈杂环境下噪声会让「静音收段」彻底失效，
+                // 实测这段能开到 18~31 秒，转写跟着从 0.4s 涨到 2.8s，用户以为设备没反应
+                maxUtteranceMs = 6_000L,
+                peakDropDb = 16f,
             ),
             listener = object : ContinuousConversation.Listener {
                 override fun onUtterance(wav: java.io.File) {
@@ -1662,8 +1667,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             SpeechInput.transcribeFile(wav, asrKey, cur.dialectMode)
         }
         val asrMs = SystemClock.elapsedRealtime() - tAsr
+        // 录音时长（16k/16bit 单声道 = 32 字节每毫秒，扣掉 44 字节 WAV 头）：
+        // 这个数字直接说明「这句话里有多少死等」——2 秒的话录成 18 秒，多的全是噪声拖着不收段
+        val recMs = ((wav.length() - 44).coerceAtLeast(0)) / 32
         wav.delete()
-        LogStore.log("wake", "单次聆听：转写 ${asrMs}ms，文本「${result.getOrNull()?.trim().orEmpty()}」")
+        LogStore.log(
+            "wake",
+            "单次聆听：录音 ${recMs}ms，转写 ${asrMs}ms，文本「${result.getOrNull()?.trim().orEmpty()}」",
+        )
         result.fold(
             onSuccess = { spoken ->
                 val clean = HotwordCorrector.correct(spoken.trim())

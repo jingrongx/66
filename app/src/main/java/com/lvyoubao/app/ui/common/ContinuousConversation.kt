@@ -58,6 +58,12 @@ class ContinuousConversation(
         val silenceEndMs: Long = 800L,      // 静音多久算说完
         val minSpeechMs: Long = 300L,       // 短于此的当噪声丢弃
         val maxUtteranceMs: Long = 30_000L, // 单段强制切断
+        /**
+         * 段内「还在说吗」的相对判定（dB）：低于本段峰值这么多就算这句说完了；0 = 关闭。
+         * 嘈杂环境里噪声底一抬高，绝对门槛就再也压不下去——实测一句 2 秒的话能被拖成 18 秒，
+         * 转写跟着慢一个量级。人声通常比环境高 15~25dB，掉到峰值以下 16dB 就是收段时机。
+         */
+        val peakDropDb: Float = 0f,
         val bargeInSensitivity: Int = 1,    // 0=关（半双工）1=标准 2=灵敏
         val echoWindowMs: Long = 300L,      // TTS 起振静默窗
         val idleTimeoutMs: Long = 60_000L,  // 空闲多久回调超时
@@ -120,6 +126,7 @@ class ContinuousConversation(
     private var voiceRun = 0
     private var inSpeech = false
     private var speechStartAt = 0L
+    private var speechPeakDb = -120f
     private var lastVoiceAt = 0L
     private var readErrors = 0
     private val preroll = ArrayDeque<ShortArray>(PREROLL_FRAMES)
@@ -187,8 +194,15 @@ class ContinuousConversation(
             // 5 秒后误报「麦克风读不到数据」退出（长按说话走 MediaRecorder 是另一条路所以没事）
             runCatching { rec.startRecording() }
             if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                // 上一路会话刚释放时 start() 常回 -38（ENOSYS），等一下重试同一路大概率就成。
+                // 不重试的话会白白降级到 16k/voip 那条削顶通道（实测 48k/mic 是唯一干净的一路）。
+                Thread.sleep(80)
+                runCatching { rec.startRecording() }
+            }
+            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                 rec.release()
-                lastError = "麦克风没能开始采集（可能被占用）"
+                lastError = "麦克风没能开始采集（${cfg.label} 被占用）"
+                LogStore.log("conv", "采集配置 ${cfg.label} 启动失败，降级下一路")
                 continue
             }
             opened = rec
@@ -329,7 +343,10 @@ class ContinuousConversation(
             }
             else -> maxOf(noiseFloorDb + config.onsetMarginDb, config.minOnsetDb)
         }
-        val isVoice = db >= onsetDb
+        // 峰值回落：段内电平掉到峰值以下 peakDropDb，即便还高于绝对门槛也认为这句说完了。
+        // 不加这条，屋里有人聊天/开着电视时，一段话永远等不到「静音」，只能靠 maxUtteranceMs 硬切。
+        val peakSilent = inSpeech && config.peakDropDb > 0f && db < speechPeakDb - config.peakDropDb
+        val isVoice = db >= onsetDb && !peakSilent
         val requiredRun = if (ttsActive) ONSET_RUN_TTS else ONSET_RUN_NORMAL
 
         if (isVoice) {
@@ -346,6 +363,7 @@ class ContinuousConversation(
             } else {
                 appendSegment(frame)
             }
+            if (db > speechPeakDb) speechPeakDb = db
         } else {
             voiceRun = 0
             if (inSpeech) {
@@ -370,6 +388,7 @@ class ContinuousConversation(
         inSpeech = true
         runCatching { listener.onSpeechStart() } // 音频线程直接回调，调用方只做轻量状态更新
         speechStartAt = now
+        speechPeakDb = -120f
         segment = ByteArrayOutputStream()
         segmentSamples = 0
         preroll.forEach { appendSegmentInternal(it) } // 前滚带上首字

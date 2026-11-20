@@ -40,7 +40,7 @@ object EdgeTts {
     private const val STREAM_MAX_CHARS = 2000
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .pingInterval(15, TimeUnit.SECONDS)
         .build()
@@ -194,17 +194,26 @@ object EdgeTts {
         return ok && gotAudio
     }
 
+    private val CONNECT_WATCHDOG_MS = 3_000L
+
     private suspend fun streamOnce(body: String, onFirstAudio: (ByteArray) -> Unit): Boolean =
         suspendCancellableCoroutine { cont ->
             var settled = false
             var got = false
+            var opened = false
+            var sock: WebSocket? = null
+            // 握手看门狗：微软那边偶尔会把一次 WSS 握手晾在那儿十秒（实测 8 秒才报 SSL 断开），
+            // 期间一个字都不出、用户就干等着。超过 3 秒没 onOpen 直接掐掉，走下一次尝试。
+            val watchdog = java.util.Timer(true)
             fun settle(value: Boolean) {
                 if (settled) return
                 settled = true
+                runCatching { watchdog.cancel() }
                 if (cont.isActive) cont.resume(value && got)
             }
             val ws = client.newWebSocket(buildRequest(), object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    opened = true
                     ttsLog("EdgeTts 流式已连接，发送 SSML（${body.length} 字）")
                     webSocket.send(configMessage())
                     webSocket.send(ssmlMessage(body))
@@ -240,6 +249,18 @@ object EdgeTts {
                     settle(true)
                 }
             })
+            sock = ws
+            watchdog.schedule(
+                object : java.util.TimerTask() {
+                    override fun run() {
+                        if (settled || opened) return
+                        ttsLog("EdgeTts 握手超时（3 秒没连上），掐掉重试")
+                        runCatching { sock?.cancel() }
+                        settle(false)
+                    }
+                },
+                CONNECT_WATCHDOG_MS,
+            )
             cont.invokeOnCancellation { runCatching { ws.cancel() } }
         }
 
