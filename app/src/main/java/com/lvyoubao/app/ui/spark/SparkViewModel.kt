@@ -1682,6 +1682,16 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             ),
             listener = object : ContinuousConversation.Listener {
                 override fun onUtterance(wav: java.io.File, snrDb: Float) {
+                    // 唤醒后只认「近讲」的那一段：屋里电视、旁人聊天也会被 VAD 切成段，
+                    // 但它们离麦克风远，信噪比明显低（主人对着设备说话通常 25dB 以上）。
+                    // 不够格的不退出聆听，删掉继续等——用户常说「等下，我先问……」
+                    if (snrDb < 15f) {
+                        LogStore.log("wake", "单次聆听：这段太弱（${"%.0f".format(snrDb)}dB），不是对着设备说的，继续等")
+                        wav.delete()
+                        _eyeState.value = SparkEyeState.LISTENING
+                        _statusHint.value = "我在听，说完就好"
+                        return
+                    }
                     // 单次：拿到第一段就停录音，处理完回待机
                     LogStore.log("wake", "单次聆听收段：信噪比 ${"%.0f".format(snrDb)}dB（近讲越大越可信）")
                     wakeOnceSession?.stop()
@@ -1746,9 +1756,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         result.fold(
             onSuccess = { spoken ->
                 val clean = HotwordCorrector.correct(spoken.trim())
-                if (clean.isBlank()) {
-                    _eyeState.value = SparkEyeState.IDLE
-                    _statusHint.value = "没听清，再喊一次「小源小源」"
+                // 环境声碎片（「嗯」「啊」「好」）不算提问：这类多半是电视/旁人漏进麦克风的，
+                // 直接接着听，别让用户"还没来得及问就被识别成别的"。
+                if (clean.isBlank() || clean.length <= 1 ||
+                    clean in listOf("嗯", "嗯嗯", "啊", "哦", "噢", "咦", "呃", "好", "好的", "对", "是的", "开始", "这个", "那个")
+                ) {
+                    LogStore.log("wake", "单次聆听：碎片词「$clean」，不算提问，继续听")
+                    _eyeState.value = SparkEyeState.LISTENING
+                    _statusHint.value = "我在听，说完就好"
+                    startWakeOneShot()
                 } else {
                     answerVoiceQuestion(clean)
                 }
