@@ -882,9 +882,23 @@ object TtsPlayer {
     }
 
     /** 把一个 MP3 文件整段解码成 PCM（几十毫秒，远快于播放；用于共用音轨链） */
+    /**
+     * 把一个 MP3 文件整段解码成 PCM（几十毫秒，远快于播放；用于共用音轨链）。
+     *
+     * v0.9.40 改了两处，都是"解码器吐噪"的直接成因：
+     * ①**按 MP3 帧边界切片喂**。老实现用 16KB 任意切块，块边界经常落在帧中间；桌面 ffmpeg
+     *   遇到半个帧会自己重新同步，但这台 MTK/Android 8.1 的 audio/mpeg 解码器会就此错位，
+     *   后面整段都按错位的字节流乱解。实测同一段 MP3：ffmpeg 解出峰值 18316、零削波，
+     *   而这里解出来有 2487 个贴顶样本、峰值 32767 —— 听感就是段中/段末突然"破"一下。
+     * ②**`want` 的计算顺序**。老代码先读 `buf.remaining()` 再 `buf.clear()`，而
+     *   `getInputBuffer` 返回的是复用对象、position 还停在上次的写入处，remaining 会越来越小，
+     *   最后算出 0 → `read(.., 0)` 返回 0 → 被当成 EOF 提前发 EOS。现在先 clear 再算。
+     */
     private fun decodeMp3File(file: File): PcmClip? {
         var codec: MediaCodec? = null
         return try {
+            val data = file.readBytes()
+            if (data.isEmpty()) return null
             val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_MPEG)
             codec = c
             c.configure(
@@ -896,51 +910,70 @@ object TtsPlayer {
             val info = MediaCodec.BufferInfo()
             var rate = 24_000
             var ch = 1
-            var eosIn = false
+            var pos = skipId3(data)
+            var eosQueued = false
             var done = false
-            file.inputStream().use { ins ->
-                val chunk = ByteArray(16 * 1024)
-                while (!done) {
-                    if (!eosIn) {
-                        val inIdx = c.dequeueInputBuffer(10_000)
-                        if (inIdx >= 0) {
-                            val buf = c.getInputBuffer(inIdx)
-                            val want = if (buf != null) minOf(chunk.size, buf.remaining()) else 0
-                            val n = if (want > 0) ins.read(chunk, 0, want) else -1
-                            if (buf == null || n <= 0) {
+            var idleAfterEos = 0
+            while (!done) {
+                if (!eosQueued) {
+                    val inIdx = c.dequeueInputBuffer(10_000)
+                    if (inIdx >= 0) {
+                        val buf = c.getInputBuffer(inIdx)
+                        if (buf == null || pos >= data.size) {
+                            c.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            eosQueued = true
+                        } else {
+                            buf.clear()
+                            val cap = buf.remaining()
+                            val end = frameAlignedEnd(data, pos, cap)
+                            val n = end - pos
+                            if (n <= 0) {
+                                // 尾部凑不出一个完整帧（填充字节）：直接收尾
                                 c.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                eosIn = true
+                                eosQueued = true
                             } else {
-                                buf.clear()
-                                buf.put(chunk, 0, n)
+                                buf.put(data, pos, n)
                                 c.queueInputBuffer(inIdx, 0, n, 0, 0)
+                                pos += n
                             }
                         }
                     }
-                    val outIdx = c.dequeueOutputBuffer(info, 10_000)
-                    if (outIdx >= 0) {
-                        if (info.size > 0) {
-                            runCatching {
-                                val fmt = c.outputFormat
-                                rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                                ch = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                            }
-                            val b = c.getOutputBuffer(outIdx)
-                            if (b != null) {
-                                b.position(info.offset)
-                                b.limit(info.offset + info.size)
-                                val arr = ByteArray(info.size)
-                                b.get(arr)
-                                out.write(arr)
-                            }
+                }
+                val outIdx = c.dequeueOutputBuffer(info, 10_000)
+                if (outIdx >= 0) {
+                    idleAfterEos = 0
+                    if (info.size > 0) {
+                        runCatching {
+                            val fmt = c.outputFormat
+                            rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                            ch = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
                         }
-                        c.releaseOutputBuffer(outIdx, false)
-                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) done = true
+                        val b = c.getOutputBuffer(outIdx)
+                        if (b != null && info.offset >= 0 && info.offset + info.size <= b.capacity()) {
+                            b.position(info.offset)
+                            b.limit(info.offset + info.size)
+                            val arr = ByteArray(info.size)
+                            b.get(arr)
+                            out.write(arr)
+                        }
+                    }
+                    c.releaseOutputBuffer(outIdx, false)
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) done = true
+                } else if (eosQueued) {
+                    idleAfterEos++
+                    // ~3 秒仍无输出：解码器卡在坏数据上，别把 IO 线程挂住
+                    if (idleAfterEos > 300) {
+                        ttsLog("整段解码 EOS 后无输出，强制收尾（${data.size}B）")
+                        break
                     }
                 }
             }
-            val data = out.toByteArray()
-            if (data.isEmpty()) null else PcmClip(data, rate, ch)
+            val pcm = out.toByteArray()
+            if (pcm.isEmpty()) return null
+            // 兜底：把解码器可能吐出来的短爆音段补掉（见 repairClipped）
+            val fixed = repairClipped(pcm, ch)
+            if (fixed > 0) ttsLog("整段解码修补爆音 ${fixed} 个样本（${file.length()}B）")
+            PcmClip(pcm, rate, ch)
         } catch (e: Exception) {
             ttsLog("整段解码失败：${e.javaClass.simpleName} ${e.message ?: ""}")
             null
@@ -948,6 +981,96 @@ object TtsPlayer {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
         }
+    }
+
+    /** 跳过 ID3v2 头（Edge 产物没有，别处来的 mp3 可能带） */
+    private fun skipId3(d: ByteArray): Int {
+        if (d.size < 10) return 0
+        if (d[0] != 'I'.code.toByte() || d[1] != 'D'.code.toByte() || d[2] != '3'.code.toByte()) return 0
+        val size = ((d[6].toInt() and 0x7F) shl 21) or ((d[7].toInt() and 0x7F) shl 14) or
+            ((d[8].toInt() and 0x7F) shl 7) or (d[9].toInt() and 0x7F)
+        return minOf(d.size, 10 + size)
+    }
+
+    /**
+     * 从 [pos] 起、不超过 [pos]+[cap] 的最大帧边界。
+     * 往回最多退 1600 字节（24kHz/48kbps 下每帧 144 字节，够退十来帧）找一个可信帧头；
+     * 实在找不到就原样切（让解码器自己重新同步，总比卡死强）。
+     */
+    private fun frameAlignedEnd(d: ByteArray, pos: Int, cap: Int): Int {
+        val limit = minOf(d.size, pos + cap)
+        if (limit >= d.size) return d.size
+        var p = limit
+        val floor = maxOf(pos, limit - 1600)
+        while (p > floor) {
+            if (looksLikeFrameStart(d, p)) return p
+            p--
+        }
+        return limit
+    }
+
+    private fun isMp3FrameHeader(d: ByteArray, i: Int): Boolean {
+        if (i + 1 >= d.size) return false
+        if ((d[i].toInt() and 0xFF) != 0xFF) return false
+        return ((d[i + 1].toInt() and 0xFF) and 0xE0) == 0xE0
+    }
+
+    /**
+     * 可信帧头：0xFFEx 之外，再往后 144 字节（24kHz/48kbps MPEG2-L3 的固定帧长）也必须是帧头。
+     * 只看两字节的话，音频数据内部偶然出现的 0xFFE? 会被误判成帧头，切点反而落到帧中间。
+     */
+    private fun looksLikeFrameStart(d: ByteArray, i: Int): Boolean {
+        if (!isMp3FrameHeader(d, i)) return false
+        if (i + 288 >= d.size) return true // 临近文件尾，少一重校验
+        return isMp3FrameHeader(d, i + 144) && isMp3FrameHeader(d, i + 288)
+    }
+
+    /**
+     * 修补解码器吐出的爆音：连续 ≥4 个贴顶样本（|s| ≥ 32000）在正常语音里几乎不可能出现，
+     * 是解码器在坏帧上填噪声的典型特征（单个样本偶尔贴顶是正常的强瞬态，不动它）。
+     * 用爆音段前后的样本做线性插值填掉，听感从"啪"变得几乎察觉不到。
+     * 返回修补的样本数（0 = 没发现问题）。
+     */
+    private fun repairClipped(pcm: ByteArray, channels: Int): Int {
+        if (channels != 1) return 0 // 只处理 Edge 的单声道产物；多声道不该被这样填平
+        val frame = 2 * channels
+        val frames = pcm.size / frame
+        if (frames < 16) return 0
+        fun at(i: Int): Int = ((pcm[i * frame + 1].toInt() shl 8) or (pcm[i * frame].toInt() and 0xFF)).toShort().toInt()
+        fun put(i: Int, v: Int) {
+            val s = if (v > 32767) 32767 else if (v < -32768) -32768 else v
+            val base = i * frame
+            for (c in 0 until channels) {
+                pcm[base + c * 2] = (s and 0xFF).toByte()
+                pcm[base + c * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+            }
+        }
+        var i = 0
+        var fixed = 0
+        while (i < frames) {
+            val v = at(i)
+            if (v >= 32000 || v <= -32000) {
+                var j = i
+                while (j < frames) {
+                    val w = at(j)
+                    if (w >= 32000 || w <= -32000) j++ else break
+                }
+                if (j - i >= 4) {
+                    val before = if (i > 0) at(i - 1) else 0
+                    val after = if (j < frames) at(j) else 0
+                    val span = j - i + 1
+                    for (k in i until j) {
+                        val t = (k - i + 1).toLong() * 1000 / span
+                        put(k, (before + ((after - before) * t / 1000)).toInt())
+                    }
+                    fixed += j - i
+                }
+                i = j
+            } else {
+                i++
+            }
+        }
+        return fixed
     }
 
     /**
