@@ -1877,6 +1877,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     wakeOnceSession = null
                     _eyeState.value = SparkEyeState.IDLE
                     _statusHint.value = null
+                    // 喊了唤醒词却一直没说话：回待机，屏幕重新开始空闲倒计时，
+                    // 否则 keepOn 把倒计时取消了，屏幕会一直亮着
+                    ScreenAwake.idle()
                     syncWakeEngine()
                 }
 
@@ -1886,6 +1889,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         wakeOnceSession = null
                         _eyeState.value = SparkEyeState.IDLE
                         _statusHint.value = "没听清：$message"
+                        ScreenAwake.idle()
                         syncWakeEngine()
                     }
                 }
@@ -1907,6 +1911,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             wav.delete()
             _eyeState.value = SparkEyeState.IDLE
             _statusHint.value = "请先在设置里配置语音识别 Key"
+            ScreenAwake.idle()
             syncWakeEngine()
             return@launch
         }
@@ -1944,6 +1949,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 _eyeState.value = SparkEyeState.IDLE
                 _statusHint.value = (err as? SpeechInput.SpeechException)?.let { SpeechInput.spokenHint(it) }
                     ?: "没听清，再喊一次「小源小源」"
+                // 提示留在屏幕上让人看清，N 秒后再进入息屏倒计时
+                ScreenAwake.idle()
             },
         )
         syncWakeEngine()
