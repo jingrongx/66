@@ -8,6 +8,7 @@ import android.media.MediaRecorder
 import android.os.SystemClock
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import com.lvyoubao.app.data.LogStore
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -86,6 +87,24 @@ class ContinuousConversation(
     @Volatile private var busy = false
     @Volatile private var bargeInFired = false
 
+    /** 一组采集配置：采样率 x 采集源 */
+    private data class CaptureCfg(val rate: Int, val source: Int, val label: String)
+
+    /**
+     * 采集配置阶梯（v0.9.20）：这台设备的 **16k 通道是废的**——
+     * 直采出来全是满量程削顶方波（实测峰值 0dBFS），ASR 只会瞎猜，表现就是「喊破嗓子也唤不醒」。
+     * 全双工通话早就改成「48k 采 + 软件降采样」才好；唤醒监听一直是 16k 直采，等于一直喂废数据。
+     * 顺序按实测可用性排：48k/voip 最稳，往下逐级降级。
+     */
+    private val captureLadder = listOf(
+        CaptureCfg(48_000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "48k/voip"),
+        CaptureCfg(48_000, MediaRecorder.AudioSource.MIC, "48k/mic"),
+        CaptureCfg(16_000, MediaRecorder.AudioSource.MIC, "16k/mic"),
+        CaptureCfg(16_000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "16k/voip"),
+    )
+
+    @Volatile private var activeRate = SAMPLE_RATE
+
     private var record: AudioRecord? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -132,32 +151,54 @@ class ContinuousConversation(
     /** 尝试创建 AudioRecord 并进入采集态；成功返回 null（已起采集线程），失败返回原因（已自清理） */
     @SuppressLint("MissingPermission")
     private fun tryStartOnce(): String? {
-        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (minBuf <= 0) return "这台设备的麦克风参数读不出来，连续对话用不了"
-        val rec = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                SAMPLE_RATE,
+        var lastError = "这台设备的麦克风参数读不出来，连续对话用不了"
+        var opened: AudioRecord? = null
+        var openedCfg: CaptureCfg? = null
+        for (cfg in captureLadder) {
+            val minBuf = AudioRecord.getMinBufferSize(
+                cfg.rate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf, FRAME_SAMPLES * 4 * 4),
             )
-        } catch (e: Exception) {
-            return "麦克风启动失败：${e.message ?: "被占用"}"
+            if (minBuf <= 0) {
+                lastError = "麦克风参数读不出来（${cfg.label}）"
+                continue
+            }
+            val rec = try {
+                AudioRecord(
+                    cfg.source,
+                    cfg.rate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    maxOf(minBuf * 2, cfg.rate / 1000 * 80 * 2 * 4),
+                )
+            } catch (e: Exception) {
+                lastError = "麦克风启动失败：${e.message ?: "被占用"}"
+                continue
+            }
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                rec.release()
+                lastError = "麦克风被占用或无权限，连续对话开不了"
+                continue
+            }
+            // 必须显式 startRecording：v0.8.90 漏了这一步，AudioRecord 不进入采集态，read 全部失败，
+            // 5 秒后误报「麦克风读不到数据」退出（长按说话走 MediaRecorder 是另一条路所以没事）
+            runCatching { rec.startRecording() }
+            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                rec.release()
+                lastError = "麦克风没能开始采集（可能被占用）"
+                continue
+            }
+            opened = rec
+            openedCfg = cfg
+            break
         }
-        if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            rec.release()
-            return "麦克风被占用或无权限，连续对话开不了"
-        }
-        // 必须显式 startRecording：v0.8.90 漏了这一步，AudioRecord 不进入采集态，read 全部失败，
-        // 5 秒后误报「麦克风读不到数据」退出（长按说话走 MediaRecorder 是另一条路所以没事）
-        runCatching { rec.startRecording() }
-        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            rec.release()
-            return "麦克风没能开始采集（可能被占用）"
-        }
+        val cfg = openedCfg ?: return lastError
+        val rec = opened ?: return lastError
 
         record = rec
+        activeRate = cfg.rate
+        LogStore.log("conv", "采集配置：${cfg.label}（VAD 在 16k 上跑，${cfg.rate / SAMPLE_RATE} 倍降采样）")
         // 重试期间被 stop：立刻清理放弃（快速开关连聊的竞态）
         if (stopRequested) {
             rec.release()
@@ -214,14 +255,22 @@ class ContinuousConversation(
 
     @SuppressLint("MissingPermission")
     private fun captureLoop() {
-        val buf = ShortArray(FRAME_SAMPLES)
+        val factor = (activeRate / SAMPLE_RATE).coerceAtLeast(1)
+        val raw = ShortArray(FRAME_SAMPLES * factor)
         while (running) {
-            val n = try {
-                record?.read(buf, 0, buf.size) ?: break
-            } catch (e: Exception) {
-                break
+            // AudioRecord 常短读：补齐一整帧（80ms）再判活，帧长稳定 VAD 才准
+            var filled = 0
+            while (filled < raw.size && running) {
+                val rec = record ?: return
+                val n = try {
+                    rec.read(raw, filled, raw.size - filled)
+                } catch (e: Exception) {
+                    return
+                }
+                if (n <= 0) break
+                filled += n
             }
-            if (n <= 0) {
+            if (filled < raw.size) {
                 if (++readErrors > MAX_READ_ERRORS) {
                     listener.onError("麦克风连续读不到数据（可能被其他应用占用）")
                     running = false
@@ -230,8 +279,28 @@ class ContinuousConversation(
                 continue
             }
             readErrors = 0
-            processFrame(buf, n)
+            processFrame(if (factor == 1) raw else downsampleTo16k(raw, factor), FRAME_SAMPLES)
         }
+    }
+
+    /** 48k 采集降采样到 16k（factor 点均值）：VAD 与 WAV 都还按 16k 走，上游不用改 */
+    private fun downsampleTo16k(src: ShortArray, factor: Int): ShortArray {
+        val outSamples = src.size / factor
+        val out = ShortArray(outSamples)
+        var i = 0
+        var o = 0
+        while (i + factor <= src.size) {
+            var sum = 0
+            var k = 0
+            while (k < factor) {
+                sum += src[i + k]
+                k++
+            }
+            out[o] = (sum / factor).coerceIn(-32768, 32767).toShort()
+            o++
+            i += factor
+        }
+        return out
     }
 
     private fun processFrame(buf: ShortArray, n: Int) {
