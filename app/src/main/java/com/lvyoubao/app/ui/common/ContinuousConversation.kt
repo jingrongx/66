@@ -37,6 +37,9 @@ class ContinuousConversation(
 ) {
 
     interface Listener {
+        /** 刚检测到有人开口（开口后约 160~320ms）：给界面即时反馈，不用等整句识别完 */
+        fun onSpeechStart() {}
+
         /** 一段完整语音（WAV 16k 单声道，调用方负责上传 ASR 并删除文件） */
         fun onUtterance(wav: File)
 
@@ -57,6 +60,10 @@ class ContinuousConversation(
         val bargeInSensitivity: Int = 1,    // 0=关（半双工）1=标准 2=灵敏
         val echoWindowMs: Long = 300L,      // TTS 起振静默窗
         val idleTimeoutMs: Long = 60_000L,  // 空闲多久回调超时
+        // 待机唤醒用的起振灵敏度：相对底噪的余量越小、绝对阈值越低，越容易开口就触发。
+        // 默认值沿用原行为（12dB / -45dBFS）；唤醒监听按设置里的灵敏度档位覆盖。
+        val onsetMarginDb: Float = 12f,
+        val minOnsetDb: Float = -45f,
     )
 
     companion object {
@@ -246,7 +253,7 @@ class ContinuousConversation(
             } else {
                 maxOf(noiseFloorDb + 20f, BARGE_ABS_DB_STD)
             }
-            else -> maxOf(noiseFloorDb + 12f, MIN_ABS_ONSET_DB)
+            else -> maxOf(noiseFloorDb + config.onsetMarginDb, config.minOnsetDb)
         }
         val isVoice = db >= onsetDb
         val requiredRun = if (ttsActive) ONSET_RUN_TTS else ONSET_RUN_NORMAL
@@ -287,6 +294,7 @@ class ContinuousConversation(
 
     private fun startSpeech(now: Long, currentFrame: ShortArray) {
         inSpeech = true
+        runCatching { listener.onSpeechStart() } // 音频线程直接回调，调用方只做轻量状态更新
         speechStartAt = now
         segment = ByteArrayOutputStream()
         segmentSamples = 0
