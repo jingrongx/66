@@ -934,8 +934,10 @@ class AiClient(private val settings: AiSettings) {
         /** 全局共享客户端：连接池 + HTTP/2 会话常驻，问答之间不再重复握手 */
         private val shared: OkHttpClient by lazy {
             OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(180, TimeUnit.SECONDS)
+                // readTimeout 是「多久没收到任何字节」而不是总时长：流式回答每来一块就重置。
+                // 之前 180 秒意味着服务端挂住时要干等 3 分钟才报错——用户遇到的就是这个。
+                .connectTimeout(8, TimeUnit.SECONDS)
+                .readTimeout(45, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(true)
                 .build()
         }

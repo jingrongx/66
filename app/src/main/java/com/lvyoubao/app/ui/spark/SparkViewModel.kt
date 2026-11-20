@@ -524,10 +524,20 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return true
         }
 
+        // 本地闸门：不含任何动作/拍摄类说法，直接放行聊天。
+        // 以前每句话都要先花一次完整 AI 调用（8 秒超时）去判断「这是不是机器人指令」，
+        // 连「现在几点了」也要空等这一趟——这是「问一句半天没反应」最大的单一来源。
+        if (robotHints.none { text.contains(it) }) return false
+
         // AI 解析（机器人动作 + 设备指令统一判断）
-        _statusHint.value = "正在理解指令…"
         val commands = RobotIntent.parse(text, curSettings)
-        if (commands.isEmpty()) return false
+        if (commands.isEmpty()) {
+            // 解析为空是常态（绝大多数话都不是指令）。提示必须收回去，
+            // 否则「正在理解指令…」会一直挂在左上角，看起来就像卡死。
+            _statusHint.value = null
+            return false
+        }
+        _statusHint.value = "正在理解指令…"
 
         // LOOK 终止编排：拍照问答接管会话，其后的指令忽略
         val lookIndex = commands.indexOf(RobotIntent.Command.Look)
@@ -1126,33 +1136,46 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             // 旧逻辑要等 onSuccess 才 TtsPlayer.speak(全文)，长回答要干等好几秒。
             ttsStreaming = true
             val speechChannel = Channel<String>(Channel.UNLIMITED)
+            val audioChannel = Channel<java.io.File>(Channel.UNLIMITED)
+            val ttsDir = java.io.File(context.cacheDir, "tts_stream").apply { runCatching { mkdirs() } }
             var spokeAny = false
-            val speaker = launch {
+            val playGen = TtsPlayer.startStreamSession()
+
+            // 合成器：句子一到就合成，不等播放。
+            // 合成约 1.5 秒/句，播放要 4~6 秒/句，队列会稳定领先——
+            // 这就是句间那 2~3 秒空档消失的原因：以前是「播完第一句才开始连第二句的 WSS」。
+            val synthesizer = launch(Dispatchers.IO) {
                 try {
                     for (piece in speechChannel) {
                         if (piece.isBlank()) continue
-                        TtsPlayer.speak(context, piece)
+                        val f = TtsPlayer.synthesizeOnly(piece, ttsDir)
+                        if (f != null) audioChannel.send(f)
+                    }
+                } finally {
+                    audioChannel.close()
+                }
+            }
+
+            // 播放器：严格按顺序播，一句播完立刻接下一句（文件早就在磁盘上躺好了）
+            val speaker = launch {
+                try {
+                    for (f in audioChannel) {
                         if (!spokeAny) {
                             spokeAny = true
                             val hitAt = wakeHitAt
                             if (hitAt > 0) {
-                                LogStore.log("ai", "首句送播：距唤醒 ${SystemClock.elapsedRealtime() - hitAt}ms")
+                                LogStore.log("ai", "首句起播：距唤醒 ${SystemClock.elapsedRealtime() - hitAt}ms")
                                 wakeHitAt = 0L
                             }
                         }
-                        // 等这一句播完再接下一句（TtsPlayer 是单实例，不能并发）。
-                        // 带上限兜底：万一播放器状态卡在 Speaking（个别 ROM 播完不回调），
-                        // 到点就往下走，下一句 speak() 的 stop() 会把卡住的那条流水线顶掉，
-                        // 不至于整轮播报和眼睛状态一起吊死。
-                        val capMs = (piece.length * 400L).coerceIn(8_000L, 60_000L)
-                        withTimeoutOrNull(capMs) {
-                            TtsPlayer.state.first {
-                                it is TtsPlayer.State.Idle || it is TtsPlayer.State.Unavailable
-                            }
-                        }
+                        val ok = TtsPlayer.playPrepared(f, playGen)
+                        runCatching { f.delete() }
+                        if (!ok) break
                     }
                 } catch (_: CancellationException) {
                     TtsPlayer.stop()
+                } finally {
+                    TtsPlayer.endStreamSession(playGen)
                 }
             }
 
@@ -1202,6 +1225,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     val tail = speechBuffer.substring(spokenUpTo).trim()
                     if (tail.isNotEmpty()) speechChannel.trySend(tail)
                     speechChannel.close()
+                    synthesizer.join()
                     speaker.join()
                     LogStore.log(
                         "ai",
@@ -1212,6 +1236,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 },
                 onFailure = { err ->
                     speechChannel.close()
+                    TtsPlayer.stop()
                     ttsStreaming = false
                     _eyeState.value = SparkEyeState.IDLE
                     _isStreaming.value = false
@@ -1343,6 +1368,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             activeRecording == null &&
             wakeOnceSession == null // 唤醒后的单次聆听正在占麦，待机监听让路
         if (shouldRun && wakeSession == null) {
+            // 回应语音提前加载好：SoundPool 首次 load 是异步的，等到真唤醒才加载会没声
+            SparkAck.preload(appContext)
             val session = ContinuousConversation(
                 appContext,
                 config = ContinuousConversation.Config(
@@ -1519,7 +1546,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             // 连聊会一直占着麦克风、自己判断断句，用户说到一半被打断的体验比多喊一次唤醒词差得多。
             _showEyes.value = true
             TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
-            SparkChime.play(appContext) // 本地合成提示音，0 网络，确认「听见了」
+            // 回应：一句真人声「我在/在呢/来了」，比原来的电子提示音更像在对话
+            SparkAck.play(appContext)
             wakeHitAt = SystemClock.elapsedRealtime()
             // 握手预热：用户还在说问题（2~5 秒），TTS 与 AI 两条链路的 DNS/TCP/TLS
             // 都在后台跑完，等答案出来直接复用连接——这段以前是纯等待，占总延迟 1 秒以上
@@ -1530,8 +1558,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
                 answerVoiceQuestion(ask)
             } else {
-                // 只喊了唤醒词：开一轮单次聆听，说完（约 0.9 秒静音）就收，下次还要喊唤醒词
-                delay(110) // 让提示音先响完，别被这一轮聆听录进去
+                // 只喊了唤醒词：开一轮单次聆听，说完就收，下次还要喊唤醒词。
+                // 等回应声播完再开麦——「我在」被录进问题里，云端会把它当成提问的开头。
+                delay(SparkAck.DURATION_MS)
                 startWakeOneShot()
                 _eyeState.value = SparkEyeState.LISTENING
                 _statusHint.value = "我在听，说完就好"
@@ -1549,6 +1578,21 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 改成「小/晓/筱 + 近似字」的组合判定，且允许出现在前 8 个字里（真人常带「嗯」「那个」）。
      * 命中返回「去掉唤醒词之后剩下的话」（剩下的直接当问题），没命中返回 null。
      */
+    /**
+     * 机器人动作 / 拍摄类说法的本地关键词表。
+     * 只用来决定「要不要花一次 AI 调用去解析指令」，命中后仍由 AI 判断具体动作；
+     * 不含任何关键词的日常提问（天气、时间、常识）直接走聊天，省掉一整趟 AI 往返。
+     */
+    private val robotHints = listOf(
+        "过来", "回去", "前进", "往前", "向前", "后退", "往后", "后退",
+        "左转", "右转", "转圈", "转个圈", "转身", "掉头",
+        "抬头", "低头", "抬起来", "低下来", "看上面", "看下面",
+        "停下", "别动", "停下来", "站住",
+        "跳舞", "跳个", "跟着我", "看着我", "面向我", "面向",
+        "拍张", "拍个", "拍照", "拍一下", "看看", "看一下", "瞧一瞧",
+        "这是什么", "前面是什么", "前面有", "帮我看看",
+    )
+
     private val wakeFirstChars = charArrayOf('小', '晓', '筱', '肖')
     private val wakeSecondChars = charArrayOf(
         '源', '原', '袁', '圆', '园', '远', '元', '缘', '媛', '沅', '苑', '院', '愿', '员',

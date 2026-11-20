@@ -103,7 +103,10 @@ object LocationContext {
         maxAgeMs: Long = FRESH_MS,
         timeoutMs: Long = FIX_TIMEOUT_MS,
     ): Place? = withContext(Dispatchers.IO) {
-        if (!hasPermission(context)) return@withContext null
+        // 没有定位权限不等于没有位置：IP 反查能拿到城市级坐标，够查天气。
+        // 以前这里直接 return null，把下面的 ipLocate() 兜底整段堵死了，
+        // 结果就是「没授权定位 = 永远查不到天气」。
+        if (!hasPermission(context)) return@withContext ipLocate()
         refreshMutex.withLock {
             val cached = latestFix(context)
             if (cached != null && System.currentTimeMillis() - cached.time <= maxAgeMs) {
@@ -121,9 +124,12 @@ object LocationContext {
     fun freshBlocking(context: Context): Place? =
         kotlinx.coroutines.runBlocking { fresh(context) }
 
-    /** 后台预热定位：结果落进 ownFix 缓存，失败静默 */
+    /**
+     * 后台预热定位：结果落进缓存，失败静默。
+     * 没有定位权限时也要预热——走的是 IP 定位，正好在用户开口说话的那几秒里把城市查出来，
+     * 等问天气时直接命中缓存，不用现等。
+     */
     fun prewarm(context: Context) {
-        if (!hasPermission(context)) return
         prewarmScope.launch { runCatching { fresh(context.applicationContext) } }
     }
 

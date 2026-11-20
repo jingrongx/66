@@ -243,11 +243,9 @@ object SpeechInput {
                     .header("Authorization", "Bearer $asrKey")
                     .post(body)
                     .build()
-                val client = OkHttpClient.Builder()
-                    .connectTimeout(10, TimeUnit.SECONDS)
-                    .readTimeout(60, TimeUnit.SECONDS)
-                    .build()
-                client.newCall(request).execute().use { response ->
+                // 复用进程级连接池：以前每次转写都新建 OkHttpClient，
+                // 等于每次重走 DNS+TCP+TLS，唤醒那 1.5 秒里有 200~400ms 是这么白扔的。
+                httpClient.newCall(request).execute().use { response ->
                     val text = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
                         // 分类：Key/账号类给 CONFIG（说具体原因）；服务端故障一律 NETWORK（播报说「网络服务问题」，气泡留 HTTP 码）
@@ -273,6 +271,14 @@ object SpeechInput {
         }
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    /** 转写专用连接池：唤醒与按住说话共用，连接复用后省掉每次的 DNS/TCP/TLS 握手 */
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .build()
+    }
 
     @Serializable
     private data class TranscribeResponse(val text: String = "")

@@ -215,6 +215,42 @@ object TtsPlayer {
         }
     }
 
+    // ───────────────────────── 流水线播报（合成与播放解耦） ─────────────────────────
+    //
+    // 逐句 speak() 的老链路，每句都要重新建立一次 EdgeTTS 的 WSS 连接（握手约 0.9 秒）
+    // 再等首帧（约 0.5 秒），句与句之间就硬生生空出 2~3 秒。改成合成器一路往下把句子
+    // 合成为文件、播放器严格按顺序播：合成（约 1.5 秒/句）远快于播放（4~6 秒/句），
+    // 队列稳定领先，播放器拿到手就播，句间只剩 MediaPlayer 150ms 的轮询粒度。
+
+    /** 开一轮流水线播报：打断上一轮并返回新的播放代次 */
+    fun startStreamSession(): Int {
+        stop()
+        val gen = ++generation
+        currentText = null
+        _state.value = State.Loading
+        return gen
+    }
+
+    /** 合成一段文本到临时文件（不播放）。播报失败返回 null，由调用方决定跳过还是兜底 */
+    suspend fun synthesizeOnly(text: String, dir: File): File? {
+        val body = text.trim()
+        if (body.isEmpty()) return null
+        return synthesizeWithRetry(body, dir)
+    }
+
+    /** 播一个已合成好的文件并挂起直到播完；代次不符（被用户打断）返回 false */
+    suspend fun playPrepared(file: File, gen: Int): Boolean = playFileAwait(file, gen)
+
+    /** 流水线收尾：只有代次仍然是自己的时候才把状态置回空闲 */
+    fun endStreamSession(gen: Int) {
+        if (gen == generation) {
+            if (_state.value is State.Speaking || _state.value is State.Loading) {
+                _state.value = State.Idle
+            }
+            currentText = null
+        }
+    }
+
     fun stop() {
         // 先升代次再停：任何在途流水线此后发现自己代次对不上，一律闭嘴
         generation++
