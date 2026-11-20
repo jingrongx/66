@@ -185,6 +185,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var emptyWakeStreak = 0
     private var wakeOnsetBoostDb = 0f
     private var wakeOnsetBoostUntil = 0L
+    // 惩罚期一共丢了多少段（日志节流用，否则 90 秒能刷几十行）
+    private var wakeSkipCount = 0
 
     // 主动提醒（电量低/充满）：键控一次（同档位只提醒一次），空闲才说，静默安睡不说
     private var lastLowKey: String? = null
@@ -1507,6 +1509,20 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     }
 
                     override fun onUtterance(wav: java.io.File, snrDb: Float) {
+                        // 空转惩罚期：整段丢弃，连云端转写都不跑。
+                        // 只抬 6dB 门槛对直播人声根本没用——实测那段峰值 -8dBFS，门槛从 -46 抬到 -40
+                        // 照样过线；只有「干脆不送」才真能省电、省配额、少占采集通道。
+                        // 这段时间唤醒仍由端侧 KWS 兜着，不受影响。
+                        if (wakeOnsetBoostUntil > SystemClock.elapsedRealtime()) {
+                            wav.delete()
+                            if (wakeSkipCount++ % 5 == 0) {
+                                LogStore.log(
+                                    "wake",
+                                    "空转惩罚中：跳过待机语音（已跳 $wakeSkipCount 段，端侧唤醒照常）",
+                                )
+                            }
+                            return
+                        }
                         handleWakeUtterance(wav, snrDb)
                     }
 
@@ -1726,6 +1742,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return
         }
         lastWakeConfirmAt = nowHit
+        // 真有人喊醒了：立刻卸掉「空转惩罚」，恢复正常灵敏度
+        clearEmptyWake()
+        wakeSkipCount = 0
         // 息屏待机时被喊醒：先把屏幕点亮，再出声——
         // 机器人放在桌上，声音回应了但屏幕黑着，用户会以为它没醒
         ScreenAwake.wakeUp(appContext)
