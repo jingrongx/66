@@ -76,10 +76,16 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         const val WAKE_PICK_WINDOW_MS = 1_500L
 
         /** 首句最少几个字就允许在逗号处切：够成一口气，又不至于让人干等 */
-        const val FIRST_SENTENCE_CHARS = 8
+        const val FIRST_SENTENCE_CHARS = 10
 
-        /** 首句说到多少字还没标点就强制切走播报（后续句子仍用 34 字兜底） */
+        /** 首句说到多少字还没标点就强制切走播报（后续句子仍用 48 字兜底） */
         const val FIRST_TTS_CHARS = 18
+
+        /** 首句最少几个字才单独成段：再短就并到下一句，碎句是「一顿一顿」的主要来源 */
+        const val MIN_FIRST_PIECE = 4
+
+        /** 后续句子最少几个字才单独成段 */
+        const val MIN_PIECE = 10
     }
 
     private val repo = app.settingsRepository
@@ -1230,6 +1236,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         // 老实现是 `if (!ok) break`，一次 start 抖动就把剩下半篇全吞了。
                         if (!ok && !TtsPlayer.isActive(playGen)) break
                     }
+                    // 整段回答共用一条音轨：文件都写进去了不等于已经播完，
+                    // 必须等播放头追上写入量再收尾，否则最后一句还在响就回待机、开麦，
+                    // 自己的尾音会被当成用户开口（"播完又自己触发了"）。
+                    TtsPlayer.awaitPlaybackDone(playGen)
                 } catch (_: CancellationException) {
                     TtsPlayer.stop()
                 } finally {
@@ -1257,16 +1267,26 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         _statusHint.value = null
                     }
                     // 一遇到句末标点就把这一句送出去合成（首句通常 0.3~0.8 秒就能开口）
-                    var cut = findSentenceEnd(speechBuffer, spokenUpTo)
+                    var cut = findSentenceEnd(speechBuffer, spokenUpTo, !firstPiece.isCompleted)
                     while (cut >= 0) {
+                        val len = cut + 1 - spokenUpTo
+                        // 太碎的片段不单独成段：「好。」「是的。」各自送去合成、各自起播，
+                        // 每个边界都要多等一次合成+一次起播，听感就是「这，是一个好，东西」。
+                        // 并到下一句一起播，语义和语调反而更自然。
+                        val minLen = if (!firstPiece.isCompleted) MIN_FIRST_PIECE else MIN_PIECE
+                        if (len < minLen) {
+                            cut = findSentenceEnd(speechBuffer, cut + 1, false)
+                            continue
+                        }
                         val piece = speechBuffer.substring(spokenUpTo, cut + 1).trim()
                         spokenUpTo = cut + 1
                         emit(piece)
-                        cut = findSentenceEnd(speechBuffer, spokenUpTo)
+                        cut = findSentenceEnd(speechBuffer, spokenUpTo, !firstPiece.isCompleted)
                     }
                     // 长句兜底：一口气说到上限还没标点，先播出去，别让人干等。
                     // 首句门槛小得多——第一句出来的早晚，直接决定「回应快不快」的听感。
-                    val cutThreshold = if (!firstPiece.isCompleted) FIRST_TTS_CHARS else 34
+                    // 后续句子放宽到 48 字：34 字就切常常切在定语中间，读出来是半截话。
+                    val cutThreshold = if (!firstPiece.isCompleted) FIRST_TTS_CHARS else 48
                     if (speechBuffer.length - spokenUpTo >= cutThreshold) {
                         val piece = speechBuffer.substring(spokenUpTo).trim()
                         spokenUpTo = speechBuffer.length
@@ -1320,16 +1340,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     /** 从 [from] 起找第一个句末标点（至少 5 个字才算一句，避免「好。」这种碎句） */
     private val sentenceEnds = "。！？!?；;…"
 
-    /** 从 [from] 起找第一个可切分点（至少 5 个字才算一句，避免「好。」这种碎句）；换行也算 */
-    private fun findSentenceEnd(text: CharSequence, from: Int): Int {
-        if (text.length <= from + 4) return -1
+    /** 从 [from] 起找第一个可切分点（至少 3 个字才算一句，避免「好。」这种碎句）；换行也算 */
+    private fun findSentenceEnd(text: CharSequence, from: Int, isFirst: Boolean): Int {
         // 首句额外允许在逗号/顿号处切：AI 的第一句常是「低糖电饭煲啊，它是靠……这类结构」，
-        // 一路等到句号才送合成要多等 1~2 秒；8 个字的话头已经够合成一段自然的起句，
-        // 听感上「马上出声」比「等一整句完整的话」重要得多。
-        val pauseMin = if (from == 0) FIRST_SENTENCE_CHARS else 40
-        for (i in (from + 4) until text.length) {
+        // 一路等到句号才送合成要多等 1~2 秒；10 个字的话头已经够合成一段自然的起句。
+        val pauseMin = if (isFirst) FIRST_SENTENCE_CHARS else 40
+        for (i in from until text.length) {
             val c = text[i]
-            if (sentenceEnds.indexOf(c) >= 0 || c.code == 10) return i
+            if ((sentenceEnds.indexOf(c) >= 0 || c.code == 10) && i - from + 1 >= 3) return i
             val isPause = c == '，' || c == ',' || c == '、' || c == '：' || c == ':'
             if (isPause && i - from + 1 >= pauseMin) return i
         }
@@ -1809,13 +1827,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 // 之前 650ms / 峰值回落 16dB 是按「连续说话」调的，老人说话中间常有
                 // 800ms 以上的换气停顿，实测切出过「如果一只猫一整天。」「我一直」这种半句，
                 // 转写出来驴唇不对马嘴，用户只能重说一遍——省的 0.45 秒远不值这个代价。
-                silenceEndMs = 1_150L,
+                silenceEndMs = 1_300L,
+                // 语速自适应：本句里他停过 1.5 秒，就等他 2.4 秒再收段（上限 2.6 秒），
+                // 而不是死守固定值把后半句切成新的一句
+                adaptiveSilence = true,
                 minSpeechMs = 300L,
                 bargeInSensitivity = 0,
                 idleTimeoutMs = 15_000L,
-                // 一句话最多录 10 秒（原 6 秒）：长问题（「如果一只猫一整天都在睡觉会怎么样」）
-                // 6 秒根本说不完，硬切只能得到前半句
-                maxUtteranceMs = 10_000L,
+                // 一句话最多录 15 秒（原 6 → 10 → 15）：老人问长问题 10 秒也常说不完
+                maxUtteranceMs = 15_000L,
                 peakDropDb = 22f,
             ),
             listener = object : ContinuousConversation.Listener {

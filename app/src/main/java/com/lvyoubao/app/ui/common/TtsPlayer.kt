@@ -53,6 +53,13 @@ object TtsPlayer {
     private var job: Job? = null
     private var player: MediaPlayer? = null
     private var streamPlayer: Mp3StreamPlayer? = null
+
+    /**
+     * 整段回答共用的音轨（流水线播报专用）。句与句之间不再「销毁播放器 → 重建播放器」——
+     * 旧链每句一个 MediaPlayer，setDataSource+prepare 在这台 MTK 上要 300~600ms，
+     * 加上每段 Edge 音频首尾各带一截静音，短句连播时听感就被切成「这，是一个好，东西」。
+     */
+    private var sink: SpeechSink? = null
     private var systemTts: TextToSpeech? = null
     private var systemReady = false
 
@@ -220,7 +227,8 @@ object TtsPlayer {
     // 逐句 speak() 的老链路，每句都要重新建立一次 EdgeTTS 的 WSS 连接（握手约 0.9 秒）
     // 再等首帧（约 0.5 秒），句与句之间就硬生生空出 2~3 秒。改成合成器一路往下把句子
     // 合成为文件、播放器严格按顺序播：合成（约 1.5 秒/句）远快于播放（4~6 秒/句），
-    // 队列稳定领先，播放器拿到手就播，句间只剩 MediaPlayer 150ms 的轮询粒度。
+    // 队列稳定领先。v0.9.31 起整段回答共用一条 AudioTrack（见 [SpeechSink]），
+    // 句间不再重建播放器，段与段真正无缝。
 
     /** 开一轮流水线播报：打断上一轮并返回新的播放代次 */
     fun startStreamSession(): Int {
@@ -228,6 +236,12 @@ object TtsPlayer {
         val gen = ++generation
         currentText = null
         _state.value = State.Loading
+        sink = SpeechSink(
+            isCurrent = { gen == generation },
+            onStarted = {
+                if (gen == generation && _state.value is State.Loading) _state.value = State.Speaking
+            },
+        )
         return gen
     }
 
@@ -238,8 +252,39 @@ object TtsPlayer {
         return synthesizeWithRetry(body, dir)
     }
 
-    /** 播一个已合成好的文件并挂起直到播完；代次不符（被用户打断）返回 false */
-    suspend fun playPrepared(file: File, gen: Int): Boolean = playFileAwait(file, gen)
+    /**
+     * 播一个已合成好的文件：解码成 PCM、掐掉首尾静音后**续写进同一个音轨**，
+     * 与上一句无缝相接（旧实现每句新建 MediaPlayer，句间固定空出 0.5~1 秒）。
+     * 没有流水线会话时（普通 speak() 链路）仍走单文件播放。
+     */
+    suspend fun playPrepared(file: File, gen: Int): Boolean {
+        if (gen != generation) return false
+        val s = sink ?: return playFileAwait(file, gen)
+        // 解码和阻塞写入都不能占主线程（AudioTrack 缓冲满时 write 会等）
+        return withContext(Dispatchers.IO) {
+            val clip = decodeMp3File(file) ?: return@withContext playFileAwait(file, gen)
+            val pcm = trimSilence(clip)
+            if (pcm.isEmpty()) {
+                ttsLog("整段音频全是静音，已丢弃")
+                return@withContext true
+            }
+            s.ensureTrack(clip.sampleRate, clip.channels)
+            var off = 0
+            while (off < pcm.size) {
+                if (gen != generation || !s.alive) return@withContext false
+                val w = s.writePcm(pcm, off, pcm.size - off)
+                if (w <= 0) return@withContext false
+                off += w
+            }
+            true
+        }
+    }
+
+    /** 等整段回答真正播完（播放头追上写入量）。播放器流水线在收尾时调它 */
+    suspend fun awaitPlaybackDone(gen: Int) {
+        if (gen != generation) return
+        sink?.awaitDrained()
+    }
 
     /**
      * 首句秒播：边收 WSS 音频帧边解码播放，首声 ≈ 微软返回首帧的耗时（约 0.5 秒），
@@ -257,6 +302,8 @@ object TtsPlayer {
     /** 流水线收尾：只有代次仍然是自己的时候才把状态置回空闲 */
     fun endStreamSession(gen: Int) {
         if (gen == generation) {
+            sink?.abort()
+            sink = null
             if (_state.value is State.Speaking || _state.value is State.Loading) {
                 _state.value = State.Idle
             }
@@ -269,6 +316,8 @@ object TtsPlayer {
         generation++
         job?.cancel()
         job = null
+        runCatching { sink?.abort() }
+        sink = null
         runCatching { streamPlayer?.abort() }
         streamPlayer = null
         runCatching { player?.let { if (it.isPlaying) it.stop() } }
@@ -308,6 +357,7 @@ object TtsPlayer {
      */
     private suspend fun playStreamed(text: String, gen: Int): Boolean = coroutineScope {
         val t0 = System.currentTimeMillis()
+        val sessionSink = sink
         val player = Mp3StreamPlayer(
             onStarted = {
                 if (gen == generation && _state.value is State.Loading) {
@@ -316,9 +366,11 @@ object TtsPlayer {
                 }
             },
             isCurrent = { gen == generation },
+            sink = sessionSink,
         )
         streamPlayer = player
-        val decoder = async { player.run(gen) }
+        // 解码 + 写音轨是阻塞的（缓冲区满时 write 会等），必须离开主线程
+        val decoder = async(Dispatchers.IO) { player.run(gen) }
         val ok = EdgeTts.streamSynthesize(text) { bytes -> player.feed(bytes) }
         player.endInput()
         val sawPcm = decoder.await()
@@ -561,6 +613,207 @@ object TtsPlayer {
         return engine
     }
 
+    // ───────────────────── 整段共用一个音轨：句间无缝 ─────────────────────
+    //
+    // 为什么必须共用：旧链每句话「合成到文件 → new MediaPlayer → setDataSource → prepare → start」，
+    // 这台 MTK 上 prepare 就要 300~600ms；再加上 Edge 每段音频首尾自带的 0.2~0.8 秒静音，
+    // 一句短话被切成两段播出来就是「这，是一个好，东西」。
+    // 现在整段回答只在开头建一条 AudioTrack，后面每句解成 PCM 掐掉首尾静音直接续写，
+    // 段与段之间只剩解码耗时（几十毫秒，且被 2 秒的缓冲区完全吃掉）。
+
+    private class PcmClip(val data: ByteArray, val sampleRate: Int, val channels: Int)
+
+    private class SpeechSink(
+        private val isCurrent: () -> Boolean,
+        private val onStarted: () -> Unit,
+    ) {
+        @Volatile private var track: AudioTrack? = null
+        private var sampleRate = 24_000
+        private var channels = 1
+        private var writtenBytes = 0L
+        private var started = false
+
+        @Volatile var alive = true
+            private set
+
+        private val writtenFrames: Long get() = writtenBytes / (2L * channels)
+
+        fun ensureTrack(rate: Int, ch: Int) {
+            if (!alive || track != null) return
+            sampleRate = if (rate > 0) rate else 24_000
+            channels = if (ch > 0) ch else 1
+            val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+            val minBuf = AudioTrack.getMinBufferSize(sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT)
+            // 缓冲 ≈2 秒：解码耗时、网络抖动都靠它吸收，写入端永远不会卡住播放头
+            val bufSize = maxOf(minBuf * 4, 96_000)
+            track = runCatching {
+                AudioTrack(
+                    AudioManager.STREAM_MUSIC, sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize, AudioTrack.MODE_STREAM,
+                )
+            }.getOrNull()
+            ttsLog("共用音轨就绪：${sampleRate}Hz ${channels}ch 缓冲 ${bufSize}B")
+        }
+
+        fun writePcm(buf: java.nio.ByteBuffer, size: Int): Int {
+            val t = track ?: return -1
+            if (!alive) return -1
+            val w = runCatching { t.write(buf, size, AudioTrack.WRITE_BLOCKING) }.getOrDefault(-1)
+            if (w > 0) count(w)
+            return if (alive) w else -1
+        }
+
+        fun writePcm(pcm: ByteArray, offset: Int, len: Int): Int {
+            val t = track ?: return -1
+            if (!alive) return -1
+            val w = runCatching { t.write(pcm, offset, len, AudioTrack.WRITE_BLOCKING) }.getOrDefault(-1)
+            if (w > 0) count(w)
+            return if (alive) w else -1
+        }
+
+        private fun count(bytes: Int) {
+            writtenBytes += bytes
+            if (started) return
+            started = true
+            val t = track ?: return
+            runCatching { t.play() }
+            onStarted()
+        }
+
+        /** 等播放头追上写入量（= 整段真的播完）；中断时立刻返回 */
+        suspend fun awaitDrained() {
+            val t = track ?: return
+            if (!started) return
+            var lastHead = -1L
+            var sameMs = 0L
+            while (alive && isCurrent()) {
+                val head = runCatching { t.playbackHeadPosition.toLong() }.getOrDefault(writtenFrames)
+                if (head >= writtenFrames - 2) break
+                if (head == lastHead) {
+                    sameMs += 40
+                    if (sameMs >= 3_000) break // 播放头 3 秒不动 = 真卡死，别把整轮对话挂住
+                } else {
+                    lastHead = head
+                    sameMs = 0
+                }
+                delay(40)
+            }
+        }
+
+        fun abort() {
+            if (!alive) return
+            alive = false
+            val t = track
+            track = null
+            runCatching { t?.pause() }
+            runCatching { t?.flush() }
+            runCatching { t?.release() }
+        }
+    }
+
+    /** 把一个 MP3 文件整段解码成 PCM（几十毫秒，远快于播放；用于共用音轨链） */
+    private fun decodeMp3File(file: File): PcmClip? {
+        var codec: MediaCodec? = null
+        return try {
+            val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_MPEG)
+            codec = c
+            c.configure(
+                MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_MPEG, 24_000, 1),
+                null, null, 0,
+            )
+            c.start()
+            val out = java.io.ByteArrayOutputStream()
+            val info = MediaCodec.BufferInfo()
+            var rate = 24_000
+            var ch = 1
+            var eosIn = false
+            var done = false
+            file.inputStream().use { ins ->
+                val chunk = ByteArray(16 * 1024)
+                while (!done) {
+                    if (!eosIn) {
+                        val inIdx = c.dequeueInputBuffer(10_000)
+                        if (inIdx >= 0) {
+                            val buf = c.getInputBuffer(inIdx)
+                            val want = if (buf != null) minOf(chunk.size, buf.remaining()) else 0
+                            val n = if (want > 0) ins.read(chunk, 0, want) else -1
+                            if (buf == null || n <= 0) {
+                                c.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                eosIn = true
+                            } else {
+                                buf.clear()
+                                buf.put(chunk, 0, n)
+                                c.queueInputBuffer(inIdx, 0, n, 0, 0)
+                            }
+                        }
+                    }
+                    val outIdx = c.dequeueOutputBuffer(info, 10_000)
+                    if (outIdx >= 0) {
+                        if (info.size > 0) {
+                            runCatching {
+                                val fmt = c.outputFormat
+                                rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                                ch = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                            }
+                            val b = c.getOutputBuffer(outIdx)
+                            if (b != null) {
+                                b.position(info.offset)
+                                b.limit(info.offset + info.size)
+                                val arr = ByteArray(info.size)
+                                b.get(arr)
+                                out.write(arr)
+                            }
+                        }
+                        c.releaseOutputBuffer(outIdx, false)
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) done = true
+                    }
+                }
+            }
+            val data = out.toByteArray()
+            if (data.isEmpty()) null else PcmClip(data, rate, ch)
+        } catch (e: Exception) {
+            ttsLog("整段解码失败：${e.javaClass.simpleName} ${e.message ?: ""}")
+            null
+        } finally {
+            runCatching { codec?.stop() }
+            runCatching { codec?.release() }
+        }
+    }
+
+    /**
+     * 掐掉一段音频首尾的静音。Edge 每段合成都带一截首尾静音，短句一句一段地拼起来时，
+     * 这些静音就是听感里那些莫名其妙的停顿。首留 60ms（别削掉字头）、尾留 150ms（自然收尾）。
+     */
+    private fun trimSilence(clip: PcmClip): ByteArray {
+        val pcm = clip.data
+        val frameBytes = 2 * clip.channels
+        val frames = pcm.size / frameBytes
+        if (frames < 200) return pcm
+        val threshold = 500 // ≈ -36dBFS：比这还轻的就是底噪
+        fun ampAt(i: Int): Int {
+            var m = 0
+            val base = i * frameBytes
+            for (c in 0 until clip.channels) {
+                val lo = pcm[base + c * 2].toInt() and 0xFF
+                val hi = pcm[base + c * 2 + 1].toInt()
+                val v = ((hi shl 8) or lo).toShort().toInt()
+                val a = if (v < 0) -v else v
+                if (a > m) m = a
+            }
+            return m
+        }
+        var first = 0
+        while (first < frames && ampAt(first) < threshold) first++
+        if (first >= frames) return ByteArray(0) // 整段静音（合成出错），丢掉别占时间
+        var last = frames - 1
+        while (last > first && ampAt(last) < threshold) last--
+        val lead = clip.sampleRate * 60 / 1000
+        val tail = clip.sampleRate * 150 / 1000
+        val start = maxOf(0, first - lead)
+        val end = minOf(frames, last + tail)
+        return pcm.copyOfRange(start * frameBytes, end * frameBytes)
+    }
+
     /**
      * 流式播放器（秒播核心，参考实现 MSE 边收边播的原生等价物）：
      * WSS 到来的 MP3 帧经 [feed] 入队，解码循环喂 MediaCodec（audio/mpeg）解出 PCM 写 AudioTrack，
@@ -570,6 +823,8 @@ object TtsPlayer {
     private class Mp3StreamPlayer(
         private val onStarted: () -> Unit,
         private val isCurrent: () -> Boolean, // 播报代次仍有效（未被停止/接管）
+        /** 非空则写进整段共用的那条音轨（流水线播报），句间无缝；空则自己建轨（普通 speak 链路） */
+        private val sink: SpeechSink? = null,
     ) {
         private val input = LinkedBlockingQueue<ByteArray>()
         private var codec: MediaCodec? = null
@@ -663,19 +918,30 @@ object TtsPlayer {
                         if (info.size > 0) {
                             ensureTrack(c.outputFormat)
                             val t = track
-                            val out = if (t != null) c.getOutputBuffer(outIdx) else null
-                            if (t != null && out != null) {
+                            if (sink == null && t == null) {
+                                c.releaseOutputBuffer(outIdx, false)
+                                break
+                            }
+                            val out = c.getOutputBuffer(outIdx)
+                            if (out != null) {
                                 out.position(info.offset)
                                 out.limit(info.offset + info.size)
-                                val w = t.write(out, info.size, AudioTrack.WRITE_BLOCKING)
+                                // 有流水线会话：PCM 续写进共用音轨，段间不留缝
+                                val w = if (sink != null) {
+                                    sink.writePcm(out, info.size)
+                                } else {
+                                    t!!.write(out, info.size, AudioTrack.WRITE_BLOCKING)
+                                }
                                 if (w > 0) {
-                                    writtenFrames += w / (2L * channels)
-                                    writtenBytes += w
                                     sawPcm = true
-                                    if (!started && (writtenBytes >= prerollBytes() || eosQueued)) {
-                                        started = true
-                                        t.play()
-                                        onStarted()
+                                    if (sink == null) {
+                                        writtenFrames += w / (2L * channels)
+                                        writtenBytes += w
+                                        if (!started && (writtenBytes >= prerollBytes() || eosQueued)) {
+                                            started = true
+                                            t!!.play()
+                                            onStarted()
+                                        }
                                     }
                                 } else if (w < 0) {
                                     ttsLog("AudioTrack.write 错误码 $w，停止本段")
@@ -696,8 +962,9 @@ object TtsPlayer {
                     if (eosQueued && drained) break
                 }
                 // 等播完：播放头追上写入量（部分 ROM 的回调不可靠，与 playFileAwait 同样用轮询）
+                // 共用音轨时不在这里等——整段回答的收尾由 awaitPlaybackDone 统一等
                 val t = track
-                if (t != null && started) {
+                if (sink == null && t != null && started) {
                     while (!aborted && isCurrent() && t.playbackHeadPosition < writtenFrames) {
                         delay(80)
                     }
@@ -720,6 +987,11 @@ object TtsPlayer {
             runCatching {
                 sampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                 channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            }
+            // 流水线会话：整段回答共用一条音轨，这里只负责把它建起来
+            if (sink != null) {
+                sink.ensureTrack(sampleRate, channels)
+                return
             }
             val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
             val minBuf = AudioTrack.getMinBufferSize(sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT)

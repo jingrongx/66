@@ -78,6 +78,12 @@ class ContinuousConversation(
         val minOnsetDb: Float = -45f,
         /** 是否用 RNNoise 做神经网络降噪（48k 域推理；不可用/太慢会自动退回不降噪） */
         val denoise: Boolean = true,
+        /**
+         * 语速自适应收段：老人说话常有 1~2 秒的思考停顿，固定静音判据会把一句话切成两半，
+         * 后半句单独送去识别就是「还没说完就发出去了」。
+         * 打开后会记住本句内出现过的最长停顿，收段门槛 = max(silenceEndMs, 最长停顿×1.7，上限 2.6 秒）。
+         */
+        val adaptiveSilence: Boolean = false,
     )
 
     companion object {
@@ -153,6 +159,9 @@ class ContinuousConversation(
     private var inSpeech = false
     private var speechStartAt = 0L
     private var speechPeakDb = -120f
+
+    /** 本句内出现过的最长停顿（毫秒）：说话人越慢，收段门槛自动越宽 */
+    private var longestPauseMs = 0L
     private var segmentNoiseDb = -60f
 
     // 100Hz 一阶高通的状态（去空调/桌面震动/手持低频轰鸣）
@@ -425,8 +434,14 @@ class ContinuousConversation(
         val vadVeto = !inSpeech && denoiseVad >= 0f && denoiseVad < 0.2f
         val isVoice = db >= onsetDb && !peakSilent && !vadVeto
         val requiredRun = if (ttsActive) ONSET_RUN_TTS else ONSET_RUN_NORMAL
+        // 上一帧人声距今多久：用来学「这个人一句话里能停多长」
+        val gapSinceVoice = if (lastVoiceAt == 0L) 0L else now - lastVoiceAt
 
         if (isVoice) {
+            // 停顿后又开口：把这次停顿记下来当本句的节奏参考（<300ms 是字间气口，不算）
+            if (inSpeech && gapSinceVoice in 300..4_000 && gapSinceVoice > longestPauseMs) {
+                longestPauseMs = gapSinceVoice
+            }
             lastVoiceAt = now
             lastActivityAt = now
             if (!inSpeech) {
@@ -445,7 +460,14 @@ class ContinuousConversation(
             voiceRun = 0
             if (inSpeech) {
                 appendSegment(frame) // 静音帧也录，保留自然尾音
-                if (now - lastVoiceAt > config.silenceEndMs) endSpeech(now)
+                // 收段门槛跟着说话人自己的节奏走：本句里他停过 1.5 秒，就等他 2.4 秒再收，
+                // 而不是死守 1.15 秒把人家的后半句切成新的一句（"还没说完就发出去了"）。
+                val needSilence = if (config.adaptiveSilence) {
+                    maxOf(config.silenceEndMs, minOf(longestPauseMs * 17 / 10, 2_600L))
+                } else {
+                    config.silenceEndMs
+                }
+                if (now - lastVoiceAt > needSilence) endSpeech(now)
             }
         }
 
@@ -466,6 +488,7 @@ class ContinuousConversation(
         runCatching { listener.onSpeechStart() } // 音频线程直接回调，调用方只做轻量状态更新
         speechStartAt = now
         speechPeakDb = -120f
+        longestPauseMs = 0L
         segmentNoiseDb = noiseFloorDb
         segment = ByteArrayOutputStream()
         segmentSamples = 0
