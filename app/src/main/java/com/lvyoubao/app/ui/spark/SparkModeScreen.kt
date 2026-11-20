@@ -59,6 +59,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,6 +92,7 @@ import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.largetext.DoubaoCallOverlay
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 
 @Composable
@@ -130,20 +132,47 @@ fun SparkModeScreen(
     var duplexAsr by remember { mutableStateOf("") }
     var duplexAnswer by remember { mutableStateOf("") }
     var duplexHint by remember { mutableStateOf<String?>(null) }
+    // 最后一次「有人在说话」的时间：通话中长时间没人说话就自动挂断回萌眼
+    var lastVoiceAt by remember { mutableStateOf(System.currentTimeMillis()) }
+    val callScope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         duplexClient.onEvent.collect { ev ->
             when (ev) {
                 // 服务端切新 item = 新一轮说话：上一轮的识别文字先清掉，避免跨轮越滚越长
-                is DoubaoDuplexClient.Event.AsrStarted -> duplexAsr = ""
-                is DoubaoDuplexClient.Event.Asr -> duplexAsr = if (ev.isFinal) ev.text else duplexAsr + ev.text
+                is DoubaoDuplexClient.Event.AsrStarted -> {
+                    duplexAsr = ""
+                }
+                // 注意：豆包的 transcription.delta 是「累计快照」而不是增量，直接覆盖；
+                // 早前用 += 拼会出现「你你好你好啊」这种叠字。
+                is DoubaoDuplexClient.Event.Asr -> {
+                    duplexAsr = ev.text
+                    lastVoiceAt = System.currentTimeMillis()
+                    if (ev.isFinal && ev.text.isNotBlank()) {
+                        val said = ev.text
+                        // 先说给本机能力听：机器人动作 / 电量 / 音量 / 计时 / 记事 / 记忆查找命中就本地执行，
+                        // 再用豆包音色把确认话术说出来（模型那条回答同时打断，避免各说一套）。
+                        callScope.launch {
+                            val confirm = runCatching { vm.handleCallCommand(context, said) }.getOrNull()
+                            if (confirm != null) {
+                                duplexClient.cancelResponse()
+                                duplexClient.speak(confirm)
+                                duplexAnswer = confirm
+                                SparkChatStore.appendDuplexTurn(said, confirm)
+                            }
+                        }
+                    }
+                }
                 is DoubaoDuplexClient.Event.Answer -> {
+                    lastVoiceAt = System.currentTimeMillis()
                     if (ev.isFinal) {
                         duplexAnswer = ev.text
                         // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
                         SparkChatStore.appendDuplexTurn(duplexAsr, ev.text)
                     } else {
-                        duplexAnswer += ev.text
+                        // 兼容两种下发：累计快照直接替换，真增量才追加
+                        duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
+                        else duplexAnswer + ev.text
                     }
                 }
                 is DoubaoDuplexClient.Event.SessionReady -> {
@@ -187,6 +216,25 @@ fun SparkModeScreen(
     BackHandler(enabled = showDuplexCall) {
         duplexClient.close()
         showDuplexCall = false
+        vm.setShowEyes(true)
+    }
+
+    // 通话中长时间没人说话（默认 8 秒）自动挂断，回到萌眼动画：随身设备不该一直占着麦克风
+    LaunchedEffect(showDuplexCall) {
+        if (!showDuplexCall) return@LaunchedEffect
+        lastVoiceAt = System.currentTimeMillis()
+        while (true) {
+            delay(1_000)
+            val silentMs = System.currentTimeMillis() - lastVoiceAt
+            val listening = duplexState == DoubaoDuplexClient.State.LISTENING ||
+                duplexState == DoubaoDuplexClient.State.CONNECTED
+            if (listening && silentMs > 8_000) {
+                duplexClient.close()
+                showDuplexCall = false
+                vm.setShowEyes(true)
+                break
+            }
+        }
     }
 
     // 长按会话消息弹出的操作面板（收藏/分享）
@@ -820,6 +868,7 @@ fun SparkModeScreen(
                     onHangUp = {
                         duplexClient.close()
                         showDuplexCall = false
+                        vm.setShowEyes(true)
                     },
                     showPhotoActions = false,
                 )

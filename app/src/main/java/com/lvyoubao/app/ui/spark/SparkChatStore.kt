@@ -34,11 +34,16 @@ object SparkChatStore {
      */
     fun appendDuplexTurn(asr: String, answer: String) {
         if (asr.isBlank() && answer.isBlank()) return
-        if (asr.isNotBlank()) {
+        // 本机能力那条链路（handleAssistantIntent）自己也会 appendMessage，
+        // 这里按「最近两条里已有同角色同文本」去重，避免聊天里出现两条一样的确认
+        fun alreadyThere(role: String, text: String): Boolean =
+            messages.value.takeLast(2).any { it.role == role && it.text == text }
+
+        if (asr.isNotBlank() && !alreadyThere("user", asr)) {
             append(SparkMessage(role = "user", text = asr))
             appendHistory(OutMessage(role = "user", text = asr))
         }
-        if (answer.isNotBlank()) {
+        if (answer.isNotBlank() && !alreadyThere("assistant", answer)) {
             append(SparkMessage(role = "assistant", text = answer))
             appendHistory(OutMessage(role = "assistant", text = answer))
         }

@@ -116,6 +116,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var sparkActive = false
     // 全双工通话占用麦克风期间，唤醒监听让路（一台设备同一时刻只能有一个 AudioRecord）
     private var duplexAudioActive = false
+    // 通话中本机确认话术的去处：非空时 speakHint 不自己朗读，改由豆包音色说出来
+    private var duplexReplySink: ((String) -> Unit)? = null
     private var lastConvUploadAt = 0L
     private var lastWakeUploadAt = 0L
     private var wakeUploadCount = 0
@@ -207,6 +209,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 切播报态后朗读，播完由 TTS 收集器按「静默 4 秒回萌眼」接管
      */
     private fun speakHint(context: Context, text: String) {
+        // 全双工通话中：不走本机 TTS（会和豆包的声音叠在一起），把确认话术交给通话层去说
+        duplexReplySink?.let { sink ->
+            sink(text)
+            return
+        }
         _eyeState.value = SparkEyeState.SPEAKING
         TtsPlayer.speak(context, text)
     }
@@ -1246,6 +1253,21 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     fun onSparkActive() {
         sparkActive = true
         syncWakeEngine()
+    }
+
+    /**
+     * 通话中执行 app 自身能力（机器人动作 / 拍照 / 电量 / 音量 / 计时 / 记事 / 记忆查找 / 定位类问句）。
+     * 复用与聊天同一条 handleAssistantIntent 链路，命中返回要说的确认话术（交给豆包音色播报），
+     * 没命中返回 null —— 这句话照常交给全双工模型自由回答。
+     */
+    suspend fun handleCallCommand(context: Context, text: String): String? {
+        var reply: String? = null
+        duplexReplySink = { reply = it }
+        return try {
+            if (handleAssistantIntent(context, text)) reply ?: "好的" else null
+        } finally {
+            duplexReplySink = null
+        }
     }
 
     /**

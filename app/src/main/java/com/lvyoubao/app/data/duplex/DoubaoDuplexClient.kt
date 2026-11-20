@@ -229,6 +229,17 @@ class DoubaoDuplexClient(private val context: Context) {
     }
 
     /** 主动推送一句话让模型先开口（打招呼） */
+    /** 打断当前回答（本地先清播放队列，再发 response.cancel） */
+    fun cancelResponse() {
+        audio?.flushPlayback()
+        webSocket?.send(DuplexProtocol.simple("response.cancel"))
+    }
+
+    /** 用豆包音色说一句话（干预回复）：本机能力执行完的确认话术走这条，避免和 TTS 叠音 */
+    fun speak(text: String) {
+        greet(text)
+    }
+
     fun greet(text: String) {
         val sid = DuplexProtocol.newSessionId()
         webSocket?.send(DuplexProtocol.speechText("speech_text_buffer.append", sid, text))

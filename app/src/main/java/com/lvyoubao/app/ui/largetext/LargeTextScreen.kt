@@ -753,7 +753,8 @@ fun LargeTextScreen(
         duplexClient.onEvent.collect { ev ->
             when (ev) {
                 is DoubaoDuplexClient.Event.AsrStarted -> duplexAsr = ""
-                is DoubaoDuplexClient.Event.Asr -> duplexAsr = if (ev.isFinal) ev.text else duplexAsr + ev.text
+                // transcription.delta 是累计快照，直接覆盖（用 += 会叠成「你你好你好啊」）
+                is DoubaoDuplexClient.Event.Asr -> duplexAsr = ev.text
                 is DoubaoDuplexClient.Event.Answer -> {
                     if (ev.isFinal) {
                         duplexAnswer = ev.text
@@ -762,7 +763,9 @@ fun LargeTextScreen(
                         vm.appendDuplexTurn(duplexAsr, ev.text, paths)
                         duplexPhotos = emptyList()
                     } else {
-                        duplexAnswer += ev.text
+                        // 兼容两种下发：累计快照（新文本以旧文本开头）直接替换，真增量才追加
+                        duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
+                        else duplexAnswer + ev.text
                     }
                 }
                 is DoubaoDuplexClient.Event.SessionReady -> {
