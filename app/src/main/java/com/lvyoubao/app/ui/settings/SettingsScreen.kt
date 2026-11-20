@@ -129,6 +129,12 @@ fun SettingsScreen(
             )
         }
     }
+    // 设备管理器（只为熄屏）：本机固件不执行系统睡眠，普通应用只能靠 lockNow()
+    var isScreenAdmin by remember { mutableStateOf(false) }
+    val screenAdminLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { isScreenAdmin = isScreenAdminNow(context) }
+    LaunchedEffect(Unit) { isScreenAdmin = isScreenAdminNow(context) }
 
     // 桌面与后台：默认桌面角色
     var isDefaultHome by remember { mutableStateOf(false) }
@@ -329,6 +335,37 @@ fun SettingsScreen(
                             value = screenOffLabel(state.draft.sparkScreenOffSec),
                             onClick = { screenOffDialog = true },
                         )
+                        // 本机固件改了电源管理：到点不睡眠、广播让应用自己决定。
+                        // 普通应用拿不到 DEVICE_POWER，只能借设备管理器的 lockNow() 熄屏。
+                        if (state.draft.sparkMode && state.draft.sparkScreenOffSec > 0) {
+                            NavRow(
+                                title = "熄屏权限",
+                                subtitle = if (isScreenAdmin) {
+                                    "已授权 · 只用于关闭屏幕，不涉及数据或密码"
+                                } else {
+                                    "本机固件不允许普通应用熄屏，需激活一次设备管理器"
+                                },
+                                value = if (isScreenAdmin) "已授权" else "去激活",
+                                onClick = {
+                                    if (!isScreenAdmin) {
+                                        runCatching {
+                                            screenAdminLauncher.launch(
+                                                Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                                    putExtra(
+                                                        android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                                                        com.lvyoubao.app.ScreenAdminReceiver.component(context),
+                                                    )
+                                                    putExtra(
+                                                        android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                                                        "只申请「锁定屏幕」一项权限，用于空闲时熄屏省电；不会抹除数据、不会改密码。",
+                                                    )
+                                                },
+                                            )
+                                        }
+                                    }
+                                },
+                            )
+                        }
                         Spacer(Modifier.height(10.dp))
                         CardDivider()
                         NavRow(
@@ -1074,6 +1111,13 @@ private fun AddressListEditor(
         )
     }
 }
+
+/** 设备管理器是否已激活（只为熄屏申请 force-lock 一项） */
+internal fun isScreenAdminNow(context: Context): Boolean = runCatching {
+    val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE)
+        as? android.app.admin.DevicePolicyManager ?: return false
+    dpm.isAdminActive(com.lvyoubao.app.ScreenAdminReceiver.component(context))
+}.getOrDefault(false)
 
 /** 是否已被设为默认桌面（HOME 角色）；Android 9- 走默认解析器比对包名 */
 internal fun isDefaultHomeNow(context: Context): Boolean = if (Build.VERSION.SDK_INT >= 29) {

@@ -92,6 +92,23 @@
             </intent-filter>
         </receiver>
 
+        <!--
+          设备管理器：只为「彻底熄屏」（force-lock）。本机固件改了电源管理——
+          到点不睡眠、改成广播 AI 应用自己决定，普通应用拿不到 DEVICE_POWER，
+          lockNow() 是唯一不依赖系统签名的正规熄屏方式。
+        -->
+        <receiver
+            android:name=".ScreenAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".sensing.FatigueSensingService"
             android:exported="false"

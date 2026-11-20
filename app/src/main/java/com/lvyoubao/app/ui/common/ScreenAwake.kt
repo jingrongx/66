@@ -1,12 +1,16 @@
 package com.lvyoubao.app.ui.common
 
 import android.app.Activity
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.WindowManager
+import com.lvyoubao.app.ScreenAdminReceiver
 import com.lvyoubao.app.data.LogStore
 import java.lang.ref.WeakReference
 
@@ -40,6 +44,7 @@ object ScreenAwake {
     private val main = Handler(Looper.getMainLooper())
     private var activityRef: WeakReference<Activity>? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var appContext: Context? = null
 
     /** 当前窗口是否挂着「保持亮屏」 */
     private var keepOnApplied = false
@@ -50,13 +55,51 @@ object ScreenAwake {
 
     private val sleepRunnable = Runnable {
         applyKeepOn(false)
-        LogStore.log(TAG, "空闲息屏：待机 ${idleTimeoutMs / 1000} 秒，屏幕交给系统熄灭")
+        LogStore.log(TAG, "空闲息屏：待机 ${idleTimeoutMs / 1000} 秒，请求熄屏")
+        sleepNow()
     }
 
     /** 绑定宿主 Activity（MainActivity.onCreate 调用）；重复绑定以最后一次为准 */
     fun bind(activity: Activity) {
         activityRef = WeakReference(activity)
+        appContext = activity.applicationContext
         if (enabled) keepOn()
+    }
+
+    /**
+     * 立刻熄屏。
+     *
+     * 两条路，能走哪条走哪条：
+     * 1. `PowerManager.goToSleep()`——要 DEVICE_POWER（系统签名/特权应用才有），
+     *    系统签名的版本或预置到 priv-app 的版本会自动走这条；
+     * 2. `DevicePolicyManager.lockNow()`——要用户激活一次设备管理器（只申请 force-lock），
+     *    这是普通应用在「固件把睡眠决策交给应用」的机器上唯一能真熄屏的正规方式。
+     *
+     * 两条都不通时只撤掉「保持亮屏」，屏幕会不会灭取决于固件——本机固件是不会灭的。
+     */
+    fun sleepNow(): Boolean {
+        val context = appContext ?: return false
+        // 路线 1：系统接口（没有权限会抛 SecurityException，静默跳过）
+        val viaSystem = runCatching {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val m = PowerManager::class.java.getMethod("goToSleep", Long::class.javaPrimitiveType)
+            m.invoke(pm, SystemClock.uptimeMillis())
+            true
+        }.getOrDefault(false)
+        if (viaSystem) {
+            LogStore.log(TAG, "已熄屏（系统 goToSleep）")
+            return true
+        }
+        // 路线 2：设备管理器
+        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+        val admin: ComponentName = ScreenAdminReceiver.component(context)
+        if (dpm != null && dpm.isAdminActive(admin)) {
+            val ok = runCatching { dpm.lockNow() }.isSuccess
+            LogStore.log(TAG, if (ok) "已熄屏（设备管理器 lockNow）" else "熄屏失败：lockNow 抛异常")
+            return ok
+        }
+        LogStore.log(TAG, "熄屏受限：本机固件把睡眠决策交给应用，需激活「熄屏权限」（设置 → 空闲息屏）")
+        return false
     }
 
     /**
