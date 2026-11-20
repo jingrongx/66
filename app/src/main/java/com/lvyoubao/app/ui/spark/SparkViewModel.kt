@@ -40,6 +40,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import kotlin.math.abs
+import kotlin.math.log10
 
 enum class SparkEyeState {
     IDLE,        // 待机呼吸，日常俏皮
@@ -132,9 +135,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     // 通话中本机确认话术的去处：非空时 speakHint 不自己朗读，改由豆包音色说出来
     private var duplexReplySink: ((String) -> Unit)? = null
     private var lastConvUploadAt = 0L
-    private var lastWakeUploadAt = 0L
     private var wakeUploadCount = 0
     private var wakeWindowStart = 0L
+    // 待机语音的处理队列（只留最新一段）：房间噪音频繁触发时，老实现按冷却窗直接删，
+    // 常常把真正那句「小源小源」扔掉；改成排队串行，宁可多跑一次转写也不丢用户的话。
+    private var pendingWakeWav: java.io.File? = null
+    private var wakeDrainJob: Job? = null
 
     // 主动提醒（电量低/充满）：键控一次（同档位只提醒一次），空闲才说，静默安睡不说
     private var lastLowKey: String? = null
@@ -1302,11 +1308,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 config = ContinuousConversation.Config(
                     // 设置里的「灵敏度」以前只管连聊打断，连聊并掉之后就等于没用；现在它直接决定唤醒门槛
                     silenceEndMs = if (curVoiceSens >= 2) 320L else 380L,
-                    minSpeechMs = if (curVoiceSens >= 2) 150L else 220L,
+                    minSpeechMs = if (curVoiceSens >= 2) 180L else 220L,
                     bargeInSensitivity = 0, // 待机不需要打断：主动提醒播报期间不收音，防回灌
                     idleTimeoutMs = Long.MAX_VALUE / 2, // 待机监听常驻，不自动退
-                    onsetMarginDb = if (curVoiceSens >= 2) 6f else 10f,
-                    minOnsetDb = if (curVoiceSens >= 2) -58f else -50f,
+                    onsetMarginDb = if (curVoiceSens >= 2) 8f else 12f,
+                    minOnsetDb = if (curVoiceSens >= 2) -46f else -42f,
                 ),
                 listener = object : ContinuousConversation.Listener {
                     // 一开口就给反馈（约开口后 160ms）：眼睛立刻变「在听」，不用等识别结果
@@ -1339,8 +1345,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             LogStore.log(
                 "wake",
                 "待机监听启动：灵敏度 $curVoiceSens 档，判活门槛 " +
-                    "${if (curVoiceSens >= 2) 6f else 10f}dB / 下限 ${if (curVoiceSens >= 2) -58f else -50f}dB，" +
-                    "最短 ${if (curVoiceSens >= 2) 150L else 220L}ms，静音收段 ${if (curVoiceSens >= 2) 320L else 380L}ms",
+                    "${if (curVoiceSens >= 2) 8f else 12f}dB / 下限 ${if (curVoiceSens >= 2) -46f else -42f}dB，" +
+                    "最短 ${if (curVoiceSens >= 2) 180L else 220L}ms，静音收段 ${if (curVoiceSens >= 2) 320L else 380L}ms",
             )
         } else if (!shouldRun && wakeSession != null) {
             wakeSession?.stop()
@@ -1349,45 +1355,78 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
-     * 待机一段语音：云转写 → 含唤醒词才进连续对话；没命中静默丢弃（杂音/电视声不成词就不打扰）。
-     * 限流：2 秒冷却 + 每分钟最多 6 条上传，防持续噪声刷请求。
+     * 待机语音入口：只保留最新的一段，串行转写（见 [drainWakeQueue]）。
      */
-    private fun handleWakeUtterance(wav: java.io.File) = viewModelScope.launch {
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastWakeUploadAt < 800) {
-            wav.delete()
-            return@launch
+    private fun handleWakeUtterance(wav: java.io.File) {
+        pendingWakeWav?.delete()
+        pendingWakeWav = wav
+        if (wakeDrainJob?.isActive == true) return
+        wakeDrainJob = viewModelScope.launch { drainWakeQueue() }
+    }
+
+    /**
+     * 待机语音串行处理：一段处理完再看下一段（只留最新那一句）。
+     * v0.9.18 之前是「800ms 冷却窗内的新段直接删掉」——环境噪音频繁触发时，
+     * 真正那句「小源小源」常常正好撞进冷却窗被扔掉，这才是「怎么喊都不醒」的主因。
+     * 现在改成队列只留最新一段 + 峰值闸门，宁可多跑一次转写，也不丢用户这句话。
+     */
+    private suspend fun drainWakeQueue() {
+        while (true) {
+            val wav = pendingWakeWav ?: break
+            pendingWakeWav = null
+            val hit = runCatching { processWakeWav(wav) }
+                .onFailure { wav.delete() }
+                .getOrDefault(false)
+            // 没命中（多半是环境噪音）：眼睛从「在听」退回待机，别在嘈杂屋子里一直亮着
+            if (!hit && wakeOnceSession == null && !_isRecording.value && !duplexAudioActive &&
+                _eyeState.value == SparkEyeState.LISTENING
+            ) {
+                _eyeState.value = SparkEyeState.IDLE
+            }
+            delay(400) // 段间隔，避免上行连发；这期间来的新段会覆盖 pending
         }
-        if (now - wakeWindowStart > 60_000) {
-            wakeWindowStart = now
+    }
+
+    /** 处理一段待机语音：噪声闸门 → 云转写 → 唤醒词判定 → 进问答 */
+    private suspend fun processWakeWav(wav: java.io.File): Boolean {
+        val arrivedAt = SystemClock.elapsedRealtime()
+        val cur = repo.settings.firstOrNull() ?: settings.value
+        val wavBytes = wav.length()
+        // 闸门：峰值太低（远处杂音/空调/风扇）不值得跑一次云转写，省流量也省配额
+        val peakDb = withContext(Dispatchers.IO) { wavPeakDbfs(wav) }
+        if (peakDb < NOISE_GATE_DB) {
+            LogStore.log(
+                "wake",
+                "噪声段跳过：峰值 ${peakDb.toInt()}dBFS（门槛 ${NOISE_GATE_DB.toInt()}dBFS），不发上行",
+            )
+            wav.delete()
+            return false
+        }
+        if (arrivedAt - wakeWindowStart > 60_000) {
+            wakeWindowStart = arrivedAt
             wakeUploadCount = 0
         }
-        if (++wakeUploadCount > 20) {
+        if (++wakeUploadCount > 30) {
+            LogStore.log("wake", "唤醒上行配额用尽（每分钟 30 条），这段丢弃")
             wav.delete()
-            return@launch
+            return false
         }
-        lastWakeUploadAt = now
-        val cur = repo.settings.firstOrNull() ?: settings.value
         val spoken = withContext(Dispatchers.IO) {
             SpeechInput.transcribeFile(wav, cur.asrKey.trim(), cur.dialectMode).getOrNull()
         }
-        val asrAt = SystemClock.elapsedRealtime()
-        val wavBytes = wav.length()
+        val asrDoneAt = SystemClock.elapsedRealtime()
         wav.delete()
         val text = spoken.orEmpty().trim()
-        // 唤醒链路实测：一开口 → 判活收段 → 云转写回来，各段耗时都记下来。
-        // 「喊不醒」时先看这里：没这行 = 根本没判成一段话（VAD 门槛高了/麦克风没声）；
-        // 有这行但文本不对 = 识别没听清（录音电平、方言、噪音）；文本对却没反应 = 唤醒词表要放宽。
+        // 唤醒链路实测：没这行 = 根本没判成一段话（门槛高/麦克风没声）；
+        // 有这行但文本不对 = 识别没听清（电平、方言、噪音）；文本对却没反应 = 词表要放宽。
         val speakStart = wakeSpeechStartedAt
-        if (speakStart > 0) {
-            val durMs = (wavBytes / 32).coerceAtLeast(0) // 16k/16bit 单声道 ≈ 32 字节每毫秒
-            LogStore.log(
-                "wake",
-                "待机语音：录音 ${durMs}ms，判活收段 +${now - speakStart}ms，转写 +${asrAt - speakStart}ms，" +
-                    "文本「${text.ifBlank { "（空）" }}」",
-            )
-            wakeSpeechStartedAt = 0L
-        }
+        val e2e = if (speakStart in 1 until arrivedAt) "${asrDoneAt - speakStart}ms" else "?"
+        LogStore.log(
+            "wake",
+            "待机语音：录音 ${wavBytes / 32}ms 峰值 ${peakDb.toInt()}dBFS 环境底噪 " +
+                "${wakeSession?.debugNoiseFloorDb()?.toInt() ?: "?"}dBFS，转写 ${asrDoneAt - arrivedAt}ms" +
+                "（开口→识别完 ${e2e}），文本「${text.ifBlank { "（空）" }}」",
+        )
         // 铃响时待机任何语音都先停铃（开口就是想让它安静）：小源小源/小源小源退出/关闭闹钟/别响了都算
         val wasAlarming = _alarmActive.value
         if (text.isNotBlank() && wasAlarming) {
@@ -1396,7 +1435,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 appendMessage(SparkMessage("assistant", "好的，不响了"))
                 _statusHint.value = null
                 speakHint(appContext, "好的，不响了")
-                return@launch
+                return false
             }
             stopAlarm()
         }
@@ -1413,7 +1452,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             // 「小源小源退出/关闭」这类只要停铃，别进对话
             if (wasAlarming && listOf("退出", "关闭", "关掉", "停止", "别说了").any { text.contains(it) }) {
                 _statusHint.value = "好的，闹钟停了"
-                return@launch
+                return false
             }
             // v0.9.15 单次交互：唤醒后只做一轮，不再进「连聊」——
             // 连聊会一直占着麦克风、自己判断断句，用户说到一半被打断的体验比多喊一次唤醒词差得多。
@@ -1431,9 +1470,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 _eyeState.value = SparkEyeState.LISTENING
                 _statusHint.value = "我在听，说完就好"
             }
+            return true
         } else if (wasAlarming) {
             _statusHint.value = "好的，闹钟停了"
         }
+        return false
     }
 
     /**
@@ -1468,6 +1509,25 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
         return rest.trim(*trimChars)
     }
+
+    /** 待机语音的绝对电平闸门（dBFS）：比这更轻的段子当环境噪音，不占一次云转写 */
+    private val NOISE_GATE_DB = -50f
+
+    /** 读 WAV 峰值电平（dBFS）：16bit PCM，跳过 44 字节头；读不了就返回 0 放行（宁可不拦） */
+    private fun wavPeakDbfs(file: File): Float = runCatching {
+        val bytes = file.readBytes()
+        if (bytes.size <= 44) return@runCatching 0f
+        var peak = 0
+        var i = 44
+        while (i + 1 < bytes.size) {
+            val s = ((bytes[i + 1].toInt() shl 8) or (bytes[i].toInt() and 0xFF)).toShort().toInt()
+            val v = abs(s)
+            if (v > peak) peak = v
+            i += 2
+        }
+        if (peak == 0) return@runCatching -100f
+        (20.0 * log10(peak / 32768.0)).toFloat()
+    }.getOrDefault(0f)
 
     /**
      * 一句话走完整条问答链：**按住说话**与**唤醒后的单次聆听**共用这一个入口（同一个逻辑）。

@@ -93,6 +93,9 @@ class ContinuousConversation(
 
     // VAD 状态（仅音频线程访问）
     private var noiseFloorDb = -60f
+
+    /** 当前环境噪声底（dBFS）：只给上层写日志/调参看，别拿它做判活决策 */
+    fun debugNoiseFloorDb(): Float = noiseFloorDb
     private var voiceRun = 0
     private var inSpeech = false
     private var speechStartAt = 0L
