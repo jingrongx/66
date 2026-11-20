@@ -46,6 +46,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -311,25 +314,6 @@ fun SparkModeScreen(
 
             // 右侧操作：切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // 实时通话：豆包全双工（端到端 S2S，免按键、随时插话）
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape((8 * scale).dp))
-                        .background(Color(0xFF00E5FF).copy(alpha = 0.18f))
-                        .clickable { showDuplexCall = true }
-                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "📞",
-                        color = Color(0xFF80DEEA),
-                        fontSize = (12 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-
-                Spacer(Modifier.width((6 * scale).dp))
-
                 // 切换眼睛 / 会话文字
                 Box(
                     modifier = Modifier
@@ -606,7 +590,7 @@ fun SparkModeScreen(
                     ) { Text("🖼️", fontSize = (15 * scale).sp) }
                 }
                 Spacer(Modifier.height((5 * scale).dp))
-                // 一体胶囊：左端内嵌「连聊」小钮（点按开关），右侧按住说话；连聊中整颗青色呼吸发光
+                // 一体胶囊：左端是实时通话（豆包全双工，亮青底 + 电话图标），右侧按住说话
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -616,30 +600,22 @@ fun SparkModeScreen(
                         .then(convGlowBorder),
                 ) {
                     Row(Modifier.fillMaxSize()) {
-                        // 内嵌连聊小钮
+                        // 实时通话：豆包全双工（端到端 S2S，免按键、随时插话）——占原来「连聊」的位置
                         Box(
                             modifier = Modifier
                                 .padding((4 * scale).dp)
                                 .width((78 * scale).dp)
                                 .clip(RoundedCornerShape(percent = 50))
-                                .background(
-                                    if (isContinuous) Color(0xFF00E5FF).copy(alpha = 0.30f)
-                                    else Color.White.copy(alpha = 0.12f)
-                                )
-                                .clickable {
-                                    vm.startContinuous(context) {
-                                        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                    }
-                                }
+                                .background(Color(0xFF00E5FF))
+                                .clickable { showDuplexCall = true }
                                 .fillMaxHeight(),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text(
-                                text = if (isContinuous) "◉ 连聊中" else "▸ 连聊",
-                                fontSize = (13 * scale).sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
-                                maxLines = 1,
+                            Icon(
+                                imageVector = Icons.Filled.Call,
+                                contentDescription = "实时通话",
+                                tint = Color(0xFF06222B),
+                                modifier = Modifier.size((21 * scale).dp),
                             )
                         }
                         // 嘴：按住临时说一句
@@ -682,7 +658,7 @@ fun SparkModeScreen(
                         .clickable(onClick = onCamera),
                     contentAlignment = Alignment.Center,
                 ) { Text("📷", fontSize = (19 * scale).sp) }
-                // 会话态：连聊小钮 + 按住说话拼成一颗胶囊（与萌眼态同构，紧凑窄版）
+                // 会话态：实时通话钮 + 按住说话拼成一颗胶囊（与萌眼态同构，紧凑窄版）
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -692,29 +668,22 @@ fun SparkModeScreen(
                         .then(convGlowBorder),
                 ) {
                     Row(Modifier.fillMaxSize()) {
+                        // 实时通话：豆包全双工（会话态同样可达，占原「连聊」位置）
                         Box(
                             modifier = Modifier
                                 .padding((3 * scale).dp)
                                 .width((52 * scale).dp)
                                 .clip(RoundedCornerShape(percent = 50))
-                                .background(
-                                    if (isContinuous) Color(0xFF00E5FF).copy(alpha = 0.30f)
-                                    else Color.White.copy(alpha = 0.12f)
-                                )
-                                .clickable {
-                                    vm.startContinuous(context) {
-                                        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                    }
-                                }
+                                .background(Color(0xFF00E5FF))
+                                .clickable { showDuplexCall = true }
                                 .fillMaxHeight(),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text(
-                                text = if (isContinuous) "连聊中" else "连聊",
-                                fontSize = (11 * scale).sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isContinuous) Color.White else Color.White.copy(alpha = 0.85f),
-                                maxLines = 1,
+                            Icon(
+                                imageVector = Icons.Filled.Call,
+                                contentDescription = "实时通话",
+                                tint = Color(0xFF06222B),
+                                modifier = Modifier.size((18 * scale).dp),
                             )
                         }
                         Box(
