@@ -17,8 +17,8 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 149
-        versionName = "0.9.26"
+        versionCode = 150
+        versionName = "0.9.27"
 
         // RNNoise 只编两个 ARM ABI：这台设备是 armeabi-v7a，arm64 兼顾其他机器。
         // x86 只跑模拟器，没必要进包。
@@ -71,6 +71,14 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+    }
+
+    packaging {
+        jniLibs {
+            // onnxruntime 未压缩 15.4MB、jni 3.9MB；压进包后分别 6.9/2.0MB，
+            // APK 从 29MB 降到 ~19MB。代价是安装时解压到 /data（本机剩 1.7G，够）。
+            useLegacyPackaging = true
+        }
     }
 
     externalNativeBuild {

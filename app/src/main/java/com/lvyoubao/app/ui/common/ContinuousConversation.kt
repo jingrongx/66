@@ -391,6 +391,9 @@ class ContinuousConversation(
         val now = SystemClock.elapsedRealtime()
         highPass(buf, n)
         val frame = buf.copyOf(n)
+        // 端侧唤醒词：待机（不在播报）时把这一帧喂给 KWS。播报中没必要喂（人已经在对话里），
+        // 喂了反而可能被自己的声音触发。feed() 只是入队，模型前向在 kws-decoder 线程。
+        if (!ttsActive) LocalKws.feed(frame)
         val db = (20.0 * log10(rmsOf(frame) / 32768.0 + 1e-6)).toFloat()
 
         // 空闲帧缓慢跟踪噪声底（只在非语音帧更新，说话时不许把底噪拉高）

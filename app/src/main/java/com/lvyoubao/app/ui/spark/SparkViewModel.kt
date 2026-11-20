@@ -23,6 +23,7 @@ import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.RobotIntent
 import com.lvyoubao.app.data.WeatherClient
 import com.lvyoubao.app.ui.common.ContinuousConversation
+import com.lvyoubao.app.ui.common.LocalKws
 import com.lvyoubao.app.ui.common.EdgeTts
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
@@ -133,6 +134,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     // 唤醒命中时刻：用来量「从喊中到听见第一声」的总延迟
     @Volatile
     private var wakeHitAt = 0L
+    // 两条唤醒通道（端侧 KWS / 云端词表）共用的去重时刻：同一次唤醒只算一次
+    @Volatile
+    private var lastWakeHitAt = 0L
     // 流式播报进行中：句与句之间的 TtsPlayer「Idle」不算播完，别把眼睛提前顶出来
     @Volatile
     private var ttsStreaming = false
@@ -1370,6 +1374,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         if (shouldRun && wakeSession == null) {
             // 回应语音提前加载好：SoundPool 首次 load 是异步的，等到真唤醒才加载会没声
             SparkAck.preload(appContext)
+            // 端侧唤醒词常驻：模型只加载一次（~5MB int8），之后每帧只做一次前向
+            ensureLocalKws()
             val session = ContinuousConversation(
                 appContext,
                 config = ContinuousConversation.Config(
@@ -1542,34 +1548,77 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 _statusHint.value = "好的，闹钟停了"
                 return false
             }
-            // v0.9.15 单次交互：唤醒后只做一轮，不再进「连聊」——
-            // 连聊会一直占着麦克风、自己判断断句，用户说到一半被打断的体验比多喊一次唤醒词差得多。
-            _showEyes.value = true
-            TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
-            // 回应：一句真人声「我在/在呢/来了」，比原来的电子提示音更像在对话
-            SparkAck.play(appContext)
-            wakeHitAt = SystemClock.elapsedRealtime()
-            // 握手预热：用户还在说问题（2~5 秒），TTS 与 AI 两条链路的 DNS/TCP/TLS
-            // 都在后台跑完，等答案出来直接复用连接——这段以前是纯等待，占总延迟 1 秒以上
-            runCatching { AiClient.prewarm(settings.value) }
-            runCatching { EdgeTts.prewarm() }
-            _eyeState.value = SparkEyeState.LISTENING
-            if (ask.length >= 2) {
-                // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
-                answerVoiceQuestion(ask)
-            } else {
-                // 只喊了唤醒词：开一轮单次聆听，说完就收，下次还要喊唤醒词。
-                // 等回应声播完再开麦——「我在」被录进问题里，云端会把它当成提问的开头。
-                delay(SparkAck.DURATION_MS)
-                startWakeOneShot()
-                _eyeState.value = SparkEyeState.LISTENING
-                _statusHint.value = "我在听，说完就好"
-            }
+            lastWakeHitAt = SystemClock.elapsedRealtime()
+            onWakeConfirmed(ask)
             return true
         } else if (wasAlarming) {
             _statusHint.value = "好的，闹钟停了"
         }
         return false
+    }
+
+    /**
+     * 唤醒命中之后的所有动作，两条通道（端侧 KWS / 云端词表）共用：
+     * 回应声 → 预热链路 → 带问题就直接答，不带问题就开一轮单次聆听。
+     *
+     * v0.9.15 起是单次交互，不再进「连聊」——连聊会一直占着麦克风、自己判断断句，
+     * 说到一半被打断的体验比多喊一次唤醒词差得多。
+     */
+    private suspend fun onWakeConfirmed(remainder: String) {
+        _showEyes.value = true
+        TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
+        // 回应：一句真人声「我在/在呢/来了」，比原来的电子提示音更像在对话
+        SparkAck.play(appContext)
+        wakeHitAt = SystemClock.elapsedRealtime()
+        // 握手预热：用户还在说问题（2~5 秒），TTS 与 AI 两条链路的 DNS/TCP/TLS
+        // 都在后台跑完，等答案出来直接复用连接——这段以前是纯等待，占总延迟 1 秒以上
+        runCatching { AiClient.prewarm(settings.value) }
+        runCatching { EdgeTts.prewarm() }
+        _eyeState.value = SparkEyeState.LISTENING
+        if (remainder.length >= 2) {
+            // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
+            answerVoiceQuestion(remainder)
+        } else {
+            // 只喊了唤醒词：开一轮单次聆听，说完就收，下次还要喊唤醒词。
+            // 等回应声播完再开麦——「我在」被录进问题里，云端会把它当成提问的开头。
+            delay(SparkAck.DURATION_MS)
+            startWakeOneShot()
+            _eyeState.value = SparkEyeState.LISTENING
+            _statusHint.value = "我在听，说完就好"
+        }
+    }
+
+    /** 端侧唤醒词初始化：失败就静默退回云端词表，不影响主流程 */
+    private fun ensureLocalKws() {
+        if (LocalKws.isReady()) return
+        LocalKws.start(appContext) { keyword ->
+            viewModelScope.launch { onLocalWakeHit(keyword) }
+        }
+    }
+
+    /**
+     * 本地 KWS 命中（声学匹配，不经云端转写）→ 直接进唤醒流程，实测比云端快 4~5 倍。
+     * 与云端词表同时在线，谁先到谁生效，另一个被 [lastWakeHitAt] 挡掉。
+     */
+    private suspend fun onLocalWakeHit(keyword: String) {
+        if (duplexAudioActive || activeRecording != null || _isRecording.value) return
+        if (wakeOnceSession != null) return // 已经在听问题，别把「我在听」再打断一次
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastWakeHitAt < 1_500) {
+            LogStore.log("kws", "本地命中「$keyword」但 1.5 秒内已唤醒过，忽略")
+            return
+        }
+        lastWakeHitAt = now
+        LogStore.log("kws", "本地命中「$keyword」→ 立即回应（不经云端转写）")
+        if (_alarmActive.value) {
+            // 铃响时喊唤醒词就是想让它安静
+            stopAlarm()
+            appendMessage(SparkMessage("assistant", "好的，不响了"))
+            _statusHint.value = null
+            speakHint(appContext, "好的，不响了")
+            return
+        }
+        onWakeConfirmed("")
     }
 
     /**
