@@ -8,7 +8,6 @@ import com.k2fsa.sherpa.onnx.KeywordSpotterConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import com.lvyoubao.app.data.LogStore
-import java.io.File
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -32,12 +31,17 @@ object LocalKws {
     private const val QUEUE_FRAMES = 12 // 12 × 80ms ≈ 1 秒余量；短读/抖动靠它吸收
 
     /**
-     * 词表语法（sherpa-onnx `EncodeBase`）：
+     * 词表放在 assets/kws/keywords.txt，**必须走 asset 相对路径**：
+     * 这里用的是 `KeywordSpotter(AssetManager, config)`，sherpa 的 ReadFile 在
+     * assetManager 非空时只认相对路径，传绝对路径会直接 abort 整个进程
+     * （实测 0.9.27 首包就死在这：You are using an absolute path ... Read binary file failed）。
+     *
+     * 行语法（sherpa-onnx `EncodeBase`）：
      *   token token ... @显示文本 :加强分 #触发阈值
      * 每个 token 必须是模型 tokens.txt 里有的符号。小= x + iǎo，源= y + uán。
      * 加强分 1.5~3.0 往「更容易命中」推，阈值 0.1~0.35 越大越保守。
      */
-    private const val KEYWORDS = "x iǎo y uán x iǎo y uán @小源小源 :2.0 #0.25\n"
+    private const val KEYWORDS_ASSET = "kws/keywords.txt"
 
     @Volatile private var spotter: KeywordSpotter? = null
     @Volatile private var stream: com.k2fsa.sherpa.onnx.OnlineStream? = null
@@ -63,9 +67,6 @@ object LocalKws {
             var sp: KeywordSpotter? = null
             var st: com.k2fsa.sherpa.onnx.OnlineStream? = null
             try {
-                val kwFile = File(app.filesDir, "kws_keywords.txt")
-                kwFile.writeText(KEYWORDS, Charsets.UTF_8)
-
                 val config = KeywordSpotterConfig(
                     featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
                     modelConfig = OnlineModelConfig(
@@ -80,7 +81,7 @@ object LocalKws {
                         modelType = "zipformer2",
                         debug = false,
                     ),
-                    keywordsFile = kwFile.absolutePath,
+                    keywordsFile = KEYWORDS_ASSET,
                     keywordsScore = 2.0f,
                     keywordsThreshold = 0.25f,
                     numTrailingBlanks = 1,
