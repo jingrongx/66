@@ -83,6 +83,8 @@ internal class DuplexAudioEngine(
         }
         captureJob = scope.launch(Dispatchers.IO) {
             val frame = ByteArray(DuplexProtocol.FRAME_BYTES)
+            var frames = 0
+            var secPeak = 0
             while (isActive && capturing) {
                 var filled = 0
                 // AudioRecord 可能短读，补齐满一帧再发，保证 20ms 节奏
@@ -102,6 +104,13 @@ internal class DuplexAudioEngine(
                         i += 2
                     }
                     onLevel((peak / 32768f).coerceIn(0f, 1f))
+                    // 每秒打一次上行峰值：现场排查「没说话却一直出识别文字」时看麦克风底噪
+                    if (peak > secPeak) secPeak = peak
+                    frames++
+                    if (frames % 50 == 0) {
+                        Log.i(TAG, "上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)})")
+                        secPeak = 0
+                    }
                     onPcmFrame(frame.copyOf())
                 }
             }

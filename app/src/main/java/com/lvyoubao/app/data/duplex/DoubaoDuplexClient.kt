@@ -43,6 +43,8 @@ class DoubaoDuplexClient(private val context: Context) {
 
     /** UI 需要感知的一切：识别流、回答流、状态、错误 */
     sealed interface Event {
+        /** 新一轮识别开始（服务端切了一个新 item）：界面应清空上一轮的识别文字 */
+        data object AsrStarted : Event
         data class Asr(val text: String, val isFinal: Boolean) : Event
         data class Answer(val text: String, val isFinal: Boolean) : Event
         data class StateChanged(val state: State) : Event
@@ -96,6 +98,7 @@ class DoubaoDuplexClient(private val context: Context) {
                 }
                 is DuplexProtocol.Downstream.AsrStarted -> {
                     userSpeaking = true
+                    _events.tryEmit(Event.AsrStarted)
                     // ASR 只做本地停播（插话手感），不切 SPEAKING/LISTENING：
                     // 官方明确播放状态机与 ASR 解耦，状态只由 response.created/done/canceled 驱动。
                     audio?.flushPlayback()

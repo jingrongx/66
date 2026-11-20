@@ -134,6 +134,8 @@ fun SparkModeScreen(
     LaunchedEffect(Unit) {
         duplexClient.onEvent.collect { ev ->
             when (ev) {
+                // 服务端切新 item = 新一轮说话：上一轮的识别文字先清掉，避免跨轮越滚越长
+                is DoubaoDuplexClient.Event.AsrStarted -> duplexAsr = ""
                 is DoubaoDuplexClient.Event.Asr -> duplexAsr = if (ev.isFinal) ev.text else duplexAsr + ev.text
                 is DoubaoDuplexClient.Event.Answer -> {
                     if (ev.isFinal) {
@@ -807,7 +809,7 @@ fun SparkModeScreen(
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 DoubaoCallOverlay(
                     state = duplexState,
-                    asrText = duplexAsr,
+                    asrText = duplexAsr.takeLast(240),
                     answerText = duplexAnswer,
                     hint = duplexHint,
                     photos = emptyList(),

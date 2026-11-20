@@ -752,6 +752,7 @@ fun LargeTextScreen(
     LaunchedEffect(Unit) {
         duplexClient.onEvent.collect { ev ->
             when (ev) {
+                is DoubaoDuplexClient.Event.AsrStarted -> duplexAsr = ""
                 is DoubaoDuplexClient.Event.Asr -> duplexAsr = if (ev.isFinal) ev.text else duplexAsr + ev.text
                 is DoubaoDuplexClient.Event.Answer -> {
                     if (ev.isFinal) {
@@ -807,7 +808,7 @@ fun LargeTextScreen(
         if (settings.callEngine == "doubao") {
             DoubaoCallOverlay(
                 state = duplexState,
-                asrText = duplexAsr,
+                asrText = duplexAsr.takeLast(240),
                 answerText = duplexAnswer,
                 hint = duplexHint,
                 photos = duplexPhotos,
