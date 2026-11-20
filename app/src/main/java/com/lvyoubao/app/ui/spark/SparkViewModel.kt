@@ -67,8 +67,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private val notes = app.noteStore
     private val appContext = app.applicationContext
 
-    // 必须 Eagerly：灵动屏界面从不收集这个流，WhileSubscribed 会让上游永不启动，
-    // settings.value 永远停在默认空配置——曾导致退出灵动屏把默认空配置整体写回、
+    // 必须 Eagerly：灵动模式界面从不收集这个流，WhileSubscribed 会让上游永不启动，
+    // settings.value 永远停在默认空配置——曾导致退出灵动模式把默认空配置整体写回、
     // 清空用户全部配置，以及误报「未配置语音识别 Key」
     val settings: StateFlow<AiSettings> = repo.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, AiSettings())
@@ -227,7 +227,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     kind = com.lvyoubao.app.data.MemoryStore.MemoryEntry.EVIDENCE,
                     title = title,
                     detail = msg.text.take(2000),
-                    source = "灵动屏（用户收藏）",
+                    source = "灵动模式（用户收藏）",
                 )
                 onResult("已收藏 ✓")
             }
@@ -1049,7 +1049,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             }
 
             // 位置：读缓存快照；没有（无 GPS 设备首次/过期）就快速要一次（含 IP 定位兜底，城市级联网反查）
-            // 天气类问题：主动拉实时天气注入——灵动屏聊天不带工具/搜索，不注入模型只能瞎编或答「查不了」
+            // 天气类问题：主动拉实时天气注入——灵动模式聊天不带工具/搜索，不注入模型只能瞎编或答「查不了」
             val wantsWeather = listOf("天气", "气温", "温度", "下雨", "下雪", "刮风", "风力", "湿度", "穿什么", "热不热", "冷不冷", "带伞", "防晒")
                 .any { userText.contains(it) }
             val place = LocationContext.current(context)
@@ -1067,7 +1067,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             }
 
             val systemPrompt = """
-                你是灵动屏智能伴侣「小源」，搭载于小屏随身智能设备。
+                你是灵动模式智能伴侣「小源」，搭载于小屏随身智能设备。
                 你的回应将直接转换为语音播放，并显示在屏幕会话框中。
                 【表达原则】
                 1. 语气亲切生动、自然口语化，适合小屏阅读与语音朗读；
@@ -1133,7 +1133,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
-     * 退出灵动屏 = 退出应用（对齐大字模式）：
+     * 退出灵动模式 = 退出应用（对齐大字模式）：
      * 模式切换只认设置页开关，这里只做收尾（停朗读、停录音），退出交给调用方 finishAffinity
      */
     fun exitApp() {
@@ -1155,7 +1155,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     /**
      * 连续对话开关：开=麦克风常听（说完自动断句→回答→播完接着听，播报中开口即打断）；再点一次关。
-     * 灵动屏是语音优先设备，这里用 applicationContext 全程驱动，界面只是状态展示。
+     * 灵动模式是语音优先设备，这里用 applicationContext 全程驱动，界面只是状态展示。
      */
     fun startContinuous(context: Context, onRequestRecordPermission: () -> Unit) {
         if (_isContinuous.value) {
@@ -1240,14 +1240,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     // ---------- 唤醒词（待机时喊「小源小源」直接进连续对话） ----------
 
-    /** 灵动屏进入前台时调用：待机唤醒监听随页面开关 */
+    /** 灵动模式进入前台时调用：待机唤醒监听随页面开关 */
     fun onSparkActive() {
         sparkActive = true
         syncWakeEngine()
     }
 
     /**
-     * 唤醒监听状态机：灵动屏前台 + 开关开 + 有 ASR Key + 有麦克风权限 + 不在连聊 + 不在按住说话 → 开引擎；
+     * 唤醒监听状态机：灵动模式前台 + 开关开 + 有 ASR Key + 有麦克风权限 + 不在连聊 + 不在按住说话 → 开引擎；
      * 其余一律关。与连续对话共用 ContinuousConversation，但一台设备同一时刻只允许一个采集会话。
      */
     private fun syncWakeEngine() {

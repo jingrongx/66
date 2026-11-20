@@ -110,11 +110,21 @@ object AppTools {
         val place = LocationContext.freshBlocking(context) ?: throw ApiException("没有位置信息")
         if (settings.amapKey.isNotBlank()) {
             val amap = AmapClient(settings.amapKey)
-            // 目的地是「回家」类词时直接用设置的家庭地址：AI 偶尔只传一个"家"字，
-            // 附近 POI 检索会命中别家含"家"的店，跳高德就带错地址
+            // 目的地是「回家 / 回公司 / 回XX」类词时，先用常用地址列表按标签匹配；
+            // 列表没命中再退回旧的单一「家」地址。AI 偶尔只传一个"家"字，附近 POI 会命中别家含"家"的店，
+            // 所以用精确标签匹配而非模糊检索。
+            val matchedAddress = settings.savedAddresses.firstOrNull { addr ->
+                addr.address.isNotBlank() &&
+                    (destination.contains(addr.label.trim()) || addr.label.trim().let { it.isNotBlank() && AmapClient.isHomeDestination(it) && AmapClient.isHomeDestination(destination) })
+            }?.address?.trim()
             val home = settings.homeAddress.trim()
-            val destinationText = if (AmapClient.isHomeDestination(destination) && home.isNotBlank()) home else destination
-            val to = if (destinationText == home) {
+            val savedHit = matchedAddress?.takeIf { it.isNotBlank() }
+            val destinationText = when {
+                savedHit != null -> savedHit
+                AmapClient.isHomeDestination(destination) && home.isNotBlank() -> home
+                else -> destination
+            }
+            val to = if (destinationText == savedHit || destinationText == home) {
                 amap.geocode(destinationText)?.let {
                     AmapClient.ResolvedDest(it.first, it.second, AmapClient.cleanPlaceName(destinationText))
                 }

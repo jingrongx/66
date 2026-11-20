@@ -4,10 +4,10 @@ import com.lvyoubao.app.data.OutMessage
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
- * 灵动屏会话仓库（进程内单例）：
+ * 灵动模式会话仓库（进程内单例）：
  * 低内存设备上系统重建 Activity/ViewModel 时会话不丢（曾出现按住说话发出去、
  * 界面重建后「聊天」页变空的情况——消息原来挂在 ViewModel 上，一重建就归零）。
- * 进程被杀则随进程消失（灵动屏会话是轻量即时的，不做磁盘持久化）。
+ * 进程被杀则随进程消失（灵动模式会话是轻量即时的，不做磁盘持久化）。
  */
 object SparkChatStore {
 

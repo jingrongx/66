@@ -47,7 +47,11 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
         val syncPushing: Boolean = false,
         val syncPushResult: String? = null,
         val syncPushFailed: Boolean = false,
+        // 自动保存反馈：saving → saved，UI 顶部标题旁短暂显示，不用保存按钮
+        val saveFeedback: SaveFeedback = SaveFeedback.IDLE,
     )
+
+    enum class SaveFeedback { IDLE, SAVING, SAVED }
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -87,11 +91,17 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
     private fun scheduleAutoSave() {
         if (_ui.value.loading) return
         dirty = true
+        _ui.update { it.copy(saveFeedback = SaveFeedback.SAVING) }
         autoSaveJob?.cancel()
         autoSaveJob = viewModelScope.launch {
             delay(700)
             repo.save(_ui.value.draft)
             dirty = false
+            _ui.update { it.copy(saveFeedback = SaveFeedback.SAVED) }
+            delay(2000) // "✓ 已保存"显示 2 秒后淡出
+            if (_ui.value.saveFeedback == SaveFeedback.SAVED) {
+                _ui.update { it.copy(saveFeedback = SaveFeedback.IDLE) }
+            }
         }
     }
 
@@ -137,9 +147,15 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
     fun save(onSaved: () -> Unit) {
         autoSaveJob?.cancel()
         dirty = false
+        _ui.update { it.copy(saveFeedback = SaveFeedback.SAVING) }
         viewModelScope.launch {
             repo.save(_ui.value.draft)
+            _ui.update { it.copy(saveFeedback = SaveFeedback.SAVED) }
             onSaved()
+            delay(2000)
+            if (_ui.value.saveFeedback == SaveFeedback.SAVED) {
+                _ui.update { it.copy(saveFeedback = SaveFeedback.IDLE) }
+            }
         }
     }
 

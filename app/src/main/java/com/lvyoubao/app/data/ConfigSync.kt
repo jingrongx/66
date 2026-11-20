@@ -24,6 +24,38 @@ data class SyncableConfig(
     val homeAddress: String = "",
     val answerStyle: String = "",
     val mapMirrorUrl: String = "",
+    val duplexApiKey: String = "",   // 豆包全双工实时语音 Key
+    val duplexVoice: String = "",    // 全双工音色 ID
+
+    // ===== 全量同步扩展（设计稿：同步所有配置页的所有配置）=====
+    // 布尔/数值一律可空：null = 旧版载荷没这个字段，merge 时保留接收端原值，兼容老二维码
+    val thinking: Boolean? = null,
+    val reasoningEffort: String = "",
+    val searchEnabled: Boolean? = null,
+    val safetyCheckEnabled: Boolean? = null,
+    val themeMode: String = "",
+    val largeTextMode: Boolean? = null,
+    val largeTextFontScale: Float? = null,
+    val sparkMode: Boolean? = null,
+    val sparkFontScale: Float? = null,
+    val keepAliveEnabled: Boolean? = null,
+    val bootStartEnabled: Boolean? = null,
+    val autoSpeak: Boolean? = null,
+    val dialectMode: Boolean? = null,
+    val asrAutoSendSeconds: Int? = null,
+    val asrAutoSendEnabled: Boolean? = null,
+    val proactiveReminders: Boolean? = null,
+    val voiceBargeIn: Int? = null,
+    val wakeWordEnabled: Boolean? = null,
+    val savedProvidersJson: String = "", // Map<String, ProviderCredentials> 序列化后传递
+    val savedAddresses: List<SavedAddress> = emptyList(),
+    val voiceAsrModel: String = "",
+    val voiceLlmModel: String = "",
+    val voiceTtsModel: String = "",
+    val callEngine: String = "",
+    val callAsrModel: String = "",
+    val callLlmModel: String = "",
+    val callTtsModel: String = "",
 )
 
 object ConfigSyncCodec {
@@ -43,6 +75,35 @@ object ConfigSyncCodec {
         homeAddress = s.homeAddress,
         answerStyle = s.answerStyle,
         mapMirrorUrl = s.mapMirrorUrl,
+        duplexApiKey = s.duplexApiKey,
+        duplexVoice = s.duplexVoice,
+        thinking = s.thinking,
+        reasoningEffort = s.reasoningEffort,
+        searchEnabled = s.searchEnabled,
+        safetyCheckEnabled = s.safetyCheckEnabled,
+        themeMode = s.themeMode,
+        largeTextMode = s.largeTextMode,
+        largeTextFontScale = s.largeTextFontScale,
+        sparkMode = s.sparkMode,
+        sparkFontScale = s.sparkFontScale,
+        keepAliveEnabled = s.keepAliveEnabled,
+        bootStartEnabled = s.bootStartEnabled,
+        autoSpeak = s.autoSpeak,
+        dialectMode = s.dialectMode,
+        asrAutoSendSeconds = s.asrAutoSendSeconds,
+        asrAutoSendEnabled = s.asrAutoSendEnabled,
+        proactiveReminders = s.proactiveReminders,
+        voiceBargeIn = s.voiceBargeIn,
+        wakeWordEnabled = s.wakeWordEnabled,
+        savedProvidersJson = Json.encodeToString(s.savedProviders),
+        savedAddresses = s.savedAddresses,
+        voiceAsrModel = s.voiceAsrModel,
+        voiceLlmModel = s.voiceLlmModel,
+        voiceTtsModel = s.voiceTtsModel,
+        callEngine = s.callEngine,
+        callAsrModel = s.callAsrModel,
+        callLlmModel = s.callLlmModel,
+        callTtsModel = s.callTtsModel,
     )
 
     /** 把配置合并回 AiSettings（只覆盖载荷里非空的字段） */
@@ -53,9 +114,44 @@ object ConfigSyncCodec {
         model = c.model.ifEmpty { s.model },
         amapKey = c.amapKey.ifEmpty { s.amapKey },
         asrKey = c.asrKey.ifEmpty { s.asrKey },
-        homeAddress = c.homeAddress.ifEmpty { s.homeAddress },
+        homeAddress = c.savedAddresses.firstOrNull { it.label == "家" }?.address
+            ?: c.savedAddresses.firstOrNull()?.address
+            ?: c.homeAddress.ifEmpty { s.homeAddress },
         answerStyle = c.answerStyle.ifEmpty { s.answerStyle },
         mapMirrorUrl = c.mapMirrorUrl.ifEmpty { s.mapMirrorUrl },
+        duplexApiKey = c.duplexApiKey.ifEmpty { s.duplexApiKey },
+        duplexVoice = c.duplexVoice.ifEmpty { s.duplexVoice },
+        // 字符串：非空覆盖；布尔/数值可空：null（旧版载荷没带）保留接收端原值
+        thinking = c.thinking ?: s.thinking,
+        reasoningEffort = c.reasoningEffort.ifEmpty { s.reasoningEffort },
+        searchEnabled = c.searchEnabled ?: s.searchEnabled,
+        safetyCheckEnabled = c.safetyCheckEnabled ?: s.safetyCheckEnabled,
+        themeMode = c.themeMode.ifEmpty { s.themeMode },
+        largeTextMode = c.largeTextMode ?: s.largeTextMode,
+        largeTextFontScale = c.largeTextFontScale ?: s.largeTextFontScale,
+        sparkMode = c.sparkMode ?: s.sparkMode,
+        sparkFontScale = c.sparkFontScale ?: s.sparkFontScale,
+        keepAliveEnabled = c.keepAliveEnabled ?: s.keepAliveEnabled,
+        bootStartEnabled = c.bootStartEnabled ?: s.bootStartEnabled,
+        autoSpeak = c.autoSpeak ?: s.autoSpeak,
+        dialectMode = c.dialectMode ?: s.dialectMode,
+        asrAutoSendSeconds = c.asrAutoSendSeconds ?: s.asrAutoSendSeconds,
+        asrAutoSendEnabled = c.asrAutoSendEnabled ?: s.asrAutoSendEnabled,
+        proactiveReminders = c.proactiveReminders ?: s.proactiveReminders,
+        voiceBargeIn = c.voiceBargeIn ?: s.voiceBargeIn,
+        wakeWordEnabled = c.wakeWordEnabled ?: s.wakeWordEnabled,
+        savedProviders = c.savedProvidersJson.takeIf { it.isNotBlank() }?.let { json ->
+            runCatching { Json.decodeFromString<Map<String, ProviderCredentials>>(json) }
+                .getOrDefault(s.savedProviders)
+        } ?: s.savedProviders,
+        savedAddresses = c.savedAddresses.ifEmpty { s.savedAddresses },
+        voiceAsrModel = c.voiceAsrModel,
+        voiceLlmModel = c.voiceLlmModel,
+        voiceTtsModel = c.voiceTtsModel,
+        callEngine = c.callEngine.ifEmpty { s.callEngine },
+        callAsrModel = c.callAsrModel,
+        callLlmModel = c.callLlmModel,
+        callTtsModel = c.callTtsModel,
     )
 
     fun encodeJson(c: SyncableConfig): String = json.encodeToString(c)

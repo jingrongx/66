@@ -76,6 +76,25 @@ val ProviderPresets = listOf(
         apiKeyUrl = "",
         applyGuide = "填入兼容 OpenAI 规范的服务商接口地址（Base URL）与 API Key。",
     ),
+    // 豆包（火山方舟）：OpenAI 兼容 Ark 接口，可走文本/图片对话。注意与「实时语音」的 duplexApiKey 是两把不同的 Key。
+    ProviderPreset(
+        id = "doubao",
+        label = "豆包",
+        baseUrl = "https://ark.cn-beijing.volces.com/api/v3",
+        defaultModel = "doubao-1.5-pro-32k",
+        maxImages = 4,
+        apiKeyUrl = "https://console.volcengine.com/ark",
+        applyGuide = "火山方舟控制台 →「API Key 管理」创建并复制。此 Key 供文本/图片对话；实时全双工语音需在「豆包语音」产品另建 Key。",
+    ),
+    // 硅基流动：OpenAI 兼容，主要用免费的 SenseVoice/TeleSpeech 语音识别与 CosyVoice 朗读，也可跑文本模型。
+    ProviderPreset(
+        id = "silicon",
+        label = "硅基流动",
+        baseUrl = "https://api.siliconflow.cn/v1",
+        defaultModel = "Qwen/Qwen3-8B",
+        apiKeyUrl = "https://cloud.siliconflow.cn/account/ak",
+        applyGuide = "硅基流动云平台 →「API 密钥」新建复制。用于免费 SenseVoice / TeleSpeech 语音识别与 CosyVoice2 朗读。",
+    ),
 )
 
 fun presetById(id: String): ProviderPreset =

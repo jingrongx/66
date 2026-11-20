@@ -8,7 +8,7 @@ import android.media.ExifInterface
 import android.net.Uri
 
 /**
- * 灵动屏图片统一解码：降采样至 ≤1280 + 按 EXIF 方向转正。
+ * 灵动模式图片统一解码：降采样至 ≤1280 + 按 EXIF 方向转正。
  * 系统相机返回的 JPEG 常带旋转标记（Camera2 裸抓帧不处理时照片直接是横的），相册照片同理。
  */
 internal object SparkImageCodec {

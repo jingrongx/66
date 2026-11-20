@@ -110,7 +110,7 @@ fun SparkModeScreen(
     val alarmActive by vm.alarmActive.collectAsState()
     val alarmText by vm.alarmText.collectAsState()
 
-    // 右上角「设置」进设置页（模式互斥，退出灵动屏只能在这里关开关）
+    // 右上角「设置」进设置页（模式互斥，退出灵动模式只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
 
     // 长按会话消息弹出的操作面板（收藏/分享）
@@ -178,7 +178,7 @@ fun SparkModeScreen(
         exitApp()
     }
 
-    // 灵动屏进前台：待机唤醒词监听随页面开关（设置变化由 VM 的 settings 收集器重算）
+    // 灵动模式进前台：待机唤醒词监听随页面开关（设置变化由 VM 的 settings 收集器重算）
     LaunchedEffect(Unit) { vm.onSparkActive() }
 
     BoxWithConstraints(
@@ -192,7 +192,7 @@ fun SparkModeScreen(
         // 保持与设计稿一致的构图与可点面积（小屏恒为 1，观感不变）
         val scale = (minOf(maxWidth, maxHeight) / 240.dp).coerceIn(1f, 1.9f)
 
-        // 接管系统栏/刘海 insets：与普通/大字模式同口径，灵动屏自身内容不与系统栏重叠。
+        // 接管系统栏/刘海 insets：与普通/大字模式同口径，灵动模式自身内容不与系统栏重叠。
         // 注意设置页不能放这层里面——它自带 safeDrawing 接管，嵌进来会双重留白/透明漏底
         Box(
             modifier = Modifier
@@ -259,7 +259,7 @@ fun SparkModeScreen(
 
                 Spacer(Modifier.width((6 * scale).dp))
 
-                // 设置：进设置页（大字/灵动屏开关在这里，互斥）
+                // 设置：进设置页（大字/灵动模式开关在这里，互斥）
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape((8 * scale).dp))
@@ -745,7 +745,7 @@ fun SparkModeScreen(
 
         // ---------- 设置页覆盖层：右上角「设置」进入 ----------
         // 独立全屏宿主：Surface 铺不透明背景抢占整屏，insets 由设置页自管
-        // （大字/灵动屏开关互斥，退出灵动屏只认这里的开关；检查更新接统一更新页）
+        // （大字/灵动模式开关互斥，退出灵动模式只认这里的开关；检查更新接统一更新页）
         if (showSettings) {
             Surface(
                 modifier = Modifier.fillMaxSize(),

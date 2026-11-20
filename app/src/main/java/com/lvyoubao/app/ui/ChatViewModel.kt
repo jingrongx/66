@@ -165,6 +165,40 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /**
+     * 豆包全双工一轮对话落会话历史：把用户语音识别稿与模型回答各存一条，
+     * 通话中的拍照图片作为该轮 user 消息的附图一起落盘，刷新/重进/导出备份都不丢。
+     * 纯语音 S2S 不解析图片内容（那是音视频版能力），图片只作记录随对话保存。
+     */
+    fun appendDuplexTurn(asr: String, answer: String, imagePaths: List<String> = emptyList()) {
+        if (asr.isBlank() && answer.isBlank() && imagePaths.isEmpty()) return
+        viewModelScope.launch {
+            var sid = sessions.currentSessionId.firstOrNull()
+            if (sid == null || sessions.get(sid) == null) sid = sessions.create().id
+            val hadImage = imagePaths.isNotEmpty()
+            sessions.appendMessage(
+                sid,
+                SessionMessage(
+                    role = "user",
+                    text = asr.ifBlank { if (hadImage) "（看看这个）" else "（语音）" },
+                    hadImage = hadImage,
+                    imagePaths = imagePaths,
+                    ts = System.currentTimeMillis(),
+                ),
+            )
+            if (answer.isNotBlank()) {
+                sessions.appendMessage(
+                    sid,
+                    SessionMessage(
+                        role = "assistant",
+                        text = answer,
+                        ts = System.currentTimeMillis(),
+                    ),
+                )
+            }
+        }
+    }
+
     // ---------- 语音识别后自动发送（设置 asrAutoSendSeconds：-1 关 /0 立即 /1/3/5 秒） ----------
     // 取消路径：点输入框（聚焦）、手动编辑草稿、清空、再次按住说话、手动/自动发送本身。
 

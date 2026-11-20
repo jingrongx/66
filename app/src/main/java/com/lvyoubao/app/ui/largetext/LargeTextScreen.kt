@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -56,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -72,6 +75,8 @@ import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.ChatSession
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.SessionMessage
+import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
+import kotlinx.coroutines.withContext
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.SentImageThumbnails
 import com.lvyoubao.app.ui.common.SpeechInput
@@ -272,28 +277,58 @@ fun LargeTextScreen(
         }
     }
 
+    // 豆包全双工：client 常驻 remember，进入 doubao 通话时 start，退出 close；classic 链路完全不动。
+    val duplexClient = remember { DoubaoDuplexClient(context) }
+    val duplexState by duplexClient.state.collectAsState()
+    var duplexAsr by remember { mutableStateOf("") }
+    var duplexAnswer by remember { mutableStateOf("") }
+    var duplexHint by remember { mutableStateOf<String?>(null) }
+    // 豆包通话中的拍照缓冲：图片随该轮对话落会话历史（纯语音 S2S 不解析图内容，只作记录）
+    var duplexPhotos by remember { mutableStateOf<List<ChatViewModel.PendingAttachment>>(emptyList()) }
+
+    /** 豆包通话专用：拍照/选图只读附件加入 duplexPhotos，不走 vm 的经典发送链 */
+    fun handleDuplexPicked(uri: android.net.Uri) {
+        scope.launch {
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { ChatViewModel.readAttachment(context, uri) }
+            }
+            result.onSuccess { (attachment, warning) ->
+                if (attachment.isImage) duplexPhotos = duplexPhotos + attachment
+                warning?.let { duplexHint = it }
+            }.onFailure { duplexHint = "照片读取失败，请重试" }
+        }
+    }
+
     var pendingCameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture(),
     ) { ok ->
         val uri = pendingCameraUri
-        if (ok && uri != null) handlePicked(uri)
+        if (ok && uri != null) {
+            if (showCall && settings.callEngine == "doubao") handleDuplexPicked(uri) else handlePicked(uri)
+        }
     }
     val galleryLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(ChatViewModel.MAX_PICK_IMAGES),
-    ) { uris -> uris.forEach { handlePicked(it) } }
+    ) { uris ->
+        val duplex = showCall && settings.callEngine == "doubao"
+        uris.forEach { if (duplex) handleDuplexPicked(it) else handlePicked(it) }
+    }
 
     // ---------- 自动朗读：新回答一落地就读（通话中不依赖开关，天然要出声） ----------
 
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
     var spokenTs by remember { mutableStateOf(0L) }
     val ttsState by TtsPlayer.state.collectAsState()
-    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showCall, showSettings, showUpdate) {
+    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showCall, showSettings, showUpdate, settings.callEngine) {
         val msg = lastAssistant ?: return@LaunchedEffect
         // 只读 20 秒内的新回答：切历史/重进不再把旧消息复读一遍；停在设置/更新页时也先别出声
         val fresh = System.currentTimeMillis() - msg.ts < 20_000
         val overlayOpen = showSettings || showUpdate
-        if ((showCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
+        // 豆包全双工自己走 WebSocket 出声（音频在 DuplexAudioEngine 里播放），
+        // 绝不能再让 TtsPlayer 读同一段回答，否则两套音频抢 AudioTrack 双重发声。
+        val duplexCall = showCall && settings.callEngine == "doubao"
+        if (!duplexCall && (showCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         }
@@ -713,36 +748,117 @@ fun LargeTextScreen(
     }
 
     // ---------- 语音通话（全屏） ----------
+    // 收集豆包事件：ASR/回答流累加到局部状态，错误转成提示；播报状态看 State 不看 ASR。
+    LaunchedEffect(Unit) {
+        duplexClient.onEvent.collect { ev ->
+            when (ev) {
+                is DoubaoDuplexClient.Event.Asr -> duplexAsr = if (ev.isFinal) ev.text else duplexAsr + ev.text
+                is DoubaoDuplexClient.Event.Answer -> {
+                    if (ev.isFinal) {
+                        duplexAnswer = ev.text
+                        // 一轮结束：ASR + 回答 + 本轮拍的照片一起落会话历史，刷新/导出都不丢
+                        val paths = duplexPhotos.mapNotNull { it.localPath }
+                        vm.appendDuplexTurn(duplexAsr, ev.text, paths)
+                        duplexPhotos = emptyList()
+                    } else {
+                        duplexAnswer += ev.text
+                    }
+                }
+                is DoubaoDuplexClient.Event.SessionReady -> {
+                    duplexAsr = ""
+                    duplexAnswer = ""
+                    duplexHint = null
+                    duplexPhotos = emptyList()
+                }
+                is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
+                    "CONFIG" -> "未配置豆包实时语音 Key，请到设置里填写后再通话"
+                    else -> "通话出错：${ev.message}"
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    // 进入/退出豆包通话：start / close。key 为空时不强启，给出提示（避免老用户默认 doubao 却没 key）。
+    DisposableEffect(showCall, settings.callEngine) {
+        if (showCall && settings.callEngine == "doubao") {
+            TtsPlayer.stop() // 先让 classic 朗读闭嘴，避免抢音频输出
+            duplexAsr = ""
+            duplexAnswer = ""
+            duplexHint = null
+            if (settings.duplexApiKey.isBlank()) {
+                duplexHint = "未配置豆包实时语音 Key，请到设置里填写后再通话"
+            } else if (!SpeechInput.hasRecordPermission(context)) {
+                duplexHint = "需要麦克风权限才能全双工通话"
+            } else {
+                duplexClient.start(settings.duplexApiKey, settings.duplexVoice)
+            }
+        }
+        onDispose {
+            if (settings.callEngine == "doubao") duplexClient.close()
+        }
+    }
+    // 彻底退出应用时释放 OkHttp 线程池（不可复用，仅 exit 时调用）
+    DisposableEffect(Unit) {
+        onDispose { duplexClient.destroy() }
+    }
+
     if (showCall) {
-        VoiceCallOverlay(
-            messages = messages,
-            streamState = streamState,
-            sending = state.sending,
-            attachments = state.attachments,
-            listening = listening,
-            recording = recording,
-            recordTick = recordTick,
-            ttsSpeaking = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
-            ttsUnavailable = (ttsState as? TtsPlayer.State.Unavailable)?.reason,
-            holdModifier = holdToTalkModifier(autoSend = true),
-            onPickCamera = {
-                keyboard?.hide()
-                val uri = newCameraImageUri(context)
-                pendingCameraUri = uri
-                cameraLauncher.launch(uri)
-            },
-            onPickGallery = {
-                keyboard?.hide()
-                galleryLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                )
-            },
-            onRemoveAttachment = { vm.removeAttachment(it) },
-            onHangUp = {
-                TtsPlayer.stop()
-                showCall = false
-            },
-        )
+        if (settings.callEngine == "doubao") {
+            DoubaoCallOverlay(
+                state = duplexState,
+                asrText = duplexAsr,
+                answerText = duplexAnswer,
+                hint = duplexHint,
+                photos = duplexPhotos,
+                onPickCamera = {
+                    val uri = newCameraImageUri(context)
+                    pendingCameraUri = uri
+                    cameraLauncher.launch(uri)
+                },
+                onPickGallery = {
+                    galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                },
+                onRemovePhoto = { idx -> duplexPhotos = duplexPhotos.filterIndexed { i, _ -> i != idx } },
+                onBargeIn = { duplexClient.bargeIn() },
+                onHangUp = {
+                    duplexClient.close()
+                    showCall = false
+                },
+            )
+        } else {
+            VoiceCallOverlay(
+                messages = messages,
+                streamState = streamState,
+                sending = state.sending,
+                attachments = state.attachments,
+                listening = listening,
+                recording = recording,
+                recordTick = recordTick,
+                ttsSpeaking = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
+                ttsUnavailable = (ttsState as? TtsPlayer.State.Unavailable)?.reason,
+                holdModifier = holdToTalkModifier(autoSend = true),
+                onPickCamera = {
+                    keyboard?.hide()
+                    val uri = newCameraImageUri(context)
+                    pendingCameraUri = uri
+                    cameraLauncher.launch(uri)
+                },
+                onPickGallery = {
+                    keyboard?.hide()
+                    galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                },
+                onRemoveAttachment = { vm.removeAttachment(it) },
+                onHangUp = {
+                    TtsPlayer.stop()
+                    showCall = false
+                },
+            )
+        }
     }
 
     // 自动更新就绪弹窗：新版包后台下载完成就弹「安装」；更新页打开时不重复弹
@@ -1036,6 +1152,150 @@ private fun LargeTextHistoryOverlay(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 豆包全双工通话界面（端到端 S2S）：不走 ASR→LLM→TTS 串行链路，
+ * 音频由 DuplexAudioEngine 实时收发；界面只展示识别流/回答流文字稿与状态，
+ * 插话按一下（bargeIn）即可打断播报。 fab 按钮常驻，无需按住说话。
+ */
+@Composable
+private fun DoubaoCallOverlay(
+    state: DoubaoDuplexClient.State,
+    asrText: String,
+    answerText: String,
+    hint: String?,
+    photos: List<ChatViewModel.PendingAttachment>,
+    onPickCamera: () -> Unit,
+    onPickGallery: () -> Unit,
+    onRemovePhoto: (Int) -> Unit,
+    onBargeIn: () -> Unit,
+    onHangUp: () -> Unit,
+) {
+    val seconds = remember { mutableStateOf(0) }
+    LaunchedEffect(state) {
+        while (state == DoubaoDuplexClient.State.LISTENING || state == DoubaoDuplexClient.State.SPEAKING || state == DoubaoDuplexClient.State.CONNECTED) {
+            kotlinx.coroutines.delay(1000)
+            seconds.value++
+        }
+    }
+    val statusText = when (state) {
+        DoubaoDuplexClient.State.CONNECTING -> "正在连接…"
+        DoubaoDuplexClient.State.CONNECTED -> "已连接，正在建立会话…"
+        DoubaoDuplexClient.State.LISTENING -> "正在听你说"
+        DoubaoDuplexClient.State.SPEAKING -> "正在回答，想插话就点一下"
+        DoubaoDuplexClient.State.CLOSING -> "正在挂断…"
+        DoubaoDuplexClient.State.ERROR -> "连接出错"
+        else -> "语音通话中"
+    }
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+            // 顶栏：状态 + 计时 + 挂断
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("语音通话中", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text(statusText, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                }
+                Text(
+                    "%02d:%02d".format(seconds.value / 60, seconds.value % 60),
+                    fontSize = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(12.dp))
+                Button(
+                    onClick = onHangUp,
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                    ),
+                    shape = RoundedCornerShape(20.dp),
+                ) { Text("挂断") }
+            }
+
+            hint?.let {
+                Text(
+                    it,
+                    fontSize = 16.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                )
+            }
+
+            // 文字稿：用户识别流 + 回答流
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+            ) {
+                if (asrText.isNotBlank()) {
+                    Surface(
+                        color = Color(0xFFD8EEF8),
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.padding(vertical = 6.dp).align(Alignment.End),
+                    ) {
+                        Text(asrText, fontSize = 22.sp, color = Color(0xFF0B3A55), modifier = Modifier.padding(16.dp))
+                    }
+                }
+                if (answerText.isNotBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.padding(vertical = 6.dp).align(Alignment.Start),
+                    ) {
+                        Text(answerText, fontSize = 22.sp, modifier = Modifier.padding(16.dp))
+                    }
+                }
+            }
+
+            // 待发照片条：随本轮对话一起落历史（纯语音 S2S 不解析图内容，只作记录）
+            if (photos.isNotEmpty()) {
+                androidx.compose.foundation.lazy.LazyRow(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(photos.size) { idx ->
+                        Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(4.dp)) {
+                                Text("📷", fontSize = 20.sp)
+                                IconButton(onClick = { onRemovePhoto(idx) }) {
+                                    Text("✕", color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 底部操作区：拍照 / 相册 / 插话打断（全双工常开采集，无需按住说话）
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(
+                    onClick = onPickCamera,
+                    modifier = Modifier.height(56.dp),
+                    shape = RoundedCornerShape(28.dp),
+                ) { Text("拍照", fontSize = 16.sp) }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = onPickGallery,
+                    modifier = Modifier.height(56.dp),
+                    shape = RoundedCornerShape(28.dp),
+                ) { Text("相册", fontSize = 16.sp) }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = onBargeIn,
+                    enabled = state == DoubaoDuplexClient.State.SPEAKING || state == DoubaoDuplexClient.State.LISTENING,
+                    modifier = Modifier.height(56.dp).weight(1f),
+                    shape = RoundedCornerShape(28.dp),
+                ) { Text("插话打断", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
             }
         }
     }

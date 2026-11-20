@@ -15,7 +15,7 @@ import androidx.core.content.ContextCompat
 
 /**
  * 后台常驻前台服务（设置 → 桌面与后台 → 「后台常驻运行」开关控制）：
- * 常驻通知 + START_STICKY，让进程不被系统随手回收（灵动屏随身设备场景：随手拿起来就要能用）。
+ * 常驻通知 + START_STICKY，让进程不被系统随手回收（灵动模式随身设备场景：随手拿起来就要能用）。
  * 开机后由 BootReceiver 视开关决定是否拉起。
  */
 class KeepAliveService : Service() {

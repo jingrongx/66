@@ -51,6 +51,18 @@ class SettingsRepository(private val context: Context) {
         val largeTextFontScale = floatPreferencesKey("large_text_font_scale")
         val sparkFontScale = floatPreferencesKey("spark_font_scale")
         val savedProviders = stringPreferencesKey("saved_providers")
+        val duplexApiKey = stringPreferencesKey("duplex_api_key")
+        val duplexVoice = stringPreferencesKey("duplex_voice")
+        val reasoningEffort = stringPreferencesKey("reasoning_effort")
+        val savedAddresses = stringPreferencesKey("saved_addresses")
+        val voiceAsrModel = stringPreferencesKey("voice_asr_model")
+        val voiceLlmModel = stringPreferencesKey("voice_llm_model")
+        val voiceTtsModel = stringPreferencesKey("voice_tts_model")
+        val asrAutoSendEnabled = booleanPreferencesKey("asr_auto_send_enabled")
+        val callEngine = stringPreferencesKey("call_engine")
+        val callAsrModel = stringPreferencesKey("call_asr_model")
+        val callLlmModel = stringPreferencesKey("call_llm_model")
+        val callTtsModel = stringPreferencesKey("call_tts_model")
     }
 
     val settings: Flow<AiSettings> = context.dataStore.data.map { p ->
@@ -88,6 +100,22 @@ class SettingsRepository(private val context: Context) {
                 runCatching { providerJson.decodeFromString<Map<String, ProviderCredentials>>(s) }
                     .getOrDefault(emptyMap())
             } ?: emptyMap(),
+            duplexApiKey = p[Keys.duplexApiKey] ?: "",
+            duplexVoice = p[Keys.duplexVoice] ?: defaults.duplexVoice,
+            reasoningEffort = p[Keys.reasoningEffort] ?: "high",
+            // 地址列表：新格式优先；旧版只有一个 homeAddress 时迁移成「家」一条，不丢老用户数据
+            savedAddresses = p[Keys.savedAddresses]?.let { s ->
+                runCatching { providerJson.decodeFromString<List<SavedAddress>>(s) }.getOrDefault(emptyList())
+            } ?: p[Keys.homeAddress]?.takeIf { it.isNotBlank() }
+                ?.let { listOf(SavedAddress("家", it)) } ?: emptyList(),
+            voiceAsrModel = p[Keys.voiceAsrModel] ?: "",
+            voiceLlmModel = p[Keys.voiceLlmModel] ?: "",
+            voiceTtsModel = p[Keys.voiceTtsModel] ?: "",
+            asrAutoSendEnabled = p[Keys.asrAutoSendEnabled] ?: false,
+            callEngine = p[Keys.callEngine] ?: "doubao",
+            callAsrModel = p[Keys.callAsrModel] ?: "",
+            callLlmModel = p[Keys.callLlmModel] ?: "",
+            callTtsModel = p[Keys.callTtsModel] ?: "",
         )
     }
 
@@ -122,6 +150,21 @@ class SettingsRepository(private val context: Context) {
             p[Keys.largeTextFontScale] = settings.largeTextFontScale
             p[Keys.sparkFontScale] = settings.sparkFontScale
             p[Keys.savedProviders] = providerJson.encodeToString(settings.savedProviders)
+            p[Keys.duplexApiKey] = settings.duplexApiKey
+            p[Keys.duplexVoice] = settings.duplexVoice
+            p[Keys.reasoningEffort] = settings.reasoningEffort
+            p[Keys.savedAddresses] = providerJson.encodeToString(settings.savedAddresses)
+            // 兼容旧字段：把列表里「家」的地址同步回 homeAddress，老代码（AppTools/ChatViewModel）仍可读
+            p[Keys.homeAddress] = settings.savedAddresses.firstOrNull { it.label == "家" }?.address
+                ?: settings.savedAddresses.firstOrNull()?.address ?: ""
+            p[Keys.voiceAsrModel] = settings.voiceAsrModel
+            p[Keys.voiceLlmModel] = settings.voiceLlmModel
+            p[Keys.voiceTtsModel] = settings.voiceTtsModel
+            p[Keys.asrAutoSendEnabled] = settings.asrAutoSendEnabled
+            p[Keys.callEngine] = settings.callEngine
+            p[Keys.callAsrModel] = settings.callAsrModel
+            p[Keys.callLlmModel] = settings.callLlmModel
+            p[Keys.callTtsModel] = settings.callTtsModel
         }
     }
 

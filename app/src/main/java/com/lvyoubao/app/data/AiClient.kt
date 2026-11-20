@@ -404,6 +404,10 @@ class AiClient(private val settings: AiSettings) {
             }
             if (isDeepSeek) {
                 put("thinking", json.encodeToJsonElement(ThinkingMode(if (thinking) "enabled" else "disabled")))
+                // 思考强度：仅 thinking 开启时下发（low/high/max），默认 high
+                if (thinking) {
+                    put("reasoning_effort", settings.reasoningEffort.ifBlank { "high" })
+                }
                 put("title", buildJsonObject { put("enabled", true) })
                 if (settings.safetyCheckEnabled) {
                     put("safety_check", buildJsonObject { put("level", "high") })
@@ -484,6 +488,10 @@ class AiClient(private val settings: AiSettings) {
             put("stream", true)
             if (isDeepSeek) {
                 put("thinking", json.encodeToJsonElement(ThinkingMode(if (thinking) "enabled" else "disabled")))
+                // 思考强度：仅 thinking 开启时下发（low/high/max），默认 high
+                if (thinking) {
+                    put("reasoning_effort", settings.reasoningEffort.ifBlank { "high" })
+                }
                 put("title", buildJsonObject { put("enabled", true) })
                 if (settings.safetyCheckEnabled) {
                     put("safety_check", buildJsonObject { put("level", "high") })

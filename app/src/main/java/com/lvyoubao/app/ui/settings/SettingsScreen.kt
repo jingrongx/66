@@ -72,12 +72,15 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.KeepAliveService
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.data.FullDiagnostics
 import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.ProviderPresets
 import com.lvyoubao.app.data.RobotClient
+import com.lvyoubao.app.data.SavedAddress
+import com.lvyoubao.app.data.VoiceModelOptions
 import com.lvyoubao.app.data.presetById
+import com.lvyoubao.app.data.duplex.DuplexProtocol
 import com.lvyoubao.app.ui.SettingsViewModel
-import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.ui.sync.QrCodeImage
 import com.lvyoubao.app.ui.sync.QrScanScreen
 import kotlinx.coroutines.Dispatchers
@@ -103,6 +106,7 @@ fun SettingsScreen(
     var showKey by remember { mutableStateOf(false) }
     var showAmap by remember { mutableStateOf(false) }
     var showAsr by remember { mutableStateOf(false) }
+    var showDuplexKey by remember { mutableStateOf(false) }
     var showSyncQr by remember { mutableStateOf(false) }
     var showScanner by remember { mutableStateOf(false) }
 
@@ -205,6 +209,22 @@ fun SettingsScreen(
             }
             Spacer(Modifier.width(4.dp))
             Text("设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(12.dp))
+            // 自动保存反馈：改动后短暂显示「保存中…」→「✓ 已保存」，2 秒淡出；界面上无保存按钮
+            androidx.compose.animation.AnimatedVisibility(
+                visible = state.saveFeedback != SettingsViewModel.SaveFeedback.IDLE,
+            ) {
+                Text(
+                    text = when (state.saveFeedback) {
+                        SettingsViewModel.SaveFeedback.SAVING -> "保存中…"
+                        SettingsViewModel.SaveFeedback.SAVED -> "✓ 已保存"
+                        else -> ""
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (state.saveFeedback == SettingsViewModel.SaveFeedback.SAVED)
+                        MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
 
         // ---------- AI 服务 ----------
@@ -315,24 +335,97 @@ fun SettingsScreen(
                     )
                 }
                 Spacer(Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("内容安全风控", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "开启 DeepSeek 官方安全校验与风控审核，自动拦截过滤违规敏感内容（默认开启）",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                // ---------- 能力调度（思考/强度/搜索）——DeepSeek 专属 ----------
+                val isDeepSeek = state.draft.presetId == "deepseek"
+                if (isDeepSeek) {
+                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("深度思考模式", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "通过 extra_body 传递 thinking 开关，复杂问题更准但更慢",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = state.draft.thinking,
+                            onCheckedChange = { checked -> vm.updateDraft { it.copy(thinking = checked) } },
                         )
                     }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.safetyCheckEnabled,
-                        onCheckedChange = { checked ->
-                            vm.updateDraft { it.copy(safetyCheckEnabled = checked) }
-                        },
-                    )
+                    if (state.draft.thinking) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("思考强度", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(6.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            VoiceModelOptions.REASONING_EFFORTS.forEach { effort ->
+                                FilterChip(
+                                    selected = state.draft.reasoningEffort == effort,
+                                    onClick = { vm.updateDraft { it.copy(reasoningEffort = effort) } },
+                                    label = { Text(when (effort) { "low" -> "低" ; "max" -> "最大" ; else -> "高" }) },
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("联网搜索能力", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "DeepSeek 原生联网搜索为主，搜索引擎作为补充",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = state.draft.searchEnabled,
+                            onCheckedChange = { checked -> vm.updateDraft { it.copy(searchEnabled = checked) } },
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("内容安全风控", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "开启 DeepSeek 官方安全校验与风控审核（默认开启）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = state.draft.safetyCheckEnabled,
+                            onCheckedChange = { checked -> vm.updateDraft { it.copy(safetyCheckEnabled = checked) } },
+                        )
+                    }
+                } else {
+                    // 非 DeepSeek：联网搜索作为补充，隐藏思考与风控
+                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("联网搜索能力", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "搜索引擎作为补充（该服务商无原生思维链与安全风控开关）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = state.draft.searchEnabled,
+                            onCheckedChange = { checked -> vm.updateDraft { it.copy(searchEnabled = checked) } },
+                        )
+                    }
                 }
                 Spacer(Modifier.height(16.dp))
                 OutlinedButton(
@@ -357,7 +450,7 @@ fun SettingsScreen(
         ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
             Column(Modifier.padding(16.dp)) {
                 Text(
-                    "先在手机上填好 API Key 等内容并保存；在车机上点「生成同步二维码」，再用手机点「扫码推送」扫它，配置就会自动写进车机。两台设备需连同一个 Wi-Fi，或车机连上手机热点。",
+                    "全量同步：手机上配好后，一键把全部配置（模式与系统 · 各家 Key · 核心能力与模型调度 · 常用地址 · 桌面与后台）整体推到车机，接收方无需逐项重填。车机点「生成同步二维码」，手机点「扫码推送」扫它即写入。两台设备需连同一 Wi-Fi，或车机连手机热点。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -479,17 +572,11 @@ fun SettingsScreen(
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                FieldLabel("常用地址（家）——问「回家的路」直接导航回家")
-                OutlinedTextField(
-                    value = state.draft.homeAddress,
-                    onValueChange = { value -> vm.updateDraft { it.copy(homeAddress = value) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("小区名或详细地址，如：抚州市临川区某路某小区") },
-                    shape = RoundedCornerShape(14.dp),
-                )
+                AddressListEditor(addresses = state.draft.savedAddresses) { list ->
+                    vm.updateDraft { it.copy(savedAddresses = list) }
+                }
                 Text(
-                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。常用地址填好即自动保存，问「回家的路」就直接导航回家，不再追问地址。",
+                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。常用地址填好即自动保存，问「回家 / 回公司 / 回XX」就直接导航，不再追问地址。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
@@ -505,14 +592,14 @@ fun SettingsScreen(
                         diagRunning = true
                         diagReport = null
                         scope.launch {
-                            diagReport = TtsPlayer.diagnose(context, state.draft.asrKey.ifBlank { null })
+                            diagReport = FullDiagnostics.run(context, state.draft)
                             diagRunning = false
                         }
                     },
                     enabled = !diagRunning,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (diagRunning) "诊断中…（约 10 秒）" else "🔍 朗读链路诊断（读不出声时点这个）")
+                    Text(if (diagRunning) "诊断中…（约 10 秒）" else "🔍 全链路综合诊断（API / 语音 / 地图 / 通话 / 权限）")
                 }
                 diagReport?.let { report ->
                     Text(
@@ -546,7 +633,7 @@ fun SettingsScreen(
                             )
                         }
                     }
-                }) { Text("📤 导出运行日志（排查问题把日志发开发者）") }
+                }) { Text("📤 导出全部运行日志（汇总系统、网络与业务全量日志发开发者）") }
                 Spacer(Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -576,6 +663,14 @@ fun SettingsScreen(
                 )
             }
         }
+
+        // ---------- 语音消息与实时通话（设计稿新增：两块并存配置区） ----------
+        VoiceCallConfigCard(
+            state = state,
+            vm = vm,
+            showDuplexKey = showDuplexKey,
+            onToggleDuplexKey = { showDuplexKey = !showDuplexKey },
+        )
 
         // ---------- 通用 ----------
         SectionLabel("通用")
@@ -619,7 +714,7 @@ fun SettingsScreen(
                         checked = state.draft.largeTextMode,
                         onCheckedChange = { checked ->
                             // 打开时联动打开自动播报（语音优先）；关闭不动自动播报，尊重用户特意关过的选择
-                            // 模式互斥：大字模式与灵动屏只能开一个，开的顺手关掉另一个（模式切换只认设置页）
+                            // 模式互斥：大字模式与灵动模式只能开一个，开的顺手关掉另一个（模式切换只认设置页）
                             vm.updateDraft {
                                 it.copy(
                                     largeTextMode = checked,
@@ -645,7 +740,7 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("灵动屏模式", style = MaterialTheme.typography.bodyLarge)
+                        Text("灵动模式", style = MaterialTheme.typography.bodyLarge)
                         Text(
                             "小屏/手表适配 · 极简萌眼 · 点击唤醒 · 双击按需视觉识图",
                             style = MaterialTheme.typography.labelSmall,
@@ -655,7 +750,7 @@ fun SettingsScreen(
                     androidx.compose.material3.Switch(
                         checked = state.draft.sparkMode,
                         onCheckedChange = { checked ->
-                            // 模式互斥：灵动屏与大字模式只能开一个，开的顺手关掉另一个（模式切换只认设置页）
+                            // 模式互斥：灵动模式与大字模式只能开一个，开的顺手关掉另一个（模式切换只认设置页）
                             vm.updateDraft {
                                 it.copy(sparkMode = checked, largeTextMode = if (checked) false else it.largeTextMode)
                             }
@@ -665,7 +760,7 @@ fun SettingsScreen(
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
                 SettingRow(
-                    title = "灵动屏字号",
+                    title = "灵动模式字号",
                     value = fontScaleLabel(state.draft.sparkFontScale),
                     onClick = { sparkFontDialog = true },
                 )
@@ -803,7 +898,7 @@ fun SettingsScreen(
             }
         }
         Text(
-            "唤醒词监听：灵动屏待机时喊「小源小源」直接进连续对话，不用一直喊（云识别关键词，杂音/电视声不成词不会误触）。语音打断=连续对话时小源在播报中听到你开口就停下听你说。个别设备喇叭回声压不住（自己打断自己）时调成「关」。",
+            "唤醒词监听：灵动模式待机时喊「小源小源」直接进连续对话，不用一直喊（云识别关键词，杂音/电视声不成词不会误触）。语音打断=连续对话时小源在播报中听到你开口就停下听你说。个别设备喇叭回声压不住（自己打断自己）时调成「关」。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -1064,7 +1159,7 @@ fun SettingsScreen(
     }
     if (sparkFontDialog) {
         FontScaleDialog(
-            title = "灵动屏字号",
+            title = "灵动模式字号",
             current = state.draft.sparkFontScale,
             onPick = { v ->
                 vm.updateDraft { it.copy(sparkFontScale = v) }
@@ -1265,6 +1360,218 @@ private fun FieldLabel(text: String) {
     )
 }
 
+/** 常用地址列表编辑器：任意个「标签 + 地址」，可增删，改动即保存 */
+@Composable
+private fun AddressListEditor(
+    addresses: List<SavedAddress>,
+    onChange: (List<SavedAddress>) -> Unit,
+) {
+    FieldLabel("常用地址管理（任意个）——说「回XX」自动导航")
+    Spacer(Modifier.height(8.dp))
+    addresses.forEachIndexed { index, addr ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = addr.label,
+                onValueChange = { v -> onChange(addresses.toMutableList().also { it[index] = addr.copy(label = v) }) },
+                modifier = Modifier.width(72.dp),
+                singleLine = true,
+                placeholder = { Text("标签", style = MaterialTheme.typography.labelSmall) },
+                shape = RoundedCornerShape(12.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            OutlinedTextField(
+                value = addr.address,
+                onValueChange = { v -> onChange(addresses.toMutableList().also { it[index] = addr.copy(address = v) }) },
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                placeholder = { Text("详细地址", style = MaterialTheme.typography.labelSmall) },
+                shape = RoundedCornerShape(12.dp),
+            )
+            IconButton(onClick = { onChange(addresses.toMutableList().also { it.removeAt(index) }) }) {
+                Text("✕", color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+    OutlinedButton(
+        onClick = { onChange(addresses + SavedAddress("", "")) },
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+    ) { Text("+ 添加常用地址") }
+}
+
+/** 三段式模型下拉：ASR / LLM / TTS 共用同一控件，可空 id=跟随全局 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ModelSelectRow(
+    label: String,
+    options: List<VoiceModelOptions.Option>,
+    selectedId: String,
+    onPick: (String) -> Unit,
+) {
+    Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(6.dp))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        FilterChip(
+            selected = selectedId.isBlank(),
+            onClick = { onPick("") },
+            label = { Text("跟随全局/默认") },
+        )
+        options.forEach { opt ->
+            FilterChip(
+                selected = selectedId == opt.id,
+                onClick = { onPick(opt.id) },
+                label = { Text(opt.label.substringBefore("｜")) },
+            )
+        }
+    }
+    val current = options.firstOrNull { it.id == selectedId }
+    if (current != null) {
+        Text(current.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+/**
+ * 语音消息 + 实时通话（设计稿「两块并存配置区」）：
+ * A 语音消息（按住说话）：ASR/LLM/TTS 三段独立 + 松手自动发送；
+ * B 实时通话：通话引擎二选一（豆包全双工音色 / 经典串行三段），预留音视频禁用项。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun VoiceCallConfigCard(
+    state: SettingsViewModel.UiState,
+    vm: SettingsViewModel,
+    showDuplexKey: Boolean,
+    onToggleDuplexKey: () -> Unit,
+) {
+    val d = state.draft
+    SectionLabel("语音消息与实时通话")
+    ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            // ========== A. 语音消息 ==========
+            Text("A. 语音消息（按住说话）", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text("主界面输入区 · 松手转文字进草稿，可连说几段、可编辑", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            ModelSelectRow("① 语音识别模型 (ASR)", VoiceModelOptions.ASR, d.voiceAsrModel) { v -> vm.updateDraft { it.copy(voiceAsrModel = v) } }
+            Spacer(Modifier.height(12.dp))
+            ModelSelectRow("② 对话大模型 (LLM)", VoiceModelOptions.LLM, d.voiceLlmModel) { v -> vm.updateDraft { it.copy(voiceLlmModel = v) } }
+            Spacer(Modifier.height(12.dp))
+            ModelSelectRow("③ 语音合成模型 (TTS)", VoiceModelOptions.TTS, d.voiceTtsModel) { v -> vm.updateDraft { it.copy(voiceTtsModel = v) } }
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("松手后自动发送", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text("松手倒计时自动提交，编辑输入框即取消", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                androidx.compose.material3.Switch(
+                    checked = d.asrAutoSendEnabled,
+                    onCheckedChange = { c -> vm.updateDraft { it.copy(asrAutoSendEnabled = c) } },
+                )
+            }
+            if (d.asrAutoSendEnabled) {
+                Spacer(Modifier.height(8.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    VoiceModelOptions.AUTO_SEND_DELAYS.filter { it > 0 }.forEach { sec ->
+                        FilterChip(
+                            selected = d.asrAutoSendSeconds == sec,
+                            onClick = { vm.updateDraft { it.copy(asrAutoSendSeconds = sec) } },
+                            label = { Text("${sec}秒") },
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 16.dp))
+
+            // ========== B. 实时通话 ==========
+            Text("B. 实时通话", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text("点导航「通话」进全屏 · 松手即问、自动朗读、可插话", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+
+            // 豆包全双工专用 Key（独立于文本大模型 Key）
+            FieldLabel("豆包实时语音 Key（全双工端到端，走 X-Api-Key）")
+            OutlinedTextField(
+                value = d.duplexApiKey,
+                onValueChange = { v -> vm.updateDraft { it.copy(duplexApiKey = v.trim()) } },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("火山「豆包语音」→ API Key 管理创建") },
+                visualTransformation = if (showDuplexKey) VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                trailingIcon = {
+                    TextButton(onClick = onToggleDuplexKey) {
+                        Text(if (showDuplexKey) "隐藏" else "显示")
+                    }
+                },
+                shape = RoundedCornerShape(14.dp),
+            )
+            Text(
+                "注意：这把 Key 在「豆包语音」产品下创建，与方舟文本大模型的 Key 不同；仅全双工实时通话使用。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+
+            Text("通话引擎", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                FilterChip(
+                    selected = d.callEngine == "doubao",
+                    onClick = { vm.updateDraft { it.copy(callEngine = "doubao") } },
+                    label = { Text("豆包全双工（推荐）") },
+                )
+                FilterChip(
+                    selected = d.callEngine == "classic",
+                    onClick = { vm.updateDraft { it.copy(callEngine = "classic") } },
+                    label = { Text("经典串行") },
+                )
+                FilterChip(
+                    selected = false,
+                    enabled = false,
+                    onClick = {},
+                    label = { Text("音视频（暂未开放）") },
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+
+            when (d.callEngine) {
+                "doubao" -> {
+                    Text("通话音色", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(6.dp))
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DuplexProtocol.VOICES.forEach { (id, name) ->
+                            FilterChip(
+                                selected = d.duplexVoice == id,
+                                onClick = { vm.updateDraft { it.copy(duplexVoice = id) } },
+                                label = { Text(name.substringBefore(" ｜").substringBefore(" (")) },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "端到端 S2S：模型直出 24kHz 语音，不经过 ASR/TTS，可自然插话打断。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                "classic" -> {
+                    ModelSelectRow("① 语音识别模型 (ASR)", VoiceModelOptions.ASR, d.callAsrModel) { v -> vm.updateDraft { it.copy(callAsrModel = v) } }
+                    Spacer(Modifier.height(12.dp))
+                    ModelSelectRow("② 对话大模型 (LLM)", VoiceModelOptions.LLM, d.callLlmModel) { v -> vm.updateDraft { it.copy(callLlmModel = v) } }
+                    Spacer(Modifier.height(12.dp))
+                    ModelSelectRow("③ 语音合成模型 (TTS)", VoiceModelOptions.TTS, d.callTtsModel) { v -> vm.updateDraft { it.copy(callTtsModel = v) } }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SettingRow(title: String, value: String, onClick: () -> Unit) {
     Row(
@@ -1334,7 +1641,7 @@ internal fun fontScaleLabel(v: Float): String = when (v) {
 }
 
 /**
- * 字号选择弹窗（大字模式/灵动屏模式各一，同一组件）：
+ * 字号选择弹窗（大字模式/灵动模式各一，同一组件）：
  * 选中即保存并生效——该模式全部 sp 文字经 fontScale 整体缩放，dp 骨架不动。
  */
 @Composable
