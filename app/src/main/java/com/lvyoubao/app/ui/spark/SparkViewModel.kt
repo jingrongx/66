@@ -17,6 +17,7 @@ import com.lvyoubao.app.data.DeviceBattery
 import com.lvyoubao.app.data.DeviceVolume
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.RobotIntent
@@ -119,6 +120,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var wakeSession: ContinuousConversation? = null
     // 唤醒后的「单次聆听」会话：收一句话就停，不常驻占麦
     private var wakeOnceSession: ContinuousConversation? = null
+    // 待机监听里「这次开口」的时刻：用来量化唤醒链路每一段耗时（判活 → 转写 → 命中）
+    @Volatile
+    private var wakeSpeechStartedAt = 0L
     // 流式播报进行中：句与句之间的 TtsPlayer「Idle」不算播完，别把眼睛提前顶出来
     @Volatile
     private var ttsStreaming = false
@@ -1309,6 +1313,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     override fun onSpeechStart() {
                         if (!duplexAudioActive && activeRecording == null) {
                             _eyeState.value = SparkEyeState.LISTENING
+                            wakeSpeechStartedAt = SystemClock.elapsedRealtime()
                         }
                     }
 
@@ -1331,6 +1336,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
             session.start() // 后台重试；最终失败由 onError 清理并提示
             wakeSession = session
+            LogStore.log(
+                "wake",
+                "待机监听启动：灵敏度 $curVoiceSens 档，判活门槛 " +
+                    "${if (curVoiceSens >= 2) 6f else 10f}dB / 下限 ${if (curVoiceSens >= 2) -58f else -50f}dB，" +
+                    "最短 ${if (curVoiceSens >= 2) 150L else 220L}ms，静音收段 ${if (curVoiceSens >= 2) 320L else 380L}ms",
+            )
         } else if (!shouldRun && wakeSession != null) {
             wakeSession?.stop()
             wakeSession = null
@@ -1360,8 +1371,23 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         val spoken = withContext(Dispatchers.IO) {
             SpeechInput.transcribeFile(wav, cur.asrKey.trim(), cur.dialectMode).getOrNull()
         }
+        val asrAt = SystemClock.elapsedRealtime()
+        val wavBytes = wav.length()
         wav.delete()
         val text = spoken.orEmpty().trim()
+        // 唤醒链路实测：一开口 → 判活收段 → 云转写回来，各段耗时都记下来。
+        // 「喊不醒」时先看这里：没这行 = 根本没判成一段话（VAD 门槛高了/麦克风没声）；
+        // 有这行但文本不对 = 识别没听清（录音电平、方言、噪音）；文本对却没反应 = 唤醒词表要放宽。
+        val speakStart = wakeSpeechStartedAt
+        if (speakStart > 0) {
+            val durMs = (wavBytes / 32).coerceAtLeast(0) // 16k/16bit 单声道 ≈ 32 字节每毫秒
+            LogStore.log(
+                "wake",
+                "待机语音：录音 ${durMs}ms，判活收段 +${now - speakStart}ms，转写 +${asrAt - speakStart}ms，" +
+                    "文本「${text.ifBlank { "（空）" }}」",
+            )
+            wakeSpeechStartedAt = 0L
+        }
         // 铃响时待机任何语音都先停铃（开口就是想让它安静）：小源小源/小源小源退出/关闭闹钟/别响了都算
         val wasAlarming = _alarmActive.value
         if (text.isNotBlank() && wasAlarming) {
@@ -1375,6 +1401,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             stopAlarm()
         }
         val ask = wakeWordPrefix(text)
+        // 命中/未命中都记一行：现场拿日志就能分清是「没喊对」还是「词表没认出来」
+        if (text.isNotBlank()) {
+            LogStore.log(
+                "wake",
+                if (ask != null) "唤醒命中（灵敏度 ${settings.value.voiceBargeIn}）→ 剩余「${ask}」"
+                else "未命中唤醒词：文本「$text」，已丢弃",
+            )
+        }
         if (ask != null && !_isContinuous.value && activeRecording == null) {
             // 「小源小源退出/关闭」这类只要停铃，别进对话
             if (wasAlarming && listOf("退出", "关闭", "关掉", "停止", "别说了").any { text.contains(it) }) {
