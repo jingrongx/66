@@ -144,6 +144,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     // 两条唤醒通道（端侧 KWS / 云端词表）共用的去重时刻：同一次唤醒只算一次
     @Volatile
     private var lastWakeHitAt = 0L
+    // 唤醒动作（回应声 + 开麦）的去重时刻：两条通道先后命中时会各调一次 onWakeConfirmed，
+    // 只挡 lastWakeHitAt 不够——云端那条不走 KWS 的判断
+    @Volatile
+    private var lastWakeConfirmAt = 0L
     // 流式播报进行中：句与句之间的 TtsPlayer「Idle」不算播完，别把眼睛提前顶出来
     @Volatile
     private var ttsStreaming = false
@@ -1161,7 +1165,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             val firstPiece = CompletableDeferred<String?>()
             val speechChannel = Channel<String>(Channel.UNLIMITED)
             val audioChannel = Channel<java.io.File>(Channel.UNLIMITED)
-            val ttsDir = java.io.File(context.cacheDir, "tts_stream").apply { runCatching { mkdirs() } }
+            val ttsDir = java.io.File(context.cacheDir, "tts_stream").apply {
+                runCatching { mkdirs() }
+                // 上一轮被中途打断时，队列里还没播到的 mp3 会留在这里。每轮开播前清一次，
+                // 别让 /data 里堆几十兆垃圾（这台设备只剩 1.7GB）。
+                runCatching { listFiles()?.forEach { it.delete() } }
+            }
             var spokeAny = false
             val playGen = TtsPlayer.startStreamSession()
 
@@ -1624,6 +1633,16 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 说到一半被打断的体验比多喊一次唤醒词差得多。
      */
     private suspend fun onWakeConfirmed(remainder: String) {
+        // 端侧 KWS 与云端词表是两条独立通道，会**先后**命中同一句「小源小源」：
+        // 实测本地 23:16:29.431、云端 23:16:30.009，差 578ms；22:55:39 那次差 332ms。
+        // 两边都往下走就会播两遍回应声（「我在」听成两个），并把已经开始的聆听会话
+        // 停掉重启——用户正说着话，开头就被吞了。这里统一拦一道。
+        val nowHit = SystemClock.elapsedRealtime()
+        if (nowHit - lastWakeConfirmAt < 1_200) {
+            LogStore.log("wake", "唤醒重复回调（${nowHit - lastWakeConfirmAt}ms 内已唤醒过），忽略")
+            return
+        }
+        lastWakeConfirmAt = nowHit
         _showEyes.value = true
         TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
         // 回应：一句真人声「我在/在呢/来了」，比原来的电子提示音更像在对话
@@ -1776,17 +1795,28 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private fun startWakeOneShot() {
         wakeOnceSession?.stop()
         wakeOnceSession = null
+        // 待机监听必须先让出麦克风：一台设备同一时刻只能有一个 AudioRecord。
+        // 两个会话同时开着，单次聆听启动时会连吃几次 `AudioRecord start() -38`（EINVAL），
+        // 一路降级到 16k/asr 甚至 voip，录出来的音质和识别率都跟着掉。
+        // syncWakeEngine 的 shouldRun 里本来就有「wakeOnceSession 存在就让路」，
+        // 但它只在状态变化时跑，这里得主动停一次。
+        wakeSession?.stop()
+        wakeSession = null
         val session = ContinuousConversation(
             appContext,
             config = ContinuousConversation.Config(
-                silenceEndMs = 650L, // 允许句中停顿，但别让人干等（0.85 秒那版每句都白等 200ms）
+                // 一句话的收段判据：**宁多等半秒，也别把话切两半**。
+                // 之前 650ms / 峰值回落 16dB 是按「连续说话」调的，老人说话中间常有
+                // 800ms 以上的换气停顿，实测切出过「如果一只猫一整天。」「我一直」这种半句，
+                // 转写出来驴唇不对马嘴，用户只能重说一遍——省的 0.45 秒远不值这个代价。
+                silenceEndMs = 1_150L,
                 minSpeechMs = 300L,
                 bargeInSensitivity = 0,
                 idleTimeoutMs = 15_000L,
-                // 一句话最多录 6 秒：嘈杂环境下噪声会让「静音收段」彻底失效，
-                // 实测这段能开到 18~31 秒，转写跟着从 0.4s 涨到 2.8s，用户以为设备没反应
-                maxUtteranceMs = 6_000L,
-                peakDropDb = 16f,
+                // 一句话最多录 10 秒（原 6 秒）：长问题（「如果一只猫一整天都在睡觉会怎么样」）
+                // 6 秒根本说不完，硬切只能得到前半句
+                maxUtteranceMs = 10_000L,
+                peakDropDb = 22f,
             ),
             listener = object : ContinuousConversation.Listener {
                 override fun onUtterance(wav: java.io.File, snrDb: Float) {

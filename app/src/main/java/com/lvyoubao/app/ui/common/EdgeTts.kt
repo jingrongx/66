@@ -125,11 +125,12 @@ object EdgeTts {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    out.delete()
-                    // turn.end 之后我们主动 close()，OkHttp 可能再回调一次 onFailure（关闭噪声）。
-                    // 那种情况已经 settle 过，再记账只会把 lastFailure 刷成假的"SSL 断开"，
-                    // 让界面和日志把一次成功合成报成失败。
+                    // turn.end 之后我们主动 close()，OkHttp 还会补一次 onFailure（关闭噪声）。
+                    // 那次如果走到下面删文件，删的就是**已经交给播放器、正在播的那个 mp3**——
+                    // 播放器随后 setDataSource failed，听感就是「播到一半少了一句」。
+                    // 所以：已 settle 过就只当噪声，既不记账也不删文件。
                     if (!cont.isActive) return
+                    out.delete()
                     noteFailure(t, response, "整段合成")
                     cont.resume(null)
                 }
