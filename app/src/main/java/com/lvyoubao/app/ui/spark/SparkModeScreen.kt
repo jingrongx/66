@@ -127,13 +127,18 @@ fun SparkModeScreen(
     // 通话期间麦克风整条让给豆包（停朗读/连聊/待机唤醒），挂断后恢复。
     val settings by vm.settings.collectAsState()
     var showDuplexCall by remember { mutableStateOf(false) }
+    // 通话进行中但界面已收起（回萌眼待机）：**通话不挂断**，人再开口或点电话键就重新展开
+    var callUiVisible by remember { mutableStateOf(false) }
     val duplexClient = remember { DoubaoDuplexClient(context) }
     val duplexState by duplexClient.state.collectAsState()
     var duplexAsr by remember { mutableStateOf("") }
     var duplexAnswer by remember { mutableStateOf("") }
     var duplexHint by remember { mutableStateOf<String?>(null) }
-    // 最后一次「有人在说话」的时间：通话中长时间没人说话就自动挂断回萌眼
+    // 最后一次「有人在说话」的时间：朗读完 + 几秒没人说话就把界面收回萌眼（不挂断）
     var lastVoiceAt by remember { mutableStateOf(System.currentTimeMillis()) }
+    // 本轮已被本机能力接走的识别文本：模型那条迟到的回答不再落第二张卡片
+    var localHandledAsr by remember { mutableStateOf("") }
+    var localHandledAt by remember { mutableStateOf(0L) }
     val callScope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -148,6 +153,11 @@ fun SparkModeScreen(
                 is DoubaoDuplexClient.Event.Asr -> {
                     duplexAsr = ev.text
                     lastVoiceAt = System.currentTimeMillis()
+                    // 界面收起时只要有人开口，就把通话界面拉回来（通话一直没断）
+                    if (!callUiVisible && ev.text.isNotBlank()) {
+                        callUiVisible = true
+                        vm.setShowEyes(false)
+                    }
                     if (ev.isFinal && ev.text.isNotBlank()) {
                         val said = ev.text
                         // 先说给本机能力听：机器人动作 / 电量 / 音量 / 计时 / 记事 / 记忆查找命中就本地执行，
@@ -158,6 +168,8 @@ fun SparkModeScreen(
                                 duplexClient.cancelResponse()
                                 duplexClient.speak(confirm)
                                 duplexAnswer = confirm
+                                localHandledAsr = said
+                                localHandledAt = System.currentTimeMillis()
                                 SparkChatStore.appendDuplexTurn(said, confirm)
                             }
                         }
@@ -167,8 +179,15 @@ fun SparkModeScreen(
                     lastVoiceAt = System.currentTimeMillis()
                     if (ev.isFinal) {
                         duplexAnswer = ev.text
-                        // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
-                        SparkChatStore.appendDuplexTurn(duplexAsr, ev.text)
+                        // 本轮若已被本机能力接走（并已 cancelResponse），模型这条是残留的下发：
+                        // 只在通话界面显示，不再往会话里落第二张卡片。
+                        val handledLocally = duplexAsr.isNotBlank() &&
+                            duplexAsr == localHandledAsr &&
+                            System.currentTimeMillis() - localHandledAt < 15_000L
+                        if (!handledLocally) {
+                            // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
+                            SparkChatStore.appendDuplexTurn(duplexAsr, ev.text)
+                        }
                     } else {
                         // 兼容两种下发：累计快照直接替换，真增量才追加
                         duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
@@ -216,10 +235,12 @@ fun SparkModeScreen(
     BackHandler(enabled = showDuplexCall) {
         duplexClient.close()
         showDuplexCall = false
+        callUiVisible = false
         vm.setShowEyes(true)
     }
 
-    // 通话中长时间没人说话（默认 8 秒）自动挂断，回到萌眼动画：随身设备不该一直占着麦克风
+    // 通话中「回答播完 + 几秒没人说话」→ 界面收回萌眼动画，但**不挂断**：
+    // 麦克风仍归豆包，人再开口（ASR 到达）或点电话键就重新展开，聊天不断线。
     LaunchedEffect(showDuplexCall) {
         if (!showDuplexCall) return@LaunchedEffect
         lastVoiceAt = System.currentTimeMillis()
@@ -228,13 +249,26 @@ fun SparkModeScreen(
             val silentMs = System.currentTimeMillis() - lastVoiceAt
             val listening = duplexState == DoubaoDuplexClient.State.LISTENING ||
                 duplexState == DoubaoDuplexClient.State.CONNECTED
-            if (listening && silentMs > 8_000) {
-                duplexClient.close()
-                showDuplexCall = false
+            if (callUiVisible && listening && silentMs > 6_000) {
+                callUiVisible = false
                 vm.setShowEyes(true)
-                break
             }
         }
+    }
+    // 每回到「聆听」态（一轮回答刚播完）重新起算静默时长：只在朗读完之后才收界面，
+    // 说话/思考过程中不会突然被收走。
+    LaunchedEffect(duplexState) {
+        if (duplexState == DoubaoDuplexClient.State.LISTENING) {
+            lastVoiceAt = System.currentTimeMillis()
+        }
+    }
+
+    // 电话键：没通话就起一通；通话中（界面已收起）就重新展开，不重连
+    val enterCall: () -> Unit = {
+        if (!showDuplexCall) showDuplexCall = true
+        callUiVisible = true
+        lastVoiceAt = System.currentTimeMillis() // 手动展开后重新起算静默，别刚展开就被收走
+        vm.setShowEyes(false)
     }
 
     // 长按会话消息弹出的操作面板（收藏/分享）
@@ -598,16 +632,21 @@ fun SparkModeScreen(
         } else {
             Modifier
         }
-        val talkGesture = Modifier.pointerInput(Unit) {
+        val talkGesture = Modifier.pointerInput(showDuplexCall) {
             detectTapGestures(
                 onPress = {
-                    vm.startHoldTalk(context) {
-                        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    }
-                    try {
-                        tryAwaitRelease()
-                    } finally {
-                        vm.endHoldTalk(context)
+                    if (showDuplexCall) {
+                        // 通话没挂断、只是界面收起：按住说话不能抢麦克风，点一下就展开通话界面
+                        enterCall()
+                    } else {
+                        vm.startHoldTalk(context) {
+                            recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                        try {
+                            tryAwaitRelease()
+                        } finally {
+                            vm.endHoldTalk(context)
+                        }
                     }
                 },
             )
@@ -657,7 +696,7 @@ fun SparkModeScreen(
                                 .width((78 * scale).dp)
                                 .clip(RoundedCornerShape(percent = 50))
                                 .background(Color(0xFF00E5FF))
-                                .clickable { showDuplexCall = true }
+                                .clickable(onClick = enterCall)
                                 .fillMaxHeight(),
                             contentAlignment = Alignment.Center,
                         ) {
@@ -678,6 +717,7 @@ fun SparkModeScreen(
                         ) {
                             Text(
                                 text = when {
+                                    showDuplexCall -> "📞 通话中，点一下继续"
                                     isRecording -> "松手发送 (${recordTick}s)"
                                     isContinuous -> "说吧，我在听"
                                     else -> "🎙 按住说话"
@@ -725,7 +765,7 @@ fun SparkModeScreen(
                                 .width((52 * scale).dp)
                                 .clip(RoundedCornerShape(percent = 50))
                                 .background(Color(0xFF00E5FF))
-                                .clickable { showDuplexCall = true }
+                                .clickable(onClick = enterCall)
                                 .fillMaxHeight(),
                             contentAlignment = Alignment.Center,
                         ) {
@@ -745,6 +785,7 @@ fun SparkModeScreen(
                         ) {
                             Text(
                                 text = when {
+                                    showDuplexCall -> "📞 通话中，点一下继续"
                                     isRecording -> "松手发送 (${recordTick}s)"
                                     isContinuous -> "说吧，我在听"
                                     else -> "🎙 按住说话"
@@ -852,8 +893,9 @@ fun SparkModeScreen(
             }
         }
 
-        // ---------- 豆包全双工通话覆盖层：顶栏 📞 进入，挂断回萌眼 ----------
-        if (showDuplexCall) {
+        // ---------- 豆包全双工通话覆盖层：点电话键进入，挂断回萌眼 ----------
+        // 注意只在 callUiVisible 时铺满屏：通话没挂断、界面收起时露出下面的萌眼动画
+        if (showDuplexCall && callUiVisible) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 DoubaoCallOverlay(
                     state = duplexState,
@@ -868,6 +910,7 @@ fun SparkModeScreen(
                     onHangUp = {
                         duplexClient.close()
                         showDuplexCall = false
+                        callUiVisible = false
                         vm.setShowEyes(true)
                     },
                     showPhotoActions = false,

@@ -16,6 +16,12 @@ object SparkChatStore {
     // 供 LLM 的完整对话历史（OutMessage），与界面消息分开维护
     private val history = mutableListOf<OutMessage>()
 
+    // 全双工一轮的幂等标记：同一轮被重复下发时只落一次（防「两条重复卡片」）
+    private var lastTurnSig: String = ""
+    private var lastTurnAt: Long = 0L
+    private var lastAnswerText: String = ""
+    private var lastAnswerAt: Long = 0L
+
     fun append(msg: SparkMessage) {
         messages.value = (messages.value + msg).takeLast(40) // 上限防照片占内存
     }
@@ -28,25 +34,67 @@ object SparkChatStore {
         }
     }
 
+    /** 去掉空白再做比较：豆包下发常带尾随空格/换行，直接 == 去不了重 */
+    private fun norm(s: String) = s.filterNot { it.isWhitespace() }
+
     /**
      * 全双工通话的一轮落地（用户识别 + 小源回答）：
      * 通话界面自己没有会话流，挂断后到「聊天」里能回看，LLM 下一轮也带得上。
+     *
+     * 去重口径（同一个问题出现过两种下发，都会造成两张一样的卡）：
+     * 1) 同一轮被整体重发（ASR 二次 final、TextDone 重发）→ 按 (识别|回答) 指纹幂等吞掉；
+     * 2) 本机能力（handleAssistantIntent）自己已 appendMessage 过确认话术 → 按文本去重；
+     * 3) 回答分段下发（两段各自 done）→ 补全上一张卡，而不是再叠一张。
      */
+    @Synchronized
     fun appendDuplexTurn(asr: String, answer: String) {
         if (asr.isBlank() && answer.isBlank()) return
-        // 本机能力那条链路（handleAssistantIntent）自己也会 appendMessage，
-        // 这里按「最近两条里已有同角色同文本」去重，避免聊天里出现两条一样的确认
-        fun alreadyThere(role: String, text: String): Boolean =
-            messages.value.takeLast(2).any { it.role == role && it.text == text }
+        val now = System.currentTimeMillis()
+        val sig = norm(asr) + "\u0001" + norm(answer)
+        // 一次性下发会在一两秒内重复到达，6 秒足够覆盖，又不会误吞「真的又问了一遍」
+        if (sig == lastTurnSig && now - lastTurnAt < 6_000L) return
+        lastTurnSig = sig
+        lastTurnAt = now
 
-        if (asr.isNotBlank() && !alreadyThere("user", asr)) {
-            append(SparkMessage(role = "user", text = asr))
-            appendHistory(OutMessage(role = "user", text = asr))
+        if (asr.isNotBlank()) {
+            val na = norm(asr)
+            val dup = messages.value.takeLast(3).any { it.role == "user" && norm(it.text) == na }
+            if (!dup) {
+                append(SparkMessage(role = "user", text = asr))
+                appendHistory(OutMessage(role = "user", text = asr))
+            }
         }
-        if (answer.isNotBlank() && !alreadyThere("assistant", answer)) {
-            append(SparkMessage(role = "assistant", text = answer))
-            appendHistory(OutMessage(role = "assistant", text = answer))
+        if (answer.isNotBlank()) appendAnswer(answer, now)
+    }
+
+    private fun appendAnswer(answer: String, now: Long) {
+        val na = norm(answer)
+        // 只跟「本轮刚落的回答」合并，避免把上一轮的回答误补全
+        val recent = now - lastAnswerAt < 8_000L
+        val prev = if (recent) norm(lastAnswerText) else ""
+        when {
+            recent && prev.isNotEmpty() && prev == na -> Unit            // 完全重复：只留一张卡
+            recent && prev.isNotEmpty() && prev.startsWith(na) -> Unit   // 新的是旧的前缀：丢弃
+            recent && prev.isNotEmpty() && na.startsWith(prev) -> {      // 分段下发：就地补全
+                lastAnswerText = answer
+                lastAnswerAt = now
+                replaceLastAssistant(answer)
+            }
+            else -> {
+                lastAnswerText = answer
+                lastAnswerAt = now
+                append(SparkMessage(role = "assistant", text = answer))
+                appendHistory(OutMessage(role = "assistant", text = answer))
+            }
         }
+    }
+
+    private fun replaceLastAssistant(text: String) {
+        val list = messages.value.toMutableList()
+        val idx = list.indexOfLast { it.role == "assistant" }
+        if (idx < 0) return
+        list[idx] = list[idx].copy(text = text)
+        messages.value = list
     }
 
     @Synchronized
