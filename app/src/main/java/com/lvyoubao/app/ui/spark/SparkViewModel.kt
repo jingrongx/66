@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class SparkEyeState {
     IDLE,        // 待机呼吸，日常俏皮
@@ -1100,9 +1101,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     for (piece in speechChannel) {
                         if (piece.isBlank()) continue
                         TtsPlayer.speak(context, piece)
-                        // 等这一句播完再接下一句（TtsPlayer 是单实例，不能并发）
-                        TtsPlayer.state.first {
-                            it is TtsPlayer.State.Idle || it is TtsPlayer.State.Unavailable
+                        // 等这一句播完再接下一句（TtsPlayer 是单实例，不能并发）。
+                        // 带上限兜底：万一播放器状态卡在 Speaking（个别 ROM 播完不回调），
+                        // 到点就往下走，下一句 speak() 的 stop() 会把卡住的那条流水线顶掉，
+                        // 不至于整轮播报和眼睛状态一起吊死。
+                        val capMs = (piece.length * 400L).coerceIn(8_000L, 60_000L)
+                        withTimeoutOrNull(capMs) {
+                            TtsPlayer.state.first {
+                                it is TtsPlayer.State.Idle || it is TtsPlayer.State.Unavailable
+                            }
                         }
                     }
                 } catch (_: CancellationException) {
