@@ -1179,12 +1179,18 @@ internal fun DoubaoCallOverlay(
     onBargeIn: () -> Unit,
     onHangUp: () -> Unit,
     showPhotoActions: Boolean = true,
+    // 通话起算时刻（wall clock ms）：界面收起再展开时计时接着走，不会被重置成 00:00。
+    // 传 0 就按本层首次组合的时刻兜底（大字模式那条老链路不需改）。
+    startedAtMs: Long = 0L,
 ) {
+    val baseMs = remember(startedAtMs) {
+        if (startedAtMs > 0L) startedAtMs else System.currentTimeMillis()
+    }
     val seconds = remember { mutableStateOf(0) }
-    LaunchedEffect(state) {
+    LaunchedEffect(state, baseMs) {
         while (state == DoubaoDuplexClient.State.LISTENING || state == DoubaoDuplexClient.State.SPEAKING || state == DoubaoDuplexClient.State.CONNECTED) {
             kotlinx.coroutines.delay(1000)
-            seconds.value++
+            seconds.value = ((System.currentTimeMillis() - baseMs) / 1000L).toInt().coerceAtLeast(0)
         }
     }
     val statusText = when (state) {

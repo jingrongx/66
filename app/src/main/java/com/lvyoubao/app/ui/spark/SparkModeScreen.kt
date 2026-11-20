@@ -136,6 +136,8 @@ fun SparkModeScreen(
     var duplexHint by remember { mutableStateOf<String?>(null) }
     // 最后一次「有人在说话」的时间：朗读完 + 几秒没人说话就把界面收回萌眼（不挂断）
     var lastVoiceAt by remember { mutableStateOf(System.currentTimeMillis()) }
+    // 通话起算时刻：界面收起再展开时通话计时接着走
+    var callStartedAt by remember { mutableStateOf(0L) }
     // 本轮已被本机能力接走的识别文本：模型那条迟到的回答不再落第二张卡片
     var localHandledAsr by remember { mutableStateOf("") }
     var localHandledAt by remember { mutableStateOf(0L) }
@@ -211,6 +213,7 @@ fun SparkModeScreen(
     DisposableEffect(showDuplexCall) {
         if (showDuplexCall) {
             vm.setDuplexAudioActive(true)
+            callStartedAt = System.currentTimeMillis()
             duplexAsr = ""
             duplexAnswer = ""
             duplexHint = null
@@ -909,6 +912,7 @@ fun SparkModeScreen(
                     onPickGallery = {},
                     onRemovePhoto = {},
                     onBargeIn = { duplexClient.bargeIn() },
+                    startedAtMs = callStartedAt,
                     onHangUp = {
                         duplexClient.close()
                         showDuplexCall = false
