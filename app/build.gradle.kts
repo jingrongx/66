@@ -9,12 +9,27 @@ android {
     namespace = "com.lvyoubao.app"
     compileSdk = 35
 
+    // RNNoise 降噪走 NDK 编译（app/src/main/cpp）。27.0 是 AGP 8.7 的默认配套版本，
+    // GitHub Actions 的 ubuntu 镜像预装了它；本地缺失时 AGP 会自动下载。
+    ndkVersion = "27.0.12077973"
+
     defaultConfig {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 147
-        versionName = "0.9.24"
+        versionCode = 148
+        versionName = "0.9.25"
+
+        // RNNoise 只编两个 ARM ABI：这台设备是 armeabi-v7a，arm64 兼顾其他机器。
+        // x86 只跑模拟器，没必要进包。
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=none")
+            }
+        }
     }
 
     signingConfigs {
@@ -56,6 +71,13 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 }
 

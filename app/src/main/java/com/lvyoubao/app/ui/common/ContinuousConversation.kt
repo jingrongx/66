@@ -76,6 +76,8 @@ class ContinuousConversation(
         // 默认值沿用原行为（12dB / -45dBFS）；唤醒监听按设置里的灵敏度档位覆盖。
         val onsetMarginDb: Float = 12f,
         val minOnsetDb: Float = -45f,
+        /** 是否用 RNNoise 做神经网络降噪（48k 域推理；不可用/太慢会自动退回不降噪） */
+        val denoise: Boolean = true,
     )
 
     companion object {
@@ -119,6 +121,19 @@ class ContinuousConversation(
         CaptureCfg(16_000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "16k/voip"),
     )
 
+    /**
+     * 采集顺序按「当下是否在播 TTS」动态排：这台设备的 HAL 在播报时不允许
+     * MIC 源起麦（start() 直接 -38 EINVAL），实测连试三次全失败才降级到 asr 源，
+     * 白扔 240ms 起振时间。播报中直接把 asr 源排第一位，一次就成。
+     */
+    private fun captureOrder(): List<CaptureCfg> =
+        if (!ttsActive) captureLadder else listOf(
+            CaptureCfg(48_000, MediaRecorder.AudioSource.VOICE_RECOGNITION, "48k/asr（播报中）"),
+            CaptureCfg(48_000, MediaRecorder.AudioSource.MIC, "48k/mic"),
+            CaptureCfg(16_000, MediaRecorder.AudioSource.MIC, "16k/mic"),
+            CaptureCfg(16_000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "16k/voip"),
+        )
+
     @Volatile private var activeRate = SAMPLE_RATE
 
     private var record: AudioRecord? = null
@@ -128,6 +143,9 @@ class ContinuousConversation(
 
     // VAD 状态（仅音频线程访问）
     private var noiseFloorDb = -60f
+
+    /** RNNoise 本帧的人声概率（0~1），-1 = 没跑降噪 */
+    private var denoiseVad = -1f
 
     /** 当前环境噪声底（dBFS）：只给上层写日志/调参看，别拿它做判活决策 */
     fun debugNoiseFloorDb(): Float = noiseFloorDb
@@ -176,7 +194,7 @@ class ContinuousConversation(
         var lastError = "这台设备的麦克风参数读不出来，连续对话用不了"
         var opened: AudioRecord? = null
         var openedCfg: CaptureCfg? = null
-        for (cfg in captureLadder) {
+        for (cfg in captureOrder()) {
             val minBuf = AudioRecord.getMinBufferSize(
                 cfg.rate,
                 AudioFormat.CHANNEL_IN_MONO,
@@ -227,6 +245,10 @@ class ContinuousConversation(
 
         record = rec
         activeRate = cfg.rate
+        if (config.denoise) {
+            // 懒加载：第一次开麦才加载 .so，失败也只是没有降噪
+            if (!RnNoise.ensure()) LogStore.log("conv", "降噪不可用，按原始音频继续")
+        }
         LogStore.log("conv", "采集配置：${cfg.label}（VAD 在 16k 上跑，${cfg.rate / SAMPLE_RATE} 倍降采样）")
         // 重试期间被 stop：立刻清理放弃（快速开关连聊的竞态）
         if (stopRequested) {
@@ -248,6 +270,7 @@ class ContinuousConversation(
                 "回声消除 ${if (echoCanceler?.enabled == true) "开" else "不可用"}",
         )
         noiseFloorDb = -60f
+        denoiseVad = -1f
         voiceRun = 0
         inSpeech = false
         readErrors = 0
@@ -319,6 +342,13 @@ class ContinuousConversation(
                 continue
             }
             readErrors = 0
+            // 降噪必须在 48k 原始域上做（RNNoise 的模型就是按 48k/10ms 训练的），
+            // 处理完再降到 16k 给 VAD 与 WAV。降噪后的电平才是「人说话 vs 电视在响」
+            // 能分得开的依据——不降噪时底噪一抬到 -24dBFS，峰值回落判据就永远不成立。
+            if (RnNoise.enabled) {
+                denoiseVad = RnNoise.processInPlace(raw, activeRate)
+                RnNoise.takeStats()?.let { LogStore.log("denoise", it) }
+            }
             processFrame(if (factor == 1) raw else downsampleTo16k(raw, factor), FRAME_SAMPLES)
         }
     }
@@ -385,7 +415,12 @@ class ContinuousConversation(
         // 峰值回落：段内电平掉到峰值以下 peakDropDb，即便还高于绝对门槛也认为这句说完了。
         // 不加这条，屋里有人聊天/开着电视时，一段话永远等不到「静音」，只能靠 maxUtteranceMs 硬切。
         val peakSilent = inSpeech && config.peakDropDb > 0f && db < speechPeakDb - config.peakDropDb
-        val isVoice = db >= onsetDb && !peakSilent
+        // 模型判定「这一帧不是人声」时，即使电平够也不起振：
+        // 电视/音乐/远处聊天经常比安静人声还响，光看电平会把它们当人开口。
+        // 阈值取 0.2（RNNoise 在纯噪声上通常 <0.1，人声 >0.5），只在起振侧使用，
+        // 收段仍走能量判据，避免模型误判把一句话从中间切断。
+        val vadVeto = !inSpeech && denoiseVad >= 0f && denoiseVad < 0.2f
+        val isVoice = db >= onsetDb && !peakSilent && !vadVeto
         val requiredRun = if (ttsActive) ONSET_RUN_TTS else ONSET_RUN_NORMAL
 
         if (isVoice) {
