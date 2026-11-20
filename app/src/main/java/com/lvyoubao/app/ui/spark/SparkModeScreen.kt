@@ -76,6 +76,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.core.content.FileProvider
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -86,6 +87,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.lvyoubao.app.R
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
 import com.lvyoubao.app.ui.common.SpeechInput
@@ -283,6 +285,25 @@ fun SparkModeScreen(
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
         label = "callPulseAlpha",
     )
+    // 挂断：胶囊上的红键和全屏通话里的按钮共用一套收尾
+    val hangUpCall: () -> Unit = {
+        duplexClient.close()
+        showDuplexCall = false
+        callUiVisible = false
+        vm.setShowEyes(true)
+    }
+    // 通话时长：显示在胶囊通话条上，收起/展开都不归零
+    var callElapsedSec by remember { mutableStateOf(0) }
+    LaunchedEffect(showDuplexCall) {
+        if (!showDuplexCall) {
+            callElapsedSec = 0
+            return@LaunchedEffect
+        }
+        while (true) {
+            callElapsedSec = ((System.currentTimeMillis() - callStartedAt) / 1000L).toInt().coerceAtLeast(0)
+            delay(1_000)
+        }
+    }
 
     // 长按会话消息弹出的操作面板（收藏/分享）
     var actionMsg by remember { mutableStateOf<SparkMessage?>(null) }
@@ -355,7 +376,7 @@ fun SparkModeScreen(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0D1117)) // 深邃科技黑底色（铺满含系统栏区域）
+            .background(Brush.verticalGradient(listOf(SparkColors.bgTop, SparkColors.bgBottom))) // 墨玉：顶部微亮、底部近黑
             // 倒计时铃响时点屏幕任意空白处停止（按钮类控件自己消费点击，不受影响）
             .pointerInput(Unit) { detectTapGestures { if (alarmActive) vm.stopAlarm() } },
     ) {
@@ -371,100 +392,49 @@ fun SparkModeScreen(
                 .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-        // ---------- 顶部状态与退出栏（随屏幕等比放大，不挤不裁） ----------
+        // ---------- 顶栏：状态点 + 标题，右侧三颗图标钮（聊天/设置/退出） ----------
+        // 旧版是「💬 聊天 / 设置 / 退出」三个文字按钮，小屏上横着占掉近三分之一宽度，改图标后宽度还给标题。
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height((30 * scale).dp)
                 .padding(horizontal = (8 * scale).dp, vertical = (2 * scale).dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            // 左侧状态指示
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            Box(
+                modifier = Modifier
+                    .size((6 * scale).dp)
+                    .background(if (isRecording) SparkColors.danger else SparkColors.accent, shape = CircleShape),
+            )
+            Spacer(Modifier.width((5 * scale).dp))
+            Text(
+                text = when {
+                    isRecording -> "录音中 ${recordTick}s"
+                    !statusHint.isNullOrBlank() -> statusHint.orEmpty()
+                    showEyes -> "灵动"
+                    else -> "对话"
+                },
+                color = SparkColors.text,
+                fontSize = (11 * scale).sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = (0.4 * scale).sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size((6 * scale).dp)
-                        .background(
-                            if (isRecording) Color(0xFFFF5252) else Color(0xFF00E5FF),
-                            shape = CircleShape,
-                        ),
-                )
-                Spacer(Modifier.width((4 * scale).dp))
-                Text(
-                    text = when {
-                        isRecording -> "录音中 ${recordTick}s"
-                        !statusHint.isNullOrBlank() -> statusHint.orEmpty()
-                        showEyes -> "旅游宝 · 灵动"
-                        else -> "聊天"
-                    },
-                    color = Color.White.copy(alpha = 0.85f),
-                    fontSize = (13 * scale).sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-
-            // 右侧操作：切换视图 + 设置（模式开关只认设置页）+ 红色退出应用
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // 切换眼睛 / 会话文字
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape((8 * scale).dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .clickable { vm.toggleShowEyes() }
-                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = if (showEyes) "💬 聊天" else "👀 萌眼",
-                        color = Color.White.copy(alpha = 0.9f),
-                        fontSize = (12 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-
-                Spacer(Modifier.width((6 * scale).dp))
-
-                // 设置：进设置页（大字/灵动模式开关在这里，互斥）
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape((8 * scale).dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .clickable { showSettings = true }
-                        .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "设置",
-                        color = Color.White.copy(alpha = 0.9f),
-                        fontSize = (12 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-
-                Spacer(Modifier.width((6 * scale).dp))
-
-                // 退出：红色，直接退出应用回桌面（参考大字模式，模式切换只认设置页开关）
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape((8 * scale).dp))
-                        .background(MaterialTheme.colorScheme.error)
-                        .clickable { exitApp() }
-                        .padding(horizontal = (10 * scale).dp, vertical = (4 * scale).dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "退出",
-                        color = Color.White,
-                        fontSize = (13 * scale).sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy((6 * scale).dp)) {
+                SparkIconButton(
+                    iconRes = if (showEyes) R.drawable.ic_spark_chat else R.drawable.ic_spark_eye,
+                    contentDescription = if (showEyes) "聊天" else "萌眼",
+                    scale = scale,
+                ) { vm.toggleShowEyes() }
+                SparkIconButton(R.drawable.ic_spark_tune, "设置", scale) { showSettings = true }
+                SparkIconButton(
+                    iconRes = R.drawable.ic_spark_power,
+                    contentDescription = "退出",
+                    scale = scale,
+                    tint = SparkColors.dangerSoft,
+                ) { exitApp() }
             }
         }
 
@@ -551,12 +521,32 @@ fun SparkModeScreen(
                             )
                         }
                     } else {
-                        // 眼睛动画展示
-                        CuteEyesCanvas(
-                            eyeState = eyeState,
-                            scale = scale,
-                            modifier = Modifier.fillMaxSize(),
-                        )
+                        // 眼睛动画 + 底部一句提示：提示贴在下沿（离眼睛留出 30px 呼吸区），
+                        // 之前紧贴眼睛下方，看着像贴在脸上。
+                        Box(Modifier.fillMaxSize()) {
+                            CuteEyesCanvas(
+                                eyeState = eyeState,
+                                scale = scale,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(bottom = (34 * scale).dp),
+                            )
+                            Text(
+                                text = when {
+                                    showDuplexCall -> "通话中 · 直接说话就行"
+                                    isContinuous -> "我在听，直接说"
+                                    isRecording -> "松手发送"
+                                    else -> "说「小源小源」，或按住下面说话"
+                                },
+                                color = SparkColors.sub,
+                                fontSize = (9 * scale).sp,
+                                letterSpacing = (0.2 * scale).sp,
+                                maxLines = 1,
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = (6 * scale).dp),
+                            )
+                        }
                     }
                 } else {
                     // 会话流展示（完整历史回看：用户问题/拍照轮在右，小源回答在左）
@@ -616,9 +606,10 @@ fun SparkModeScreen(
             }
         }
 
-        // ---------- 底部操作区（随状态换摆法） ----------
-        // 萌眼态：方案 A 完整脸——脸颊圆钮分列两侧，全宽「嘴形」胶囊居中正对眼睛（对称成脸）；
-        // 会话态：紧凑对称单行（📷｜按住说话｜🖼️），嘴依然居中不歪，聊天区更高（组合方案）
+        // ---------- 底部操作区：一行搞定（相机 · 胶囊 · 相册） ----------
+        // 旧版萌眼态是「相机/相册一行 + 胶囊一行」两行，240px 高里白吃 80px；现在两态共用一行。
+        // 通话中：胶囊整条变成通话条——左红键挂断、中间状态+时长（点一下回全屏）、右箭头，
+        // 「按住说话」这一整块位置被通话占满；相机/相册置灰（麦克风归豆包，拍照发问会打架）。
         val onCamera: () -> Unit = {
             if (CameraSnapshotHelper.hasCameraPermission(context)) {
                 cameraLauncher.launch(photoUri)
@@ -627,24 +618,6 @@ fun SparkModeScreen(
             }
         }
         val onGallery: () -> Unit = { galleryLauncher.launch("image/*") }
-        // 连聊中的整颗呼吸青光（边框描边 1.1s 往复）
-        val glowTransition = rememberInfiniteTransition(label = "convGlow")
-        val glowAlpha by glowTransition.animateFloat(
-            initialValue = 0.15f,
-            targetValue = 0.6f,
-            animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Reverse),
-            label = "glowAlpha",
-        )
-        val convCapsuleBg = when {
-            isRecording -> Color(0xFFD32F2F)
-            isContinuous -> Color(0xFF00838F)
-            else -> MaterialTheme.colorScheme.primary
-        }
-        val convGlowBorder = if (isContinuous) {
-            Modifier.border(2.dp, Color(0xFF00E5FF).copy(alpha = glowAlpha), RoundedCornerShape(percent = 50))
-        } else {
-            Modifier
-        }
         val talkGesture = Modifier.pointerInput(showDuplexCall) {
             detectTapGestures(
                 onPress = {
@@ -665,181 +638,179 @@ fun SparkModeScreen(
             )
         }
 
-        if (showEyes) {
-            Column(
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = (7 * scale).dp)
+                .padding(bottom = (7 * scale).dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy((6 * scale).dp),
+        ) {
+            SparkRoundButton(
+                iconRes = R.drawable.ic_spark_camera,
+                contentDescription = "拍照",
+                scale = scale,
+                enabled = !showDuplexCall,
+                onClick = onCamera,
+            )
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = (10 * scale).dp, vertical = (4 * scale).dp),
+                    .weight(1f)
+                    .height((36 * scale).dp)
+                    .clip(RoundedCornerShape(percent = 50))
+                    .background(
+                        if (showDuplexCall) SparkColors.accent.copy(alpha = 0.10f) else SparkColors.card,
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = if (showDuplexCall) SparkColors.accent.copy(alpha = 0.38f) else SparkColors.line,
+                        shape = RoundedCornerShape(percent = 50),
+                    ),
             ) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Box(
+                if (showDuplexCall) {
+                    Row(
                         modifier = Modifier
-                            .size((30 * scale).dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.10f))
-                            .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-                            .clickable(onClick = onCamera),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("📷", fontSize = (15 * scale).sp) }
-                    Box(
-                        modifier = Modifier
-                            .size((30 * scale).dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.10f))
-                            .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-                            .clickable(onClick = onGallery),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("🖼️", fontSize = (15 * scale).sp) }
-                }
-                Spacer(Modifier.height((5 * scale).dp))
-                // 一体胶囊：左端是实时通话（豆包全双工，亮青底 + 电话图标），右侧按住说话
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height((40 * scale).dp)
-                        .clip(RoundedCornerShape(percent = 50))
-                        .background(convCapsuleBg)
-                        .then(convGlowBorder),
-                ) {
-                    Row(Modifier.fillMaxSize()) {
-                        // 实时通话：豆包全双工（端到端 S2S，免按键、随时插话）——占原来「连聊」的位置
+                            .fillMaxSize()
+                            .padding((3 * scale).dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // 挂断：不用先进全屏
                         Box(
                             modifier = Modifier
-                                .padding((4 * scale).dp)
-                                .width((78 * scale).dp)
+                                .width((34 * scale).dp)
+                                .fillMaxHeight()
                                 .clip(RoundedCornerShape(percent = 50))
-                                .background(if (showDuplexCall) Color(0xFF00C2D6) else Color(0xFF00E5FF))
-                                .clickable(onClick = enterCall)
-                                .fillMaxHeight(),
+                                .background(SparkColors.danger)
+                                .clickable { hangUpCall() },
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Call,
-                                contentDescription = "实时通话",
-                                tint = Color(0xFF06222B),
-                                modifier = Modifier.size((21 * scale).dp),
+                                painter = painterResource(R.drawable.ic_spark_hangup),
+                                contentDescription = "挂断",
+                                tint = Color.White,
+                                modifier = Modifier.size((15 * scale).dp),
                             )
-                            if (showDuplexCall) {
-                                // 通话中但界面收起：右上角呼吸白点（点了就回通话界面）
+                        }
+                        // 状态 + 时长：点一下回到全屏通话
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(percent = 50))
+                                .clickable { enterCall() }
+                                .padding(start = (7 * scale).dp, end = (6 * scale).dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (duplexState == DoubaoDuplexClient.State.CONNECTING) {
+                                // 接通中：细环占位
                                 Box(
                                     modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(top = (5 * scale).dp, end = (11 * scale).dp)
-                                        .size((7 * scale).dp)
-                                        .clip(CircleShape)
-                                        .background(Color.White.copy(alpha = callPulse)),
+                                        .size((9 * scale).dp)
+                                        .border(1.5.dp, SparkColors.accent.copy(alpha = 0.4f), CircleShape),
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size((5 * scale).dp)
+                                        .background(
+                                            color = if (duplexState == DoubaoDuplexClient.State.ERROR) {
+                                                SparkColors.danger
+                                            } else {
+                                                SparkColors.accent.copy(alpha = callPulse)
+                                            },
+                                            shape = CircleShape,
+                                        ),
                                 )
                             }
+                            Spacer(Modifier.width((6 * scale).dp))
+                            Text(
+                                text = callStatusText(duplexState),
+                                color = SparkColors.text,
+                                fontSize = (10.5 * scale).sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            if (duplexState != DoubaoDuplexClient.State.ERROR) {
+                                Text(
+                                    text = callTimerText(callElapsedSec),
+                                    color = SparkColors.sub,
+                                    fontSize = (10 * scale).sp,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                            Icon(
+                                painter = painterResource(R.drawable.ic_spark_chevron),
+                                contentDescription = null,
+                                tint = SparkColors.sub,
+                                modifier = Modifier
+                                    .padding(start = (4 * scale).dp)
+                                    .size((12 * scale).dp),
+                            )
                         }
-                        // 嘴：按住临时说一句
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding((3 * scale).dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // 电话键：没通话就起一通；通话中（界面收起）就重新展开，不重连
                         Box(
+                            modifier = Modifier
+                                .width((34 * scale).dp)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(SparkColors.accent)
+                                .clickable(onClick = enterCall),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_spark_phone),
+                                contentDescription = "实时通话",
+                                tint = SparkColors.accentInk,
+                                modifier = Modifier.size((15 * scale).dp),
+                            )
+                        }
+                        Row(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
                                 .then(talkGesture),
-                            contentAlignment = Alignment.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
                         ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_spark_mic),
+                                contentDescription = null,
+                                tint = SparkColors.text.copy(alpha = 0.75f),
+                                modifier = Modifier.size((13 * scale).dp),
+                            )
+                            Spacer(Modifier.width((5 * scale).dp))
                             Text(
                                 text = when {
                                     isRecording -> "松手发送 (${recordTick}s)"
                                     isContinuous -> "说吧，我在听"
-                                    else -> "🎙 按住说话"
+                                    else -> "按住说话"
                                 },
-                                fontSize = (16 * scale).sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
+                                fontSize = (11 * scale).sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SparkColors.text,
                                 maxLines = 1,
                             )
                         }
                     }
                 }
             }
-        } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = (10 * scale).dp, vertical = (4 * scale).dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy((10 * scale).dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size((40 * scale).dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.10f))
-                        .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-                        .clickable(onClick = onCamera),
-                    contentAlignment = Alignment.Center,
-                ) { Text("📷", fontSize = (19 * scale).sp) }
-                // 会话态：实时通话钮 + 按住说话拼成一颗胶囊（与萌眼态同构，紧凑窄版）
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height((40 * scale).dp)
-                        .clip(RoundedCornerShape(percent = 50))
-                        .background(convCapsuleBg)
-                        .then(convGlowBorder),
-                ) {
-                    Row(Modifier.fillMaxSize()) {
-                        // 实时通话：豆包全双工（会话态同样可达，占原「连聊」位置）
-                        Box(
-                            modifier = Modifier
-                                .padding((3 * scale).dp)
-                                .width((52 * scale).dp)
-                                .clip(RoundedCornerShape(percent = 50))
-                                .background(if (showDuplexCall) Color(0xFF00C2D6) else Color(0xFF00E5FF))
-                                .clickable(onClick = enterCall)
-                                .fillMaxHeight(),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Call,
-                                contentDescription = "实时通话",
-                                tint = Color(0xFF06222B),
-                                modifier = Modifier.size((18 * scale).dp),
-                            )
-                            if (showDuplexCall) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(top = (4 * scale).dp, end = (8 * scale).dp)
-                                        .size((6 * scale).dp)
-                                        .clip(CircleShape)
-                                        .background(Color.White.copy(alpha = callPulse)),
-                                )
-                            }
-                        }
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .then(talkGesture),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = when {
-                                    isRecording -> "松手发送 (${recordTick}s)"
-                                    isContinuous -> "说吧，我在听"
-                                    else -> "🎙 按住说话"
-                                },
-                                fontSize = (15 * scale).sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                maxLines = 1,
-                            )
-                        }
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .size((40 * scale).dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.10f))
-                        .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-                        .clickable(onClick = onGallery),
-                    contentAlignment = Alignment.Center,
-                ) { Text("🖼️", fontSize = (19 * scale).sp) }
-            }
+            SparkRoundButton(
+                iconRes = R.drawable.ic_spark_gallery,
+                contentDescription = "相册",
+                scale = scale,
+                enabled = !showDuplexCall,
+                onClick = onGallery,
+            )
         }
         }
         }
@@ -940,12 +911,7 @@ fun SparkModeScreen(
                     onRemovePhoto = {},
                     onBargeIn = { duplexClient.bargeIn() },
                     startedAtMs = callStartedAt,
-                    onHangUp = {
-                        duplexClient.close()
-                        showDuplexCall = false
-                        callUiVisible = false
-                        vm.setShowEyes(true)
-                    },
+                    onHangUp = { hangUpCall() },
                     showPhotoActions = false,
                 )
             }
@@ -989,88 +955,80 @@ private fun ChatStream(
         if (messages.isNotEmpty()) scrollState.animateScrollTo(scrollState.maxValue)
     }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        shape = RoundedCornerShape((12 * scale).dp),
-        color = Color(0xFF161B22),
+    // 墨玉：不再给整段对话套一张深色大卡（原来像一块板砖压在屏幕上），直接铺在渐变底色上；
+    // 小源的话左对齐正文 + 一个小圆点，只有自己说的才用气泡——同高度能多放一倍字。
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = (1 * scale).dp)
+            .verticalScroll(scrollState),
+        verticalArrangement = Arrangement.spacedBy((9 * scale).dp),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding((8 * scale).dp)
-                .verticalScroll(scrollState),
-            verticalArrangement = Arrangement.spacedBy((6 * scale).dp),
-        ) {
-            if (messages.isEmpty()) {
-                Text(
-                    text = "还没有对话～\n按住下方按钮说说话\n或拍张照让小源看看 👀",
-                    color = Color.White.copy(alpha = 0.45f),
-                    fontSize = (13 * scale).sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = (24 * scale).dp),
-                )
-            }
+        if (messages.isEmpty()) {
+            Text(
+                text = "还没有对话\n按住下面那个按钮说句话\n或者拍张照让我看看",
+                color = SparkColors.sub,
+                fontSize = (10.5 * scale).sp,
+                lineHeight = (16 * scale).sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = (26 * scale).dp),
+            )
+        }
 
-            messages.forEach { msg ->
-                if (msg.role == "user") {
-                    // 用户消息：靠右浅蓝气泡，带图轮展示全部照片缩略图
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.End,
-                    ) {
-                        if (msg.photos.isNotEmpty()) {
-                            Row(
-                                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy((4 * scale).dp),
-                            ) {
-                                msg.photos.forEach { photo ->
-                                    Image(
-                                        bitmap = photo.asImageBitmap(),
-                                        contentDescription = "本轮照片",
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .size(width = (72 * scale).dp, height = (54 * scale).dp)
-                                            .clip(RoundedCornerShape((8 * scale).dp))
-                                            .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape((8 * scale).dp)),
-                                    )
-                                }
+        messages.forEach { msg ->
+            if (msg.role == "user") {
+                // 自己说的：右侧青色淡底气泡，带图轮展示全部照片缩略图
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.End,
+                ) {
+                    if (msg.photos.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy((4 * scale).dp),
+                        ) {
+                            msg.photos.forEach { photo ->
+                                Image(
+                                    bitmap = photo.asImageBitmap(),
+                                    contentDescription = "本轮照片",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(width = (72 * scale).dp, height = (54 * scale).dp)
+                                        .clip(RoundedCornerShape((8 * scale).dp))
+                                        .border(1.dp, SparkColors.line, RoundedCornerShape((8 * scale).dp)),
+                                )
                             }
-                            Spacer(Modifier.height((4 * scale).dp))
                         }
-                        Text(
-                            text = msg.text,
-                            color = Color(0xFFB3E5FC),
-                            fontSize = (14 * scale).sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .widthIn(max = (250 * scale).dp)
-                                .clip(RoundedCornerShape((10 * scale).dp))
-                                .background(Color(0xFF80D8FF).copy(alpha = 0.16f))
-                                .pointerInput(msg) {
-                                    // 点＝重播朗读，长按＝收藏/分享
-                                    detectTapGestures(
-                                        onTap = { onMsgTap(msg) },
-                                        onLongPress = { onMsgLongPress(msg) },
-                                    )
-                                }
-                                .padding(horizontal = (8 * scale).dp, vertical = (5 * scale).dp),
-                        )
+                        Spacer(Modifier.height((4 * scale).dp))
                     }
-                } else {
-                    // 小源回答：靠左深色气泡，流式更新中先显示占位
                     Text(
-                        text = msg.text.ifBlank { "小源思考中…" },
-                        color = Color.White,
-                        fontSize = (15 * scale).sp,
-                        lineHeight = (21 * scale).sp,
-                        fontWeight = FontWeight.Bold,
+                        text = msg.text,
+                        color = SparkColors.text,
+                        fontSize = (10.5 * scale).sp,
+                        lineHeight = (15 * scale).sp,
                         modifier = Modifier
-                            .widthIn(max = (250 * scale).dp)
-                            .clip(RoundedCornerShape((10 * scale).dp))
-                            .background(Color.White.copy(alpha = 0.07f))
+                            .widthIn(max = (220 * scale).dp)
+                            .clip(
+                                RoundedCornerShape(
+                                    topStart = (9 * scale).dp,
+                                    topEnd = (9 * scale).dp,
+                                    bottomEnd = (3 * scale).dp,
+                                    bottomStart = (9 * scale).dp,
+                                ),
+                            )
+                            .background(SparkColors.userBubble)
+                            .border(
+                                1.dp,
+                                SparkColors.line,
+                                RoundedCornerShape(
+                                    topStart = (9 * scale).dp,
+                                    topEnd = (9 * scale).dp,
+                                    bottomEnd = (3 * scale).dp,
+                                    bottomStart = (9 * scale).dp,
+                                ),
+                            )
                             .pointerInput(msg) {
                                 // 点＝重播朗读，长按＝收藏/分享
                                 detectTapGestures(
@@ -1079,6 +1037,34 @@ private fun ChatStream(
                                 )
                             }
                             .padding(horizontal = (8 * scale).dp, vertical = (5 * scale).dp),
+                    )
+                }
+            } else {
+                // 小源：小圆点 + 左对齐正文（不套气泡），流式中先给省略号占位
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(top = (5 * scale).dp)
+                            .size((5 * scale).dp)
+                            .background(SparkColors.accent.copy(alpha = 0.85f), CircleShape),
+                    )
+                    Spacer(Modifier.width((7 * scale).dp))
+                    Text(
+                        text = msg.text.ifBlank { "…" },
+                        color = SparkColors.text,
+                        fontSize = (11 * scale).sp,
+                        lineHeight = (16 * scale).sp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .pointerInput(msg) {
+                                detectTapGestures(
+                                    onTap = { onMsgTap(msg) },
+                                    onLongPress = { onMsgLongPress(msg) },
+                                )
+                            },
                     )
                 }
             }
@@ -1153,13 +1139,14 @@ private fun CuteEyesCanvas(
         val cx = size.width / 2f
         val cy = size.height / 2f
 
+        // 墨玉：全部收敛到同一支青色（不再一会儿薄荷绿一会儿亮青，看着像两套主题）
         val eyeColor = when (eyeState) {
-            SparkEyeState.LISTENING -> Color(0xFF64FFDA)
-            SparkEyeState.THINKING -> Color(0xFF80D8FF)
-            SparkEyeState.SPEAKING -> Color(0xFF00E5FF)
-            SparkEyeState.MUTED -> Color(0xFF78909C)
-            SparkEyeState.CAPTURING -> Color(0xFFFFD54F)
-            SparkEyeState.IDLE -> Color(0xFF4EE2EC)
+            SparkEyeState.LISTENING -> Color(0xFF46E9F9)
+            SparkEyeState.THINKING -> Color(0xFF7FD4FF)
+            SparkEyeState.SPEAKING -> Color(0xFF2FD8EE)
+            SparkEyeState.MUTED -> Color(0xFF6E8792)
+            SparkEyeState.CAPTURING -> Color(0xFFFFC46B)
+            SparkEyeState.IDLE -> Color(0xFF3DD9EA)
         }
 
         val baseWidth = (size.width * 0.20f).coerceIn(44f * scale, 75f * scale)
@@ -1179,6 +1166,17 @@ private fun CuteEyesCanvas(
 
         val leftEyeCenter = Offset(cx - eyeSpacing - curWidth / 2f + lookOffsetX.value, cy + offsetY + lookOffsetY.value)
         val rightEyeCenter = Offset(cx + eyeSpacing + curWidth / 2f + lookOffsetX.value, cy + offsetY + lookOffsetY.value)
+
+        // 柔光：眼睛背后一圈 18% 的同色径向渐变（旧版没有这层，眼睛像贴纸贴在纯黑上）
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(eyeColor.copy(alpha = 0.18f), Color.Transparent),
+                center = Offset(cx, cy),
+                radius = size.minDimension * 0.55f,
+            ),
+            radius = size.minDimension * 0.55f,
+            center = Offset(cx, cy),
+        )
 
         if (eyeState == SparkEyeState.MUTED) {
             drawSleepyEye(leftEyeCenter, curWidth, scale)
@@ -1203,7 +1201,7 @@ private fun DrawScope.drawSingleEye(
 
     drawRoundRect(
         brush = Brush.verticalGradient(
-            colors = listOf(color, color.copy(alpha = 0.88f)),
+            colors = listOf(color, color.copy(alpha = 0.82f)),
             startY = top,
             endY = top + height,
         ),
@@ -1266,3 +1264,18 @@ private fun formatCountdown(sec: Int): String {
     return if (h > 0) String.format("%d:%02d:%02d", h, m, s)
     else String.format("%02d:%02d", m, s)
 }
+
+/** 通话条上的状态话术（与胶囊里的小圆点同一个信息源） */
+private fun callStatusText(state: DoubaoDuplexClient.State): String = when (state) {
+    DoubaoDuplexClient.State.CONNECTING -> "接通中…"
+    DoubaoDuplexClient.State.CONNECTED -> "已连接"
+    DoubaoDuplexClient.State.LISTENING -> "正在听你说"
+    DoubaoDuplexClient.State.SPEAKING -> "正在回答"
+    DoubaoDuplexClient.State.CLOSING -> "正在挂断…"
+    DoubaoDuplexClient.State.ERROR -> "连接出错，点一下重试"
+    else -> "通话中"
+}
+
+/** 通话时长 MM:SS */
+private fun callTimerText(sec: Int): String =
+    String.format("%02d:%02d", (sec / 60).coerceAtLeast(0), (sec % 60).coerceAtLeast(0))

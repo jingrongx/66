@@ -113,6 +113,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
     // 唤醒词监听（待机时喊「小源小源」进连续对话）：与连续对话共用一套引擎，状态机决定开谁
     private var wakeSession: ContinuousConversation? = null
+    // 唤醒后的「单次聆听」会话：收一句话就停，不常驻占麦
+    private var wakeOnceSession: ContinuousConversation? = null
     private var sparkActive = false
     // 全双工通话占用麦克风期间，唤醒监听让路（一台设备同一时刻只能有一个 AudioRecord）
     private var duplexAudioActive = false
@@ -160,6 +162,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         // 连续对话引擎：播报中切换为「打断监听」阈值；播报即表明处理链路走完了，空闲计时恢复
                         continuous?.setTtsActive(true)
                         continuous?.setBusy(false)
+                        wakeSession?.setTtsActive(true)
+                        wakeOnceSession?.setTtsActive(true)
                         idleToEyesJob?.cancel()
                         if (_eyeState.value == SparkEyeState.THINKING || _eyeState.value == SparkEyeState.IDLE) {
                             _eyeState.value = SparkEyeState.SPEAKING
@@ -167,6 +171,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     }
                     ttsState is TtsPlayer.State.Idle -> {
                         continuous?.setTtsActive(false)
+                        wakeSession?.setTtsActive(false)
+                        wakeOnceSession?.setTtsActive(false)
                         if (_eyeState.value == SparkEyeState.SPEAKING) {
                             // 连续对话：播完回「聆听中」接着听；普通模式：回 IDLE 待机
                             _eyeState.value = if (_isContinuous.value) SparkEyeState.LISTENING else SparkEyeState.IDLE
@@ -1298,7 +1304,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             SpeechInput.hasRecordPermission(appContext) &&
             !_isContinuous.value &&
             !duplexAudioActive &&
-            activeRecording == null
+            activeRecording == null &&
+            wakeOnceSession == null // 唤醒后的单次聆听正在占麦，待机监听让路
         if (shouldRun && wakeSession == null) {
             val session = ContinuousConversation(
                 appContext,
@@ -1325,6 +1332,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     }
                 },
             )
+            session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
             session.start() // 后台重试；最终失败由 onError 清理并提示
             wakeSession = session
         } else if (!shouldRun && wakeSession != null) {
@@ -1370,26 +1378,169 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             }
             stopAlarm()
         }
-        if (isWakeWord(text) && !_isContinuous.value && activeRecording == null) {
+        val ask = wakeWordPrefix(text)
+        if (ask != null && !_isContinuous.value && activeRecording == null) {
             // 「小源小源退出/关闭」这类只要停铃，别进对话
             if (wasAlarming && listOf("退出", "关闭", "关掉", "停止", "别说了").any { text.contains(it) }) {
                 _statusHint.value = "好的，闹钟停了"
                 return@launch
             }
-            // 命中唤醒词：麦克风权限必然已授予（监听本来就开着），直接进连续对话
+            // v0.9.15 单次交互：唤醒后只做一轮，不再进「连聊」——
+            // 连聊会一直占着麦克风、自己判断断句，用户说到一半被打断的体验比多喊一次唤醒词差得多。
             _showEyes.value = true
-            startContinuous(appContext) {}
-            speakHint(appContext, "嗯，我在")
+            TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
+            if (ask.length >= 2) {
+                // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
+                answerOneShot(ask)
+            } else {
+                // 只喊了唤醒词：开一轮单次聆听，说完（约 1 秒静音）就收，下次还要喊唤醒词
+                startWakeOneShot()
+                _eyeState.value = SparkEyeState.LISTENING
+                _statusHint.value = "我在听，说完就好"
+            }
         } else if (wasAlarming) {
             _statusHint.value = "好的，闹钟停了"
         }
     }
 
-    /** 唤醒词判定：ASR 对「小源小源」的常见同音误写都算，长句不拦（交给聊天） */
-    private fun isWakeWord(text: String): Boolean {
-        if (text.isEmpty() || text.length > 12) return false
-        return listOf("小源", "小原", "小袁", "小圆", "小远", "小元", "小缘", "晓源", "小媛", "小沅")
-            .any { text.contains(it) }
+    /** 唤醒词：ASR 对「小源小源」的常见同音误写都算 */
+    private val wakeWords = listOf(
+        "小源", "小原", "小袁", "小圆", "小远", "小元", "小缘", "晓源", "小媛", "小沅",
+    )
+
+    /**
+     * 句首唤醒词判定：命中返回「去掉唤醒词之后剩下的话」，没命中返回 null。
+     * 这样「小源小源，今天天气怎么样」能一次说完（剩下的话直接当问题），
+     * 只喊「小源小源」时剩下为空，进入单次聆听。
+     */
+    private fun wakeWordPrefix(text: String): String? {
+        if (text.isEmpty()) return null
+        var t = text.trim().trimStart('嗯', '哎', '诶', '啊', '，', ',', '。', '.', '！', '!', '、', ' ', '　')
+        var hit = false
+        var changed = true
+        while (changed) {
+            changed = false
+            for (w in wakeWords) {
+                if (t.startsWith(w)) {
+                    t = t.removePrefix(w)
+                    hit = true
+                    changed = true
+                }
+            }
+            val trimmed = t.trimStart('，', ',', '。', '.', '！', '!', '、', ' ', '　')
+            if (trimmed != t) {
+                t = trimmed
+                changed = true
+            }
+        }
+        return if (hit) t.trim('，', ',', '。', '.', '！', '!', '、', ' ', '　') else null
+    }
+
+    /** 一句话走完整条问答链（唤醒单次交互用）：本地快路 → 机器意图 → AI */
+    private suspend fun answerOneShot(question: String) {
+        appendMessage(SparkMessage("user", question))
+        _showEyes.value = false
+        _eyeState.value = SparkEyeState.THINKING
+        if (matchBatteryQuestion(question)) {
+            answerBattery(appContext)
+            return
+        }
+        val vol = matchVolumeFast(question)
+        if (vol != null) {
+            answerVolume(appContext, vol)
+            return
+        }
+        if (!handleAssistantIntent(appContext, question)) {
+            sendAiRequest(appContext, question, emptyList())
+        }
+    }
+
+    /**
+     * 唤醒后的一轮聆听：只收「一句话」，说完就关（silenceEndMs 放到 1 秒，允许句中停顿），
+     * 半双工（bargeInSensitivity=0）保证播报时不收音、也不会打断用户；
+     * 15 秒一直没人说话就回待机。拿到的语音交给 handleWakeOnce。
+     */
+    private fun startWakeOneShot() {
+        wakeOnceSession?.stop()
+        wakeOnceSession = null
+        val session = ContinuousConversation(
+            appContext,
+            config = ContinuousConversation.Config(
+                silenceEndMs = 1_000L,
+                minSpeechMs = 300L,
+                bargeInSensitivity = 0,
+                idleTimeoutMs = 15_000L,
+            ),
+            listener = object : ContinuousConversation.Listener {
+                override fun onUtterance(wav: java.io.File) {
+                    // 单次：拿到第一段就停录音，处理完回待机
+                    wakeOnceSession?.stop()
+                    wakeOnceSession = null
+                    handleWakeOnce(wav)
+                }
+
+                override fun onBargeIn() {}
+
+                override fun onAutoTimeout() {
+                    wakeOnceSession?.stop()
+                    wakeOnceSession = null
+                    _eyeState.value = SparkEyeState.IDLE
+                    _statusHint.value = null
+                    syncWakeEngine()
+                }
+
+                override fun onError(message: String) {
+                    viewModelScope.launch {
+                        wakeOnceSession?.stop()
+                        wakeOnceSession = null
+                        _eyeState.value = SparkEyeState.IDLE
+                        _statusHint.value = "没听清：$message"
+                        syncWakeEngine()
+                    }
+                }
+            },
+        )
+        session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
+        session.start()
+        wakeOnceSession = session
+        // 同一时刻只允许一个采集会话：待机监听先让路
+        wakeSession?.stop()
+        wakeSession = null
+    }
+
+    /** 单次聆听录到的一段：转写 → 走问答链 → 回待机（下次仍要喊唤醒词） */
+    private fun handleWakeOnce(wav: java.io.File) = viewModelScope.launch {
+        val cur = repo.settings.firstOrNull() ?: settings.value
+        val asrKey = cur.asrKey.trim()
+        if (asrKey.isBlank()) {
+            wav.delete()
+            _eyeState.value = SparkEyeState.IDLE
+            _statusHint.value = "请先在设置里配置语音识别 Key"
+            syncWakeEngine()
+            return@launch
+        }
+        _statusHint.value = "正在识别…"
+        val result = withContext(Dispatchers.IO) {
+            SpeechInput.transcribeFile(wav, asrKey, cur.dialectMode)
+        }
+        wav.delete()
+        result.fold(
+            onSuccess = { spoken ->
+                val clean = HotwordCorrector.correct(spoken.trim())
+                if (clean.isBlank()) {
+                    _eyeState.value = SparkEyeState.IDLE
+                    _statusHint.value = "没听清，再喊一次「小源小源」"
+                } else {
+                    answerOneShot(clean)
+                }
+            },
+            onFailure = { err ->
+                _eyeState.value = SparkEyeState.IDLE
+                _statusHint.value = (err as? SpeechInput.SpeechException)?.let { SpeechInput.spokenHint(it) }
+                    ?: "没听清，再喊一次「小源小源」"
+            },
+        )
+        syncWakeEngine()
     }
 
     /**
@@ -1475,6 +1626,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         stopContinuousInternal()
         wakeSession?.stop()
         wakeSession = null
+        wakeOnceSession?.stop()
+        wakeOnceSession = null
         runCatching { appContext.unregisterReceiver(batteryReceiver) }
         activeRecording?.let {
             SpeechInput.cancelRecording(it)
