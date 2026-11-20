@@ -36,6 +36,17 @@ object SparkChatStore {
         }
     }
 
+    /**
+     * 清掉历史里空白的 assistant 占位。请求先 append 一条空卡片再流式填字，
+     * 若这次请求被新问题顶掉 / 超时没收尾，那条空卡片就永远停在「…」上——
+     * 用户看到一串点点，会以为整个界面卡死了。
+     */
+    fun clearStalePlaceholders() {
+        val list = messages.value
+        if (list.none { it.role == "assistant" && it.text.isBlank() }) return
+        messages.value = list.filterNot { it.role == "assistant" && it.text.isBlank() }
+    }
+
     /** 去掉空白再做比较：豆包下发常带尾随空格/换行，直接 == 去不了重 */
     private fun norm(s: String) = s.filterNot { it.isWhitespace() }
 

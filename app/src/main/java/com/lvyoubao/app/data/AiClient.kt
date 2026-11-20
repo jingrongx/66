@@ -936,8 +936,10 @@ class AiClient(private val settings: AiSettings) {
             OkHttpClient.Builder()
                 // readTimeout 是「多久没收到任何字节」而不是总时长：流式回答每来一块就重置。
                 // 之前 180 秒意味着服务端挂住时要干等 3 分钟才报错——用户遇到的就是这个。
+                // 再收紧到 20 秒：正常首字 1~3 秒就到，20 秒一个字节都没有基本可判死，
+                // 让用户及早看到「网络超时」而不是对着转圈干等。
                 .connectTimeout(8, TimeUnit.SECONDS)
-                .readTimeout(45, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(true)
                 .build()
         }

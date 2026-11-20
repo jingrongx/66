@@ -241,6 +241,19 @@ object TtsPlayer {
     /** 播一个已合成好的文件并挂起直到播完；代次不符（被用户打断）返回 false */
     suspend fun playPrepared(file: File, gen: Int): Boolean = playFileAwait(file, gen)
 
+    /**
+     * 首句秒播：边收 WSS 音频帧边解码播放，首声 ≈ 微软返回首帧的耗时（约 0.5 秒），
+     * 不必等整句合成完（那是每句 1.5~3 秒的整段等待）。
+     * 返回 false = 一帧都没解出来（连不上/协议失败），上层退回文件链补这一句。
+     */
+    suspend fun playStreamedPiece(text: String, gen: Int): Boolean {
+        if (gen != generation) return false
+        return playStreamed(text, gen)
+    }
+
+    /** 该代次是否仍是当前播报：被用户打断/新播报接管后变 false，流水线据此决定是否继续 */
+    fun isActive(gen: Int): Boolean = gen == generation
+
     /** 流水线收尾：只有代次仍然是自己的时候才把状态置回空闲 */
     fun endStreamSession(gen: Int) {
         if (gen == generation) {
@@ -374,44 +387,77 @@ object TtsPlayer {
     /**
      * 播放一个音频文件并挂起直到播完/出错/被取消；返回是否完整播完。
      * 不再依赖 OnCompletionListener——部分 ROM 的播放完成回调不触发，
-     * 流水线会永久挂死（"播几句就不播了"的根因之一）；改为轮询 isPlaying，
+     * 流水线会永久挂死（"播几句就不播了"的根因之一）；改为轮询播放头，
      * 播完/出错/被新播报接管都能可靠退出，还顺带消掉了强杀播放器时的"破音"。
+     *
+     * 起播失败要重试：这台 MTK 设备上 AudioTrack 偶发被占用/焦点切换，第一次 start 抛异常
+     * 是常见事；老的实现一次失败就返回 false，上层据此整条流水线 break——听感就是
+     * "播完一句突然没声了，后面全哑"。
+     * 结束判据也不能看 isPlaying：缓冲/焦点抖动时它会瞬时变 false，一句会被从中间掐断，
+     * 同样表现为"播到一半没声音"。改看播放头是否走完，只有连续 1.5 秒不前进才算真卡死。
      */
     private suspend fun playFileAwait(file: File, gen: Int): Boolean {
         return withContext(Dispatchers.Main) {
             // 开播前最后核对一次代次（和 stop()/speak() 同在主线程执行，此检查无竞态窗口）：
             // 已被接管的旧流水线到此为止，一个音都不许出
             if (gen != generation) return@withContext false
-            val mp = MediaPlayer()
-            player = mp
+
+            var mp: MediaPlayer? = null
             var started = false
-            try {
-                mp.setDataSource(file.absolutePath)
-                mp.prepare()
-                if (gen == generation) {
-                    _state.value = State.Speaking
-                    mp.start()
-                    started = true
+            for (attempt in 0 until 2) {
+                if (gen != generation) break
+                if (attempt > 0) delay(120)
+                val candidate = MediaPlayer()
+                mp = candidate
+                player = candidate
+                started = try {
+                    candidate.setDataSource(file.absolutePath)
+                    candidate.prepare()
+                    if (gen == generation) {
+                        _state.value = State.Speaking
+                        candidate.start()
+                        true
+                    } else {
+                        false
+                    }
+                } catch (e: Exception) {
+                    ttsLog("播放器起播失败（第 ${attempt + 1} 次）：${e.javaClass.simpleName} ${e.message ?: ""}")
+                    false
                 }
-            } catch (_: Exception) {
+                if (!started) {
+                    // 只释放自己这个播放器，不误伤后继流水线
+                    runCatching { candidate.release() }
+                    if (player === candidate) player = null
+                    mp = null
+                } else {
+                    break
+                }
             }
-            if (!started) {
-                // 创建/预加载失败（或已被接管）：只释放自己这个播放器，不误伤后继流水线
-                runCatching { mp.release() }
-                if (player === mp) player = null
-                return@withContext false
-            }
+            val active = mp
+            if (!started || active == null) return@withContext false
+
             try {
+                var lastPos = -1
+                var stuckMs = 0L
                 while (true) {
                     if (gen != generation) break
-                    val playing = runCatching { mp.isPlaying }.getOrDefault(false)
-                    if (!playing) break
-                    kotlinx.coroutines.delay(150)
+                    val pos = runCatching { active.currentPosition }.getOrDefault(-1)
+                    val dur = runCatching { active.duration }.getOrDefault(-1)
+                    if (pos < 0) break // 播放器已出错
+                    if (dur > 0 && pos >= dur - 30) break // 播到头
+                    if (pos == lastPos) {
+                        stuckMs += 150
+                        if (stuckMs >= 1_500) break // 播放头真的不动了才算卡死
+                    } else {
+                        lastPos = pos
+                        stuckMs = 0
+                    }
+                    delay(150)
                 }
             } finally {
-                runCatching { if (mp.isPlaying) mp.stop() }
-                runCatching { mp.release() }
-                if (player === mp) player = null
+                runCatching { if (active.isPlaying) active.stop() }
+                runCatching { active.release() }
+                if (player === active) player = null
             }
             gen == generation
         }

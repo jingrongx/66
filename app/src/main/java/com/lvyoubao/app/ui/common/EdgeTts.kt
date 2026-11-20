@@ -125,9 +125,13 @@ object EdgeTts {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    noteFailure(t, response, "整段合成")
                     out.delete()
-                    if (cont.isActive) cont.resume(null)
+                    // turn.end 之后我们主动 close()，OkHttp 可能再回调一次 onFailure（关闭噪声）。
+                    // 那种情况已经 settle 过，再记账只会把 lastFailure 刷成假的"SSL 断开"，
+                    // 让界面和日志把一次成功合成报成失败。
+                    if (!cont.isActive) return
+                    noteFailure(t, response, "整段合成")
+                    cont.resume(null)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {

@@ -28,6 +28,7 @@ import com.lvyoubao.app.ui.common.EdgeTts
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -73,6 +74,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
         /** 同一时刻只有一个人可能说「小源小源」：这个窗口内按 SNR 挑更近的那段 */
         const val WAKE_PICK_WINDOW_MS = 1_500L
+
+        /** 首句最少几个字就允许在逗号处切：够成一口气，又不至于让人干等 */
+        const val FIRST_SENTENCE_CHARS = 8
+
+        /** 首句说到多少字还没标点就强制切走播报（后续句子仍用 34 字兜底） */
+        const val FIRST_TTS_CHARS = 18
     }
 
     private val repo = app.settingsRepository
@@ -1068,6 +1075,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         imageDataUrls: List<String>,
     ) {
         aiRequestJob?.cancel()
+        SparkChatStore.clearStalePlaceholders()
         // 先占一条 assistant 消息，后续流式/结果/出错都更新它
         appendMessage(SparkMessage("assistant", ""))
         val tEnter = SystemClock.elapsedRealtime()
@@ -1136,14 +1144,42 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             _isStreaming.value = true
             val tSend = SystemClock.elapsedRealtime()
 
+            // 首字迟迟不来时给个明确提示：界面一直转圈最像「死机」，
+            // 说清「还在等、是网络慢」比沉默好得多（今晚就是 45 秒干等才报超时）。
+            val slowHint = launch {
+                delay(6_000)
+                if (speechBuffer.isEmpty() && _isStreaming.value) {
+                    _statusHint.value = "还在等回应（网络有点慢）…"
+                }
+            }
+
             // 流式播报：拿到的字按句子切开，一句一句送合成、顺序播，不再等全文再开口。
             // 旧逻辑要等 onSuccess 才 TtsPlayer.speak(全文)，长回答要干等好几秒。
             ttsStreaming = true
+            // 首句单独一条通道：播放器拿到就直接「边收边播」（首帧 ≈ 0.5 秒出声），
+            // 不走「整句合成到文件再播」——那一步每句要白等 1.5~3 秒，正是首句慢的主因。
+            val firstPiece = CompletableDeferred<String?>()
             val speechChannel = Channel<String>(Channel.UNLIMITED)
             val audioChannel = Channel<java.io.File>(Channel.UNLIMITED)
             val ttsDir = java.io.File(context.cacheDir, "tts_stream").apply { runCatching { mkdirs() } }
             var spokeAny = false
             val playGen = TtsPlayer.startStreamSession()
+
+            // 第一句进首句通道（流式秒播），其余进合成队列（等到播的时候文件已躺好）
+            fun emit(piece: String) {
+                if (piece.isBlank()) return
+                if (!firstPiece.complete(piece)) speechChannel.trySend(piece)
+            }
+
+            fun markFirstPlay() {
+                if (spokeAny) return
+                spokeAny = true
+                val hitAt = wakeHitAt
+                if (hitAt > 0) {
+                    LogStore.log("ai", "首句起播：距唤醒 ${SystemClock.elapsedRealtime() - hitAt}ms")
+                    wakeHitAt = 0L
+                }
+            }
 
             // 合成器：句子一到就合成，不等播放。
             // 合成约 1.5 秒/句，播放要 4~6 秒/句，队列会稳定领先——
@@ -1160,21 +1196,30 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 }
             }
 
-            // 播放器：严格按顺序播，一句播完立刻接下一句（文件早就在磁盘上躺好了）
+            // 播放器：首句边收边播，之后严格按顺序播预取好的文件
             val speaker = launch {
                 try {
-                    for (f in audioChannel) {
-                        if (!spokeAny) {
-                            spokeAny = true
-                            val hitAt = wakeHitAt
-                            if (hitAt > 0) {
-                                LogStore.log("ai", "首句起播：距唤醒 ${SystemClock.elapsedRealtime() - hitAt}ms")
-                                wakeHitAt = 0L
+                    val first = firstPiece.await()
+                    if (!first.isNullOrBlank() && TtsPlayer.isActive(playGen)) {
+                        markFirstPlay()
+                        val streamed = TtsPlayer.playStreamedPiece(first, playGen)
+                        if (!streamed && TtsPlayer.isActive(playGen)) {
+                            // 流式一帧都没出（连不上/协议失败）：这一句退回文件链，别把首句丢了
+                            val f = TtsPlayer.synthesizeOnly(first, ttsDir)
+                            if (f != null) {
+                                TtsPlayer.playPrepared(f, playGen)
+                                runCatching { f.delete() }
                             }
                         }
+                    }
+                    for (f in audioChannel) {
+                        if (!TtsPlayer.isActive(playGen)) break
+                        markFirstPlay()
                         val ok = TtsPlayer.playPrepared(f, playGen)
                         runCatching { f.delete() }
-                        if (!ok) break
+                        // 只有被新播报接管才收工。单句起播失败不该连坐后面的话——
+                        // 老实现是 `if (!ok) break`，一次 start 抖动就把剩下半篇全吞了。
+                        if (!ok && !TtsPlayer.isActive(playGen)) break
                     }
                 } catch (_: CancellationException) {
                     TtsPlayer.stop()
@@ -1189,6 +1234,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 searchEnabled = false,
                 onAnswer = { chunk ->
                     if (speechBuffer.isEmpty() && chunk.isNotBlank()) {
+                        slowHint.cancel()
                         LogStore.log(
                             "ai",
                             "首字 ${SystemClock.elapsedRealtime() - tSend}ms" +
@@ -1206,18 +1252,21 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     while (cut >= 0) {
                         val piece = speechBuffer.substring(spokenUpTo, cut + 1).trim()
                         spokenUpTo = cut + 1
-                        if (piece.isNotEmpty()) speechChannel.trySend(piece)
+                        emit(piece)
                         cut = findSentenceEnd(speechBuffer, spokenUpTo)
                     }
-                    // 长句兜底：一口气 34 字还没标点，先播出去，别让人干等
-                    if (speechBuffer.length - spokenUpTo >= 34) {
+                    // 长句兜底：一口气说到上限还没标点，先播出去，别让人干等。
+                    // 首句门槛小得多——第一句出来的早晚，直接决定「回应快不快」的听感。
+                    val cutThreshold = if (!firstPiece.isCompleted) FIRST_TTS_CHARS else 34
+                    if (speechBuffer.length - spokenUpTo >= cutThreshold) {
                         val piece = speechBuffer.substring(spokenUpTo).trim()
                         spokenUpTo = speechBuffer.length
-                        if (piece.isNotEmpty()) speechChannel.trySend(piece)
+                        emit(piece)
                     }
                 },
             ).fold(
                 onSuccess = { reply ->
+                    slowHint.cancel()
                     val finalAnswer = reply.answer.trim()
                     SparkChatStore.updateLastAssistant(finalAnswer)
                     _isStreaming.value = false
@@ -1227,7 +1276,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
                     // 收尾：最后一段没标点的余量也播掉，然后等队列放完
                     val tail = speechBuffer.substring(spokenUpTo).trim()
-                    if (tail.isNotEmpty()) speechChannel.trySend(tail)
+                    if (tail.isNotEmpty()) emit(tail)
+                    // 全文没有可播内容（纯符号/极短）时也要放行首句通道，否则播放器永远等在 await 上
+                    if (!firstPiece.isCompleted) firstPiece.complete(null)
                     speechChannel.close()
                     synthesizer.join()
                     speaker.join()
@@ -1239,6 +1290,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     if (_eyeState.value == SparkEyeState.SPEAKING) finishSpeaking()
                 },
                 onFailure = { err ->
+                    slowHint.cancel()
+                    if (!firstPiece.isCompleted) firstPiece.complete(null)
                     speechChannel.close()
                     TtsPlayer.stop()
                     ttsStreaming = false
@@ -1258,12 +1311,18 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     /** 从 [from] 起找第一个句末标点（至少 5 个字才算一句，避免「好。」这种碎句） */
     private val sentenceEnds = "。！？!?；;…"
 
-    /** 从 [from] 起找第一个句末标点（至少 5 个字才算一句，避免「好。」这种碎句）；换行也算 */
+    /** 从 [from] 起找第一个可切分点（至少 5 个字才算一句，避免「好。」这种碎句）；换行也算 */
     private fun findSentenceEnd(text: CharSequence, from: Int): Int {
         if (text.length <= from + 4) return -1
+        // 首句额外允许在逗号/顿号处切：AI 的第一句常是「低糖电饭煲啊，它是靠……这类结构」，
+        // 一路等到句号才送合成要多等 1~2 秒；8 个字的话头已经够合成一段自然的起句，
+        // 听感上「马上出声」比「等一整句完整的话」重要得多。
+        val pauseMin = if (from == 0) FIRST_SENTENCE_CHARS else 40
         for (i in (from + 4) until text.length) {
             val c = text[i]
             if (sentenceEnds.indexOf(c) >= 0 || c.code == 10) return i
+            val isPause = c == '，' || c == ',' || c == '、' || c == '：' || c == ':'
+            if (isPause && i - from + 1 >= pauseMin) return i
         }
         return -1
     }
