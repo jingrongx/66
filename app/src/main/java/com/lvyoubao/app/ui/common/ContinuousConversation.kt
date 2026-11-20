@@ -42,7 +42,12 @@ class ContinuousConversation(
         fun onSpeechStart() {}
 
         /** 一段完整语音（WAV 16k 单声道，调用方负责上传 ASR 并删除文件） */
-        fun onUtterance(wav: File)
+        /**
+         * 一段话录完。snrDb = 本段峰值 - 开口前环境底噪：
+         * 单麦没有波束成形，这是「说话人离得多近/多响」最靠谱的代理——
+         * 近讲 25~40dB，隔一个房间或电视串音通常 < 12dB。
+         */
+        fun onUtterance(wav: File, snrDb: Float)
 
         /** 播报中被真人开口打断（调用方应立刻停 TTS/取消在途回答） */
         fun onBargeIn()
@@ -75,6 +80,9 @@ class ContinuousConversation(
 
     companion object {
         private const val SAMPLE_RATE = 16_000
+
+        // 100Hz 一阶高通系数：R/(R+dt)，R=1/(2π·100)，dt=1/16000
+        private const val HP_ALPHA = 0.9622f
         private const val FRAME_SAMPLES = 1_280          // 80ms @ 16kHz
         private const val FRAME_MS = 80L
         private const val PREROLL_FRAMES = 4             // 320ms 前滚，保首字
@@ -127,6 +135,11 @@ class ContinuousConversation(
     private var inSpeech = false
     private var speechStartAt = 0L
     private var speechPeakDb = -120f
+    private var segmentNoiseDb = -60f
+
+    // 100Hz 一阶高通的状态（去空调/桌面震动/手持低频轰鸣）
+    private var hpPrevIn = 0f
+    private var hpPrevOut = 0f
     private var lastVoiceAt = 0L
     private var readErrors = 0
     private val preroll = ArrayDeque<ShortArray>(PREROLL_FRAMES)
@@ -221,8 +234,19 @@ class ContinuousConversation(
             return "已取消启动"
         }
         // 系统 AEC/NS：压掉自己喇叭的回声与稳态噪声，打断体验的底线（拿不到就靠动态阈值兜底）
+        // 系统 AEC/NS：以前只 create 没 setEnabled，效果器一直是关的（等于白建）。
+        // 现在真正打开并回读状态——这台 BSP 支不支持，日志里一眼能看到。
         echoCanceler = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId) else null
         noiseSuppressor = if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId) else null
+        // 回声消除只在「允许打断」的会话里开：单麦设备的 AEC 没有干净的参考信号，
+        // 常把近讲人声也当回声压掉；待机唤醒用不到打断，宁可不冒这个险。
+        if (config.bargeInSensitivity > 0) runCatching { echoCanceler?.enabled = true }
+        runCatching { noiseSuppressor?.enabled = true }
+        LogStore.log(
+            "conv",
+            "系统音效：降噪 ${if (noiseSuppressor?.enabled == true) "开" else "不可用"}，" +
+                "回声消除 ${if (echoCanceler?.enabled == true) "开" else "不可用"}",
+        )
         noiseFloorDb = -60f
         voiceRun = 0
         inSpeech = false
@@ -319,8 +343,23 @@ class ContinuousConversation(
         return out
     }
 
+    /**
+     * 100Hz 一阶高通：低音炮/空调/桌面共振占了噪声能量的一大半，却一点人声信息都没有。
+     * 滤掉之后底噪能降几 dB，VAD 的相对判据才有东西可比。
+     */
+    private fun highPass(buf: ShortArray, n: Int) {
+        for (i in 0 until n) {
+            val x = buf[i].toFloat()
+            val y = HP_ALPHA * (hpPrevOut + x - hpPrevIn)
+            hpPrevIn = x
+            hpPrevOut = y
+            buf[i] = y.coerceIn(-32768f, 32767f).toInt().toShort()
+        }
+    }
+
     private fun processFrame(buf: ShortArray, n: Int) {
         val now = SystemClock.elapsedRealtime()
+        highPass(buf, n)
         val frame = buf.copyOf(n)
         val db = (20.0 * log10(rmsOf(frame) / 32768.0 + 1e-6)).toFloat()
 
@@ -389,6 +428,7 @@ class ContinuousConversation(
         runCatching { listener.onSpeechStart() } // 音频线程直接回调，调用方只做轻量状态更新
         speechStartAt = now
         speechPeakDb = -120f
+        segmentNoiseDb = noiseFloorDb
         segment = ByteArrayOutputStream()
         segmentSamples = 0
         preroll.forEach { appendSegmentInternal(it) } // 前滚带上首字
@@ -425,9 +465,10 @@ class ContinuousConversation(
         if (speechMs < config.minSpeechMs) return // 太短当噪声丢弃
         val wav = pcmToWav(data)
         val file = File(context.cacheDir, "conv_${System.currentTimeMillis()}.wav")
+        val snrDb = speechPeakDb - segmentNoiseDb
         runCatching {
             FileOutputStream(file).use { it.write(wav) }
-            listener.onUtterance(file)
+            listener.onUtterance(file, snrDb)
         }.onFailure {
             listener.onError("录音保存失败，请重试")
         }

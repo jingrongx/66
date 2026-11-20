@@ -69,6 +69,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private companion object {
         // 回答播报完毕后静默 N 秒自动回到萌眼待机
         const val EYES_RETURN_AFTER_MS = 4_000L
+
+        /** 同一时刻只有一个人可能说「小源小源」：这个窗口内按 SNR 挑更近的那段 */
+        const val WAKE_PICK_WINDOW_MS = 1_500L
     }
 
     private val repo = app.settingsRepository
@@ -138,6 +141,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var duplexAudioActive = false
     // 通话中本机确认话术的去处：非空时 speakHint 不自己朗读，改由豆包音色说出来
     private var duplexReplySink: ((String) -> Unit)? = null
+    private var pendingWakeSnr = 0f
+    private var pendingWakeAt = 0L
+
     private var lastConvUploadAt = 0L
     private var wakeUploadCount = 0
     private var wakeWindowStart = 0L
@@ -1361,8 +1367,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         }
                     }
 
-                    override fun onUtterance(wav: java.io.File) {
-                        handleWakeUtterance(wav)
+                    override fun onUtterance(wav: java.io.File, snrDb: Float) {
+                        handleWakeUtterance(wav, snrDb)
                     }
 
                     override fun onBargeIn() {}
@@ -1393,11 +1399,26 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
-     * 待机语音入口：只保留最新的一段，串行转写（见 [drainWakeQueue]）。
+     * 待机语音入口：短窗口内**取信噪比最高的那段**（= 最近、最响的那个人）。
+     * 以前是「谁最后来就用谁」——电视/旁人说话隔三差五冒一段，反倒把用户这句顶掉；
+     * 单麦没有波束成形，SNR 是「近讲」最靠谱的代理：近讲 25~40dB，串音通常不到 12dB。
      */
-    private fun handleWakeUtterance(wav: java.io.File) {
-        pendingWakeWav?.delete()
+    private fun handleWakeUtterance(wav: java.io.File, snrDb: Float) {
+        val now = SystemClock.elapsedRealtime()
+        val held = pendingWakeWav
+        if (held != null && now - pendingWakeAt < WAKE_PICK_WINDOW_MS && pendingWakeSnr >= snrDb) {
+            // 手上这段更响（更近）：新来的当背景音丢掉
+            wav.delete()
+            LogStore.log(
+                "wake",
+                "丢弃较弱的一段：信噪比 ${"%.0f".format(snrDb)}dB < 已持有 ${"%.0f".format(pendingWakeSnr)}dB",
+            )
+            return
+        }
+        held?.delete()
         pendingWakeWav = wav
+        pendingWakeSnr = snrDb
+        pendingWakeAt = now
         if (wakeDrainJob?.isActive == true) return
         wakeDrainJob = viewModelScope.launch { drainWakeQueue() }
     }
@@ -1411,8 +1432,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private suspend fun drainWakeQueue() {
         while (true) {
             val wav = pendingWakeWav ?: break
+            val snr = pendingWakeSnr
             pendingWakeWav = null
-            val hit = runCatching { processWakeWav(wav) }
+            val hit = runCatching { processWakeWav(wav, snr) }
                 .onFailure { wav.delete() }
                 .getOrDefault(false)
             // 没命中（多半是环境噪音）：眼睛从「在听」退回待机，别在嘈杂屋子里一直亮着
@@ -1426,7 +1448,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /** 处理一段待机语音：噪声闸门 → 云转写 → 唤醒词判定 → 进问答 */
-    private suspend fun processWakeWav(wav: java.io.File): Boolean {
+    private suspend fun processWakeWav(wav: java.io.File, segSnrDb: Float): Boolean {
         val arrivedAt = SystemClock.elapsedRealtime()
         val cur = repo.settings.firstOrNull() ?: settings.value
         val wavBytes = wav.length()
@@ -1462,7 +1484,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         LogStore.log(
             "wake",
             "待机语音：录音 ${wavBytes / 32}ms 峰值 ${peakDb.toInt()}dBFS 环境底噪 " +
-                "${wakeSession?.debugNoiseFloorDb()?.toInt() ?: "?"}dBFS，转写 ${asrDoneAt - arrivedAt}ms" +
+                "${wakeSession?.debugNoiseFloorDb()?.toInt() ?: "?"}dBFS 信噪比 ${"%.0f".format(segSnrDb)}dB，" +
+                "转写 ${asrDoneAt - arrivedAt}ms" +
                 "（开口→识别完 ${e2e}），文本「${text.ifBlank { "（空）" }}」",
         )
         // 铃响时待机任何语音都先停铃（开口就是想让它安静）：小源小源/小源小源退出/关闭闹钟/别响了都算
@@ -1614,8 +1637,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 peakDropDb = 16f,
             ),
             listener = object : ContinuousConversation.Listener {
-                override fun onUtterance(wav: java.io.File) {
+                override fun onUtterance(wav: java.io.File, snrDb: Float) {
                     // 单次：拿到第一段就停录音，处理完回待机
+                    LogStore.log("wake", "单次聆听收段：信噪比 ${"%.0f".format(snrDb)}dB（近讲越大越可信）")
                     wakeOnceSession?.stop()
                     wakeOnceSession = null
                     handleWakeOnce(wav)
