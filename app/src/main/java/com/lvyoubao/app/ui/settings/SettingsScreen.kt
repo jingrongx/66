@@ -23,10 +23,12 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
@@ -53,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.SpanStyle
@@ -62,6 +65,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -703,28 +708,77 @@ fun SettingsScreen(
         // ==================== 弹窗 ====================
 
         if (showSyncQr) {
-            AlertDialog(
+            // 车机 / 机器人这类小屏（308×240）用 AlertDialog 会把二维码切掉下半截。
+            // Dialog 窗口本身没有高度约束，这里直接用屏幕尺寸（Configuration）算码的边长，
+            // 小屏走紧凑布局（标题行带「完成」+ 二维码吃满剩余高度）。
+            val cfg = LocalConfiguration.current
+            val compact = cfg.screenHeightDp < 360
+            val qrSize = if (compact) {
+                minOf(cfg.screenHeightDp.dp - 118.dp, cfg.screenWidthDp.dp - 40.dp).coerceAtLeast(88.dp)
+            } else {
+                minOf(260.dp, cfg.screenHeightDp.dp - 240.dp, cfg.screenWidthDp.dp - 64.dp).coerceAtLeast(160.dp)
+            }
+            Dialog(
                 onDismissRequest = { showSyncQr = false; vm.stopSyncServer() },
-                title = { Text("等待手机扫码") },
-                text = {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                        state.syncQrContent?.let { content -> QrCodeImage(content) }
-                        Spacer(Modifier.height(12.dp))
-                        if (state.syncReceived) {
-                            Text("已收到手机推送的配置并自动保存 ✓", color = p.accent, fontWeight = FontWeight.Bold)
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(10.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .widthIn(max = 420.dp)
+                            .heightIn(max = cfg.screenHeightDp.dp - 20.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(p.card)
+                            .padding(horizontal = 12.dp, vertical = if (compact) 6.dp else 14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        if (compact) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (state.syncReceived) "已收到配置 ✓" else "等待手机扫码",
+                                    color = if (state.syncReceived) p.accent else p.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    "完成",
+                                    color = p.accent,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { showSyncQr = false; vm.stopSyncServer() }
+                                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                                )
+                            }
+                            Spacer(Modifier.height(4.dp))
                         } else {
-                            Text(
-                                "用手机上安装的本应用，点「扫码推送」扫此码。手机里已填好的配置会直接传到本机并自动保存。",
-                                color = p.dim,
-                                fontSize = 12.sp,
-                            )
+                            Text("等待手机扫码", color = p.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(10.dp))
+                        }
+
+                        state.syncQrContent?.let { content -> QrCodeImage(content, size = qrSize) }
+
+                        if (!compact) {
+                            Spacer(Modifier.height(10.dp))
+                            if (state.syncReceived) {
+                                Text("已收到手机推送的配置并自动保存 ✓", color = p.accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            } else {
+                                Text(
+                                    "用手机上安装的本应用，点「扫码推送」扫此码。手机里已填好的配置会直接传到本机并自动保存。",
+                                    color = p.dim,
+                                    fontSize = 12.sp,
+                                )
+                            }
+                            TextButton(onClick = { showSyncQr = false; vm.stopSyncServer() }) { Text("完成") }
                         }
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = { showSyncQr = false; vm.stopSyncServer() }) { Text("完成") }
-                },
-            )
+                }
+            }
         }
 
         if (showScanner) {
