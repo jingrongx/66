@@ -21,6 +21,8 @@ object SparkChatStore {
     private var lastTurnAt: Long = 0L
     private var lastAnswerText: String = ""
     private var lastAnswerAt: Long = 0L
+    private var lastCommittedAsr: String = ""
+    private var lastCommittedAt: Long = 0L
 
     fun append(msg: SparkMessage) {
         messages.value = (messages.value + msg).takeLast(40) // 上限防照片占内存
@@ -64,7 +66,38 @@ object SparkChatStore {
                 appendHistory(OutMessage(role = "user", text = asr))
             }
         }
-        if (answer.isNotBlank()) appendAnswer(answer, now)
+        if (answer.isNotBlank()) {
+            // 同一次说话又下发了另一条回答（模型先垫一句再接正文、或回答被拆成两段）：
+            // 合成同一张卡，绝不并排出现两张。
+            val sameUtterance = asr.isNotBlank() &&
+                lastCommittedAsr.isNotEmpty() &&
+                lastCommittedAsr == norm(asr) &&
+                now - lastCommittedAt < 20_000L
+            if (sameUtterance) {
+                val merged = mergeText(lastAnswerText, answer)
+                lastAnswerText = merged
+                lastAnswerAt = now
+                replaceLastAssistant(merged)
+            } else {
+                appendAnswer(answer, now)
+            }
+            if (asr.isNotBlank()) {
+                lastCommittedAsr = norm(asr)
+                lastCommittedAt = now
+            }
+        }
+    }
+
+    /** 两段回答合成一张卡：后者是前者的延续就取后者，否则换行接上 */
+    private fun mergeText(prev: String, next: String): String {
+        val p = norm(prev)
+        val n = norm(next)
+        return when {
+            p.isEmpty() -> next
+            n.startsWith(p) -> next
+            p.startsWith(n) -> prev
+            else -> prev.trimEnd() + "\n" + next.trimStart()
+        }
     }
 
     private fun appendAnswer(answer: String, now: Long) {
