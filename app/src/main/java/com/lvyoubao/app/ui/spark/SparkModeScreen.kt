@@ -249,7 +249,9 @@ fun SparkModeScreen(
             val silentMs = System.currentTimeMillis() - lastVoiceAt
             val listening = duplexState == DoubaoDuplexClient.State.LISTENING ||
                 duplexState == DoubaoDuplexClient.State.CONNECTED
-            if (callUiVisible && listening && silentMs > 6_000) {
+            // 刚接通还没说过话给 10 秒（有充足时间开口），一轮回答之后按 6 秒收
+            val waitMs = if (duplexAsr.isBlank() && duplexAnswer.isBlank()) 10_000L else 6_000L
+            if (callUiVisible && listening && silentMs > waitMs) {
                 callUiVisible = false
                 vm.setShowEyes(true)
             }
