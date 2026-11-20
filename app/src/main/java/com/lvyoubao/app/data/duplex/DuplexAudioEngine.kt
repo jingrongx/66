@@ -1,10 +1,13 @@
 package com.lvyoubao.app.data.duplex
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +27,7 @@ import kotlin.math.abs
  * 这里必须持续流式收发，不能等一整段说完再说，所以单独实现。
  */
 internal class DuplexAudioEngine(
+    private val context: Context,
     private val scope: CoroutineScope,
     private val onPcmFrame: (ByteArray) -> Unit,
     private val onLevel: (Float) -> Unit = {},
@@ -34,6 +38,15 @@ internal class DuplexAudioEngine(
         private const val PLAYBACK_RATE = 24000
     }
 
+    private val audioManager = context.getSystemService(AudioManager::class.java)
+    private var prevAudioMode: Int? = null
+    // 采集源：默认 VOICE_COMMUNICATION（带回波消除）；若发现持续满量程削顶，
+    // 自动退到 MIC —— 部分车机/机器人 BSP 的 voip 通道增益被打满，采出来全是方波
+    @Volatile private var source = MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    private var saturatedSeconds = 0
+    private var triedMicFallback = false
+    private var needMicFallback = false
+    private var aec: AcousticEchoCanceler? = null
     private var recorder: AudioRecord? = null
     private var player: AudioTrack? = null
     private var captureJob: Job? = null
@@ -44,6 +57,11 @@ internal class DuplexAudioEngine(
     /** 开始采集。调用前需已拿到 RECORD_AUDIO 权限。 */
     fun startCapture(): Boolean {
         if (capturing) return true
+        // voip 通道要靠 AudioManager 的通信模式才会启用 AEC/AGC，否则增益可能失控
+        if (prevAudioMode == null) {
+            prevAudioMode = audioManager?.mode
+            runCatching { audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION }
+        }
         val minBuf = AudioRecord.getMinBufferSize(
             CAPTURE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
@@ -55,7 +73,7 @@ internal class DuplexAudioEngine(
         }
         val rec = try {
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION, // 回波消除，全双工必备
+                source, // 默认 VOICE_COMMUNICATION（回波消除，全双工必备）
                 CAPTURE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -71,6 +89,11 @@ internal class DuplexAudioEngine(
             return false
         }
         recorder = rec
+        // 显式打开 AEC（VOICE_COMMUNICATION 一般自带，切到 MIC 后必须自己开，否则会把自己的声音当成用户说话）
+        if (AcousticEchoCanceler.isAvailable()) {
+            aec = runCatching { AcousticEchoCanceler.create(rec.audioSessionId) }.getOrNull()
+            runCatching { aec?.enabled = true }
+        }
         capturing = true
         try {
             rec.startRecording()
@@ -108,13 +131,31 @@ internal class DuplexAudioEngine(
                     if (peak > secPeak) secPeak = peak
                     frames++
                     if (frames % 50 == 0) {
-                        Log.i(TAG, "上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)})")
+                        Log.i(TAG, "上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)}) source=$source")
+                        // 连续 3 秒贴满量程 = 采集饱和（波形已被削平，识别只会出幻觉文字）
+                        if (secPeak >= 32000) saturatedSeconds++ else saturatedSeconds = 0
+                        if (!triedMicFallback && saturatedSeconds >= 3) {
+                            triedMicFallback = true
+                            needMicFallback = true
+                            Log.w(TAG, "上行持续削顶，切换到 MIC 采集源重试")
+                            capturing = false
+                        }
                         secPeak = 0
                     }
                     onPcmFrame(frame.copyOf())
                 }
             }
             Log.d(TAG, "采集循环结束")
+            if (needMicFallback) {
+                needMicFallback = false
+                runCatching { recorder?.stop() }
+                recorder?.release()
+                recorder = null
+                runCatching { aec?.release() }
+                aec = null
+                source = MediaRecorder.AudioSource.MIC
+                startCapture()
+            }
         }
         return true
     }
@@ -203,6 +244,8 @@ internal class DuplexAudioEngine(
         } catch (e: IllegalStateException) {
             Log.w(TAG, "recorder.stop 异常", e)
         }
+        runCatching { aec?.release() }
+        aec = null
         recorder?.release()
         recorder = null
         synchronized(playLock) {
@@ -214,6 +257,11 @@ internal class DuplexAudioEngine(
             }
             player?.release()
             player = null
+        }
+        // 还原系统音频模式，别把整机留在通信模式（会影响媒体音量/铃声路由）
+        prevAudioMode?.let { mode ->
+            runCatching { audioManager?.mode = mode }
+            prevAudioMode = null
         }
         Log.d(TAG, "音频引擎已停止")
     }

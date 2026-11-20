@@ -198,6 +198,7 @@ class DoubaoDuplexClient(private val context: Context) {
 
     private fun startAudio(ws: WebSocket) {
         val engine = DuplexAudioEngine(
+            context = context,
             scope = scope,
             onPcmFrame = { pcm ->
                 if (ws.send(DuplexProtocol.audioAppend(Base64.encodeToString(pcm, Base64.NO_WRAP)))) {
