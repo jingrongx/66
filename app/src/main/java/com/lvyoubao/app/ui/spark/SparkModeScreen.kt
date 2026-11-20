@@ -275,6 +275,14 @@ fun SparkModeScreen(
         lastVoiceAt = System.currentTimeMillis() // 手动展开后重新起算静默，别刚展开就被收走
         vm.setShowEyes(false)
     }
+    // 通话中（界面已收起）电话键单独一个状态：底色深一档 + 右上角呼吸点，
+    // 不用在右边「按住说话」上写字，一眼就知道通话还没断
+    val callPulse by rememberInfiniteTransition(label = "callPulse").animateFloat(
+        initialValue = 0.22f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "callPulseAlpha",
+    )
 
     // 长按会话消息弹出的操作面板（收藏/分享）
     var actionMsg by remember { mutableStateOf<SparkMessage?>(null) }
@@ -700,7 +708,7 @@ fun SparkModeScreen(
                                 .padding((4 * scale).dp)
                                 .width((78 * scale).dp)
                                 .clip(RoundedCornerShape(percent = 50))
-                                .background(Color(0xFF00E5FF))
+                                .background(if (showDuplexCall) Color(0xFF00C2D6) else Color(0xFF00E5FF))
                                 .clickable(onClick = enterCall)
                                 .fillMaxHeight(),
                             contentAlignment = Alignment.Center,
@@ -711,6 +719,17 @@ fun SparkModeScreen(
                                 tint = Color(0xFF06222B),
                                 modifier = Modifier.size((21 * scale).dp),
                             )
+                            if (showDuplexCall) {
+                                // 通话中但界面收起：右上角呼吸白点（点了就回通话界面）
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(top = (5 * scale).dp, end = (11 * scale).dp)
+                                        .size((7 * scale).dp)
+                                        .clip(CircleShape)
+                                        .background(Color.White.copy(alpha = callPulse)),
+                                )
+                            }
                         }
                         // 嘴：按住临时说一句
                         Box(
@@ -722,7 +741,6 @@ fun SparkModeScreen(
                         ) {
                             Text(
                                 text = when {
-                                    showDuplexCall -> "📞 通话中，点一下继续"
                                     isRecording -> "松手发送 (${recordTick}s)"
                                     isContinuous -> "说吧，我在听"
                                     else -> "🎙 按住说话"
@@ -769,7 +787,7 @@ fun SparkModeScreen(
                                 .padding((3 * scale).dp)
                                 .width((52 * scale).dp)
                                 .clip(RoundedCornerShape(percent = 50))
-                                .background(Color(0xFF00E5FF))
+                                .background(if (showDuplexCall) Color(0xFF00C2D6) else Color(0xFF00E5FF))
                                 .clickable(onClick = enterCall)
                                 .fillMaxHeight(),
                             contentAlignment = Alignment.Center,
@@ -780,6 +798,16 @@ fun SparkModeScreen(
                                 tint = Color(0xFF06222B),
                                 modifier = Modifier.size((18 * scale).dp),
                             )
+                            if (showDuplexCall) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(top = (4 * scale).dp, end = (8 * scale).dp)
+                                        .size((6 * scale).dp)
+                                        .clip(CircleShape)
+                                        .background(Color.White.copy(alpha = callPulse)),
+                                )
+                            }
                         }
                         Box(
                             modifier = Modifier
@@ -790,7 +818,6 @@ fun SparkModeScreen(
                         ) {
                             Text(
                                 text = when {
-                                    showDuplexCall -> "📞 通话中，点一下继续"
                                     isRecording -> "松手发送 (${recordTick}s)"
                                     isContinuous -> "说吧，我在听"
                                     else -> "🎙 按住说话"
