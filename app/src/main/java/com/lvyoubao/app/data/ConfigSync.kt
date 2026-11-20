@@ -56,6 +56,8 @@ data class SyncableConfig(
     val callAsrModel: String = "",
     val callLlmModel: String = "",
     val callTtsModel: String = "",
+    val robotEnabled: Boolean? = null, // 机器人控制：语音指挥开关
+    val robotHost: String = "",        // 机器人中枢地址（局域网 IP / 127.0.0.1）
 )
 
 object ConfigSyncCodec {
@@ -104,6 +106,8 @@ object ConfigSyncCodec {
         callAsrModel = s.callAsrModel,
         callLlmModel = s.callLlmModel,
         callTtsModel = s.callTtsModel,
+        robotEnabled = s.robotEnabled,
+        robotHost = s.robotHost,
     )
 
     /** 把配置合并回 AiSettings（只覆盖载荷里非空的字段） */
@@ -152,6 +156,8 @@ object ConfigSyncCodec {
         callAsrModel = c.callAsrModel,
         callLlmModel = c.callLlmModel,
         callTtsModel = c.callTtsModel,
+        robotEnabled = c.robotEnabled ?: s.robotEnabled,
+        robotHost = c.robotHost.ifEmpty { s.robotHost },
     )
 
     fun encodeJson(c: SyncableConfig): String = json.encodeToString(c)

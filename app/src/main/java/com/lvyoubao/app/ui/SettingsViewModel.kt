@@ -159,6 +159,80 @@ class SettingsViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /**
+     * 凭证中心「测试当前服务商连接」：测的是当前 tab 这一家的地址与 Key，
+     * 不改主服务商、不动草稿——切到别家点测试也不会把主链路换掉。
+     */
+    fun testCredential(presetId: String, baseUrl: String, apiKey: String, model: String = "") {
+        if (_ui.value.testing) return
+        viewModelScope.launch {
+            _ui.update { it.copy(testing = true, testResult = null, testFailed = false, fetchedModels = emptyList()) }
+            if (baseUrl.isBlank()) {
+                _ui.update { it.copy(testing = false, testFailed = true, testResult = "还没填接口地址（Base URL）") }
+                return@launch
+            }
+            if (apiKey.isBlank()) {
+                _ui.update { it.copy(testing = false, testFailed = true, testResult = "还没填 API Key") }
+                return@launch
+            }
+            val probe = AiSettings(
+                presetId = presetId,
+                baseUrl = baseUrl.trimEnd('/'),
+                apiKey = apiKey,
+                model = model,
+            )
+            val result = AiClient(probe).listModels()
+            _ui.update { state ->
+                result.fold(
+                    onSuccess = { models ->
+                        state.copy(
+                            testing = false,
+                            fetchedModels = models,
+                            testResult = if (models.isEmpty()) "连接成功，但服务端没有返回模型列表"
+                            else "连接成功，可用模型：${models.joinToString("、")}",
+                        )
+                    },
+                    onFailure = { e ->
+                        state.copy(testing = false, testFailed = true, testResult = "连接失败：${e.message}")
+                    },
+                )
+            }
+        }
+    }
+
+    /** 高德 Key 体检：拿一条固定地址做地理编码，能回坐标即通 */
+    fun testAmapKey(key: String) {
+        if (_ui.value.testing) return
+        viewModelScope.launch {
+            _ui.update { it.copy(testing = true, testResult = null, testFailed = false) }
+            if (key.isBlank()) {
+                _ui.update { it.copy(testing = false, testFailed = true, testResult = "还没填高德 Web 服务 Key") }
+                return@launch
+            }
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val url = "https://restapi.amap.com/v3/geocode/geo?address=" +
+                        java.net.URLEncoder.encode("杭州市西湖区文三路", "UTF-8") + "&key=$key"
+                    val request = Request.Builder().url(url).get().build()
+                    pushClient.newCall(request).execute().use { resp ->
+                        val body = resp.body?.string().orEmpty()
+                        if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                        val status = Regex("\"status\":\"(\\d)\"").find(body)?.groupValues?.get(1)
+                        val info = Regex("\"info\":\"([^\"]*)\"").find(body)?.groupValues?.get(1).orEmpty()
+                        if (status == "1") "高德 Key 可用 ✓ 已返回坐标" else "高德 Key 不可用：$info"
+                    }
+                }.getOrElse { "高德 Key 测试失败：${it.message}" }
+            }
+            _ui.update {
+                it.copy(
+                    testing = false,
+                    testFailed = !result.contains("可用"),
+                    testResult = result,
+                )
+            }
+        }
+    }
+
     fun testConnection() {
         if (_ui.value.testing) return
         viewModelScope.launch {

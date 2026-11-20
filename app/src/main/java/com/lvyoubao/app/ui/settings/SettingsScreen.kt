@@ -1,22 +1,22 @@
 package com.lvyoubao.app.ui.settings
 
 import android.Manifest
+import android.app.Activity
 import android.app.role.RoleManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -28,29 +28,20 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -60,13 +51,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -74,12 +70,8 @@ import com.lvyoubao.app.KeepAliveService
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.FullDiagnostics
 import com.lvyoubao.app.data.LogStore
-import com.lvyoubao.app.data.ProviderPresets
 import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.SavedAddress
-import com.lvyoubao.app.data.VoiceModelOptions
-import com.lvyoubao.app.data.presetById
-import com.lvyoubao.app.data.duplex.DuplexProtocol
 import com.lvyoubao.app.ui.SettingsViewModel
 import com.lvyoubao.app.ui.sync.QrCodeImage
 import com.lvyoubao.app.ui.sync.QrScanScreen
@@ -91,7 +83,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalLayoutApi::class)
+/**
+ * 设置页——严格按 .workbuddy/tmp/settings-design.html 的 10 个区块重排：
+ * ① 模式与系统 ② 扫码同步 ③ 8 家凭证中心 ④ 核心能力与模型调度（文本 + 语音两块并存）
+ * ⑤ 常用地址 ⑥ 桌面与后台 ⑦ 诊断与日志 ⑧ 机器人控制 ⑨ 数据管理与飞轮 ⑩ 关于
+ *
+ * 配色/间距/字号/控件形状逐项对齐设计稿；日间模式用同一套版式的浅色令牌。
+ * 设计稿顶部与底部的「保存全部」按钮按要求不做——改动即自动保存，标题旁只留轻量反馈。
+ */
 @Composable
 fun SettingsScreen(
     onClose: () -> Unit,
@@ -103,14 +102,18 @@ fun SettingsScreen(
     )
     val state by vm.ui.collectAsState()
     val context = LocalContext.current
-    var showKey by remember { mutableStateOf(false) }
-    var showAmap by remember { mutableStateOf(false) }
-    var showAsr by remember { mutableStateOf(false) }
-    var showDuplexKey by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
     var showSyncQr by remember { mutableStateOf(false) }
     var showScanner by remember { mutableStateOf(false) }
+    var showVoiceFix by remember { mutableStateOf(false) }
+    var themeDialog by remember { mutableStateOf(false) }
+    var styleDialog by remember { mutableStateOf(false) }
+    var prefsDialog by remember { mutableStateOf(false) }
+    var largeFontDialog by remember { mutableStateOf(false) }
+    var sparkFontDialog by remember { mutableStateOf(false) }
 
-    // 桌面与后台：常驻通知权限、默认桌面角色状态与请求
+    // 桌面与后台：默认桌面角色
     var isDefaultHome by remember { mutableStateOf(false) }
     val notiPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -122,22 +125,14 @@ fun SettingsScreen(
 
     BackHandler { onClose() }
 
-    var themeDialog by remember { mutableStateOf(false) }
-    var styleDialog by remember { mutableStateOf(false) }
-    var asrSendDialog by remember { mutableStateOf(false) }
-    var bargeInDialog by remember { mutableStateOf(false) }
-    var largeFontDialog by remember { mutableStateOf(false) }
-    var sparkFontDialog by remember { mutableStateOf(false) }
-    var showVoiceFix by remember { mutableStateOf(false) }
-    // 纠正记录条数：打开/关闭管理页时刷新（页内删除后回来数字要变）
+    // 纠正记录条数：打开/关闭管理页时刷新
     val fixCount = remember(showVoiceFix) {
         com.lvyoubao.app.data.HotwordCorrector.learnedFixList(app.applicationContext).size
     }
 
-    val scope = rememberCoroutineScope()
     var dataManageMsg by remember { mutableStateOf<String?>(null) }
-    val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) {
             scope.launch {
@@ -160,9 +155,7 @@ fun SettingsScreen(
                 val exportDir = File(context.filesDir, "exports").apply { mkdirs() }
                 val timeTag = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA).format(Date())
                 val exportFile = File(exportDir, "deepseek_data_$timeTag.zip")
-                withContext(Dispatchers.IO) {
-                    app.sessionStore.exportToZip(exportFile)
-                }
+                withContext(Dispatchers.IO) { app.sessionStore.exportToZip(exportFile) }
                 val uri = FileProvider.getUriForFile(
                     context, "${context.packageName}.fileprovider", exportFile,
                 )
@@ -176,1423 +169,805 @@ fun SettingsScreen(
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
                 dataManageMsg = "备份生成完成，请选择保存或分享途径"
-            }.onFailure {
-                dataManageMsg = "导出失败：${it.message}"
-            }
+            }.onFailure { dataManageMsg = "导出失败：${it.message}" }
         }
     }
 
     val versionLabel = remember {
         runCatching {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)
-            val code = if (android.os.Build.VERSION.SDK_INT >= 28) info.longVersionCode
+            val code = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode
             else @Suppress("DEPRECATION") info.versionCode.toLong()
             "v${info.versionName}($code)"
         }.getOrDefault("v?")
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onClose) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回")
-            }
-            Spacer(Modifier.width(4.dp))
-            Text("设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(12.dp))
-            // 自动保存反馈：改动后短暂显示「保存中…」→「✓ 已保存」，2 秒淡出；界面上无保存按钮
-            androidx.compose.animation.AnimatedVisibility(
-                visible = state.saveFeedback != SettingsViewModel.SaveFeedback.IDLE,
-            ) {
-                Text(
-                    text = when (state.saveFeedback) {
-                        SettingsViewModel.SaveFeedback.SAVING -> "保存中…"
-                        SettingsViewModel.SaveFeedback.SAVED -> "✓ 已保存"
-                        else -> ""
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (state.saveFeedback == SettingsViewModel.SaveFeedback.SAVED)
-                        MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    val dark = when (state.draft.themeMode) {
+        "light" -> false
+        "dark" -> true
+        else -> isSystemInDarkTheme()
+    }
+
+    ProvideSettingsPalette(dark) {
+        val p = LocalSettingsPalette.current
+
+        // 状态栏图标跟着设置页配色走：外观选深色时用浅色图标，选浅色时用深色图标，
+        // 否则「系统浅色 + 设置页深色」会出现深底深字看不见
+        val view = LocalView.current
+        DisposableEffect(dark) {
+            val activity = view.context.findActivity()
+            val window = activity?.window
+            val controller = window?.let { androidx.core.view.WindowCompat.getInsetsController(it, view) }
+            val prevStatus = controller?.isAppearanceLightStatusBars
+            val prevNav = controller?.isAppearanceLightNavigationBars
+            controller?.isAppearanceLightStatusBars = !dark
+            controller?.isAppearanceLightNavigationBars = !dark
+            onDispose {
+                if (prevStatus != null) controller?.isAppearanceLightStatusBars = prevStatus
+                if (prevNav != null) controller?.isAppearanceLightNavigationBars = prevNav
             }
         }
 
-        // ---------- AI 服务 ----------
-        SectionLabel("AI 服务")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(16.dp)) {
-                Text("服务商", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(8.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+        Box(Modifier.fillMaxSize().background(p.page)) {
+            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+
+                // ---------------- 顶部导航（设计稿：返回 + 设置 + 保存状态） ----------------
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(p.topBar)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    ProviderPresets.forEach { preset ->
-                        FilterChip(
-                            selected = state.draft.presetId == preset.id,
-                            onClick = { vm.selectPreset(preset) },
-                            label = { Text(preset.label) },
+                    Box(
+                        Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .clickable(onClick = onClose),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.ArrowBack,
+                            contentDescription = "返回",
+                            tint = p.textTertiary,
+                            modifier = Modifier.size(20.dp),
                         )
                     }
-                }
-                Spacer(Modifier.height(14.dp))
-                FieldLabel("接口地址（OpenAI 兼容）")
-                OutlinedTextField(
-                    value = state.draft.baseUrl,
-                    onValueChange = { value -> vm.updateDraft { it.copy(baseUrl = value.trim()) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("https://api.deepseek.com") },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Spacer(Modifier.height(12.dp))
-                FieldLabel("API Key（每个供应商各自记住，互不串用）")
-                OutlinedTextField(
-                    value = state.draft.apiKey,
-                    onValueChange = { value -> vm.updateDraft { it.copy(apiKey = value.trim()) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("填当前供应商的 Key，如 sk-…") },
-                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = {
-                        TextButton(onClick = { showKey = !showKey }) { Text(if (showKey) "隐藏" else "显示") }
-                    },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                val currentPreset = presetById(state.draft.presetId)
-                if (currentPreset.apiKeyUrl.isNotBlank() || currentPreset.applyGuide.isNotBlank()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = currentPreset.applyGuide,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f).padding(end = 4.dp),
-                        )
-                        if (currentPreset.apiKeyUrl.isNotBlank()) {
-                            TextButton(
-                                onClick = {
-                                    runCatching {
-                                        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(currentPreset.apiKeyUrl)))
-                                    }
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                            ) {
-                                Text("申请 Key ↗", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                FieldLabel("模型")
-                OutlinedTextField(
-                    value = state.draft.model,
-                    onValueChange = { value -> vm.updateDraft { it.copy(model = value.trim()) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    trailingIcon = {
-                        if (state.testing) CircularProgressIndicator(Modifier.size(20.dp))
-                    },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Spacer(Modifier.height(12.dp))
-                if (state.fetchedModels.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        state.fetchedModels.take(12).forEach { model ->
-                            AssistChip(
-                                onClick = { vm.updateDraft { it.copy(model = model) } },
-                                label = { Text(model) },
-                            )
-                        }
-                    }
-                }
-                state.testResult?.let { result ->
-                    Spacer(Modifier.height(10.dp))
+                    Spacer(Modifier.width(8.dp))
                     Text(
-                        result,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (state.testFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        "设置",
+                        color = p.textPrimary,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
                     )
-                }
-                Spacer(Modifier.height(12.dp))
-                // ---------- 能力调度（思考/强度/搜索）——DeepSeek 专属 ----------
-                val isDeepSeek = state.draft.presetId == "deepseek"
-                if (isDeepSeek) {
-                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("深度思考模式", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "通过 extra_body 传递 thinking 开关，复杂问题更准但更慢",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        androidx.compose.material3.Switch(
-                            checked = state.draft.thinking,
-                            onCheckedChange = { checked -> vm.updateDraft { it.copy(thinking = checked) } },
+                    Spacer(Modifier.weight(1f))
+                    if (state.saveFeedback != SettingsViewModel.SaveFeedback.IDLE) {
+                        Text(
+                            text = when (state.saveFeedback) {
+                                SettingsViewModel.SaveFeedback.SAVING -> "保存中…"
+                                else -> "✓ 已保存"
+                            },
+                            color = if (state.saveFeedback == SettingsViewModel.SaveFeedback.SAVED) p.accent else p.dim,
+                            fontSize = 11.sp,
                         )
                     }
-                    if (state.draft.thinking) {
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(p.divider))
+
+                // ---------------- 主滚动区 ----------------
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    // ==================== 1. 模式与系统 ====================
+                    SettingsSectionTitle("模式与系统", SectionAccent.Purple)
+                    SettingsCard {
+                        ToggleRowWide(
+                            title = "大字模式",
+                            subtitle = "超大字体 · 语音优先 · 启动默认进大字界面",
+                            checked = state.draft.largeTextMode,
+                            onCheckedChange = { checked ->
+                                vm.updateDraft {
+                                    it.copy(
+                                        largeTextMode = checked,
+                                        autoSpeak = if (checked) true else it.autoSpeak,
+                                        sparkMode = if (checked) false else it.sparkMode,
+                                    )
+                                }
+                                vm.save(onSaved = {})
+                            },
+                        )
+                        PillRow(
+                            label = "大字模式字号调节",
+                            value = fontScaleLabel(state.draft.largeTextFontScale),
+                            onClick = { largeFontDialog = true },
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        CardDivider()
+                        Spacer(Modifier.height(12.dp))
+                        ToggleRowWide(
+                            title = "灵动模式",
+                            subtitle = "手表/小屏适配 · 灵动双眼 · 点击唤醒 · 双击识图",
+                            checked = state.draft.sparkMode,
+                            onCheckedChange = { checked ->
+                                vm.updateDraft {
+                                    it.copy(
+                                        sparkMode = checked,
+                                        largeTextMode = if (checked) false else it.largeTextMode,
+                                    )
+                                }
+                                vm.save(onSaved = {})
+                            },
+                        )
+                        PillRow(
+                            label = "灵动模式字号调节",
+                            value = fontScaleLabel(state.draft.sparkFontScale),
+                            onClick = { sparkFontDialog = true },
+                        )
                         Spacer(Modifier.height(10.dp))
-                        Text("思考强度", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(6.dp))
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            VoiceModelOptions.REASONING_EFFORTS.forEach { effort ->
-                                FilterChip(
-                                    selected = state.draft.reasoningEffort == effort,
-                                    onClick = { vm.updateDraft { it.copy(reasoningEffort = effort) } },
-                                    label = { Text(when (effort) { "low" -> "低" ; "max" -> "最大" ; else -> "高" }) },
-                                )
-                            }
-                        }
+                        CardDivider()
+                        NavRow(
+                            title = "外观",
+                            value = when (state.draft.themeMode) {
+                                "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统"
+                            },
+                            onClick = { themeDialog = true },
+                        )
+                        CardDivider()
+                        NavRow(
+                            title = "回答风格",
+                            value = when (state.draft.answerStyle) {
+                                "medium" -> "中等"; "detailed" -> "详尽"; else -> "简洁"
+                            },
+                            onClick = { styleDialog = true },
+                        )
+                        CardDivider()
+                        NavRow(
+                            title = "语音与提醒偏好",
+                            subtitle = "唤醒词 · 插话灵敏度 · 主动提醒",
+                            value = "去调整",
+                            onClick = { prefsDialog = true },
+                        )
                     }
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("联网搜索能力", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "DeepSeek 原生联网搜索为主，搜索引擎作为补充",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+                    // ==================== 2. 扫码同步配置 ====================
+                    SettingsSectionTitle(
+                        "扫码同步配置 (车机/手机互联)",
+                        SectionAccent.Amber,
+                        badge = {
+                            SettingsBadge(
+                                "全量同步",
+                                fg = if (dark) Color(0xFFFCD34D) else Color(0xFFB45309),
+                                bg = if (dark) Color(0xFF451A03) else Color(0xFFFEF3C7),
+                                border = if (dark) Color(0xFF92400E) else Color(0xFFFCD34D),
                             )
-                        }
-                        androidx.compose.material3.Switch(
-                            checked = state.draft.searchEnabled,
-                            onCheckedChange = { checked -> vm.updateDraft { it.copy(searchEnabled = checked) } },
-                        )
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("内容安全风控", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "开启 DeepSeek 官方安全校验与风控审核（默认开启）",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        androidx.compose.material3.Switch(
-                            checked = state.draft.safetyCheckEnabled,
-                            onCheckedChange = { checked -> vm.updateDraft { it.copy(safetyCheckEnabled = checked) } },
-                        )
-                    }
-                } else {
-                    // 非 DeepSeek：联网搜索作为补充，隐藏思考与风控
-                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("联网搜索能力", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "搜索引擎作为补充（该服务商无原生思维链与安全风控开关）",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        androidx.compose.material3.Switch(
-                            checked = state.draft.searchEnabled,
-                            onCheckedChange = { checked -> vm.updateDraft { it.copy(searchEnabled = checked) } },
-                        )
-                    }
-                }
-                Spacer(Modifier.height(16.dp))
-                OutlinedButton(
-                    onClick = { vm.testConnection() },
-                    enabled = !state.testing,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                ) { Text(if (state.testing) "测试中…" else "测试连接") }
-                Text(
-                    "以上改动自动保存，无需手动保存",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-            }
-        }
-
-        // ---------- 扫码同步 ----------
-        SectionLabel("扫码同步配置")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "全量同步：手机上配好后，一键把全部配置（模式与系统 · 各家 Key · 核心能力与模型调度 · 常用地址 · 桌面与后台）整体推到车机，接收方无需逐项重填。车机点「生成同步二维码」，手机点「扫码推送」扫它即写入。两台设备需连同一 Wi-Fi，或车机连手机热点。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(12.dp))
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(
-                        onClick = {
-                            vm.clearSyncResult()
-                            vm.startSyncServer()
-                            if (vm.ui.value.syncQrContent != null) showSyncQr = true
                         },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(14.dp),
-                    ) { Text("生成同步二维码") }
-                    Spacer(Modifier.width(12.dp))
-                    Button(
-                        onClick = {
-                            vm.clearSyncResult()
-                            showScanner = true
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(14.dp),
-                    ) { Text("扫码推送", fontWeight = FontWeight.Bold) }
-                }
-                state.syncPushResult?.let { msg ->
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        msg,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (state.syncPushFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                     )
-                }
-            }
-        }
-
-        // ---------- 地图与语音（可选） ----------
-        SectionLabel("地图与语音（可选）")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(16.dp)) {
-                FieldLabel("高德 Key（启用附近搜索与步行路线，类型须选「Web服务」）")
-                OutlinedTextField(
-                    value = state.draft.amapKey,
-                    onValueChange = { value -> vm.updateDraft { it.copy(amapKey = value.trim()) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("lbs.amap.com 免费申请，服务平台选「Web服务」") },
-                    visualTransformation = if (showAmap) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = {
-                        TextButton(onClick = { showAmap = !showAmap }) { Text(if (showAmap) "隐藏" else "显示") }
-                    },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "高德开放平台 →「创建新应用」并「添加 Key」。⚠️ 服务平台务必选「Web服务」（选Android平台查不了路线），个人开发完全免费。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f).padding(end = 4.dp),
-                    )
-                    TextButton(
-                        onClick = {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://console.amap.com/dev/key/app")))
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                    ) {
-                        Text("申请高德 Key ↗", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                FieldLabel("语音识别 Key（手机没有语音识别时，用大模型转文字）")
-                OutlinedTextField(
-                    value = state.draft.asrKey,
-                    onValueChange = { value -> vm.updateDraft { it.copy(asrKey = value.trim()) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("在 siliconflow.cn 免费申请") },
-                    visualTransformation = if (showAsr) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = {
-                        TextButton(onClick = { showAsr = !showAsr }) { Text(if (showAsr) "隐藏" else "显示") }
-                    },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "硅基流动云平台 → 进入「API 密钥」点击「新建」复制。用于免费开源大模型（普通话 SenseVoice / 23种方言 TeleSpeech-ASR，不扣费）与云端朗读兜底。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f).padding(end = 4.dp),
-                    )
-                    TextButton(
-                        onClick = {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://cloud.siliconflow.cn/account/ak")))
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                    ) {
-                        Text("免费申请 Key ↗", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                AddressListEditor(addresses = state.draft.savedAddresses) { list ->
-                    vm.updateDraft { it.copy(savedAddresses = list) }
-                }
-                Text(
-                    "高德 Key 必须是「Web服务」类型（Android平台类型查不了路线）。朗读免费无需 Key；语音识别用硅基流动免费模型，一般不扣余额。常用地址填好即自动保存，问「回家 / 回公司 / 回XX」就直接导航，不再追问地址。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-                Spacer(Modifier.height(10.dp))
-                // 朗读链路诊断：逐级实测三级引擎，哪级通哪级挂、挂的原因一目了然（截图即可求助）
-                val scope = rememberCoroutineScope()
-                var diagRunning by remember { mutableStateOf(false) }
-                var diagReport by remember { mutableStateOf<String?>(null) }
-                Button(
-                    onClick = {
-                        if (diagRunning) return@Button
-                        diagRunning = true
-                        diagReport = null
-                        scope.launch {
-                            diagReport = FullDiagnostics.run(context, state.draft)
-                            diagRunning = false
-                        }
-                    },
-                    enabled = !diagRunning,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (diagRunning) "诊断中…（约 10 秒）" else "🔍 全链路综合诊断（API / 语音 / 地图 / 通话 / 权限）")
-                }
-                diagReport?.let { report ->
-                    Text(
-                        report,
-                        style = MaterialTheme.typography.labelMedium,
-                        lineHeight = 20.sp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp),
-                    )
-                }
-                Spacer(Modifier.height(6.dp))
-                // 导出运行日志：自动播报触发/跳过、朗读三级引擎逐次尝试与失败原因、云端原话全在里面
-                TextButton(onClick = {
-                    scope.launch {
-                        runCatching {
-                            val f = withContext(Dispatchers.IO) {
-                                LogStore.export(File(context.filesDir, "exports"))
-                            }
-                            val uri = FileProvider.getUriForFile(
-                                context, "${context.packageName}.fileprovider", f,
-                            )
-                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_STREAM, uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            context.startActivity(
-                                Intent.createChooser(intent, "导出运行日志")
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                            )
-                        }
-                    }
-                }) { Text("📤 导出全部运行日志（汇总系统、网络与业务全量日志发开发者）") }
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("方言口音识别", style = MaterialTheme.typography.bodyLarge)
+                    SettingsCard {
                         Text(
-                            "说抚州话、带家乡口音时打开：换用方言口音大模型（免费），识别更准，稍慢一两秒",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            buildAnnotatedString {
+                                append("在手机上把设置配好，一键把")
+                                withStyle(SpanStyle(color = p.textSecondary, fontWeight = FontWeight.Medium)) {
+                                    append("全部配置")
+                                }
+                                append("整体推送到车机/另一台设备，接收方无需逐项重填。车机点「生成同步二维码」，手机点「扫码推送」扫它即写入（需同一 Wi-Fi 或热点）。")
+                            },
+                            color = p.muted,
+                            fontSize = 11.sp,
+                            lineHeight = 18.sp,
                         )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.dialectMode,
-                        onCheckedChange = { checked ->
-                            vm.updateDraft { it.copy(dialectMode = checked) }
-                            vm.save(onSaved = {})
-                        },
-                    )
-                }
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    "以上改动自动保存，无需手动保存",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        // ---------- 语音消息与实时通话（设计稿新增：两块并存配置区） ----------
-        VoiceCallConfigCard(
-            state = state,
-            vm = vm,
-            showDuplexKey = showDuplexKey,
-            onToggleDuplexKey = { showDuplexKey = !showDuplexKey },
-        )
-
-        // ---------- 通用 ----------
-        SectionLabel("通用")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(vertical = 4.dp)) {
-                SettingRow(
-                    title = "外观",
-                    value = when (state.draft.themeMode) {
-                        "light" -> "浅色"
-                        "dark" -> "深色"
-                        else -> "跟随系统"
-                    },
-                    onClick = { themeDialog = true },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "回答风格",
-                    value = when (state.draft.answerStyle) {
-                        "medium" -> "中等"
-                        "detailed" -> "详尽"
-                        else -> "简洁"
-                    },
-                    onClick = { styleDialog = true },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("大字模式", style = MaterialTheme.typography.bodyLarge)
+                        Spacer(Modifier.height(10.dp))
                         Text(
-                            "超大字体 · 语音优先 · 回答自动朗读 · 启动默认进大字模式",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            "覆盖：模式与系统（大字/灵动开关·字号·外观·回答风格） · 8 家服务商凭证 · 核心能力与模型调度（LLM / ASR / TTS · 通话引擎） · 常用地址 · 桌面与后台",
+                            color = if (dark) Color(0xFF22D3EE).copy(alpha = 0.9f) else p.accent,
+                            fontSize = 10.sp,
+                            lineHeight = 16.sp,
                         )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.largeTextMode,
-                        onCheckedChange = { checked ->
-                            // 打开时联动打开自动播报（语音优先）；关闭不动自动播报，尊重用户特意关过的选择
-                            // 模式互斥：大字模式与灵动模式只能开一个，开的顺手关掉另一个（模式切换只认设置页）
-                            vm.updateDraft {
-                                it.copy(
-                                    largeTextMode = checked,
-                                    autoSpeak = if (checked) true else it.autoSpeak,
-                                    sparkMode = if (checked) false else it.sparkMode,
-                                )
-                            }
-                            vm.save(onSaved = {})
-                        },
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "大字模式字号",
-                    value = fontScaleLabel(state.draft.largeTextFontScale),
-                    onClick = { largeFontDialog = true },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("灵动模式", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "小屏/手表适配 · 极简萌眼 · 点击唤醒 · 双击按需视觉识图",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.sparkMode,
-                        onCheckedChange = { checked ->
-                            // 模式互斥：灵动模式与大字模式只能开一个，开的顺手关掉另一个（模式切换只认设置页）
-                            vm.updateDraft {
-                                it.copy(sparkMode = checked, largeTextMode = if (checked) false else it.largeTextMode)
-                            }
-                            vm.save(onSaved = {})
-                        },
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "灵动模式字号",
-                    value = fontScaleLabel(state.draft.sparkFontScale),
-                    onClick = { sparkFontDialog = true },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("主动提醒", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "电量低（20%/10%）、充满电时小源自己说一句 · 只在空闲时说，不打断对话和录音",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.proactiveReminders,
-                        onCheckedChange = { checked ->
-                            vm.updateDraft { it.copy(proactiveReminders = checked) }
-                        },
-                    )
-                }
-            }
-        }
-
-        // ---------- 桌面与后台 ----------
-        SectionLabel("桌面与后台")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(vertical = 4.dp)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("后台常驻运行", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "前台服务保活不被系统回收 · 通知栏常驻一条，点按回到应用",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.keepAliveEnabled,
-                        onCheckedChange = { checked ->
-                            // 33+ 常驻通知要展示需要通知权限（拒绝也不影响服务本身）
-                            if (checked && Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.POST_NOTIFICATIONS,
-                                ) != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                notiPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                            vm.updateDraft { it.copy(keepAliveEnabled = checked) }
-                            vm.save(onSaved = {})
-                            if (checked) KeepAliveService.start(context) else KeepAliveService.stop(context)
-                        },
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("开机自启", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "开机后自动拉起常驻服务并尝试进入应用；设为默认桌面时系统开机本来就会进入",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.bootStartEnabled,
-                        onCheckedChange = { checked ->
-                            vm.updateDraft { it.copy(bootStartEnabled = checked) }
-                            vm.save(onSaved = {})
-                        },
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = if (isDefaultHome) "已设为默认桌面 ✓" else "设为默认桌面（开机即进）",
-                    value = if (isDefaultHome) "已设置" else "去设置",
-                    onClick = { requestDefaultHome(context, homeRoleLauncher) },
-                )
-            }
-        }
-
-        // ---------- 语音输入 ----------
-        SectionLabel("语音输入")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(vertical = 4.dp)) {
-                SettingRow(
-                    title = "语音后自动发送",
-                    value = when (state.draft.asrAutoSendSeconds) {
-                        0 -> "立即"
-                        1 -> "1 秒"
-                        3 -> "3 秒"
-                        5 -> "5 秒"
-                        else -> "关"
-                    },
-                    onClick = { asrSendDialog = true },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "唤醒词监听",
-                    value = if (state.draft.wakeWordEnabled) "「小源小源」· 开" else "关",
-                    onClick = {
-                        vm.updateDraft { it.copy(wakeWordEnabled = !it.wakeWordEnabled) }
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "语音打断灵敏度",
-                    value = when (state.draft.voiceBargeIn) {
-                        0 -> "关（点按打断）"
-                        2 -> "灵敏"
-                        else -> "标准"
-                    },
-                    onClick = { bargeInDialog = true },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "纠正记录",
-                    value = if (fixCount > 0) "$fixCount 条" else "还没有",
-                    onClick = { showVoiceFix = true },
-                )
-            }
-        }
-        Text(
-            "唤醒词监听：灵动模式待机时喊「小源小源」直接进连续对话，不用一直喊（云识别关键词，杂音/电视声不成词不会误触）。语音打断=连续对话时小源在播报中听到你开口就停下听你说。个别设备喇叭回声压不住（自己打断自己）时调成「关」。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-        )
-        Text(
-            "语音识别的稿子你手动改对再发送，就会记下「识别稿 → 发送稿」的差异；AI 智能纠错据此把同类错误越改越准。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-        )
-
-        // ---------- 机器人控制 ----------
-        SectionLabel("机器人控制")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(vertical = 4.dp)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("语音指挥机器人", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "说「前进30厘米」「左转90度」「抬头」「停」「看看前面有什么」，AI 听懂就直接做 · 先支持优必选小方头",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = state.draft.robotEnabled,
-                        onCheckedChange = { checked ->
-                            vm.updateDraft { it.copy(robotEnabled = checked) }
-                            vm.save(onSaved = {})
-                        },
-                    )
-                }
-                if (state.draft.robotEnabled) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                        FieldLabel("机器人中枢地址（机器人本机可填 127.0.0.1）")
-                        var robotTesting by remember { mutableStateOf(false) }
-                        var robotOk by remember { mutableStateOf(false) }
-                        var robotResult by remember { mutableStateOf<String?>(null) }
-                        val robotScope = rememberCoroutineScope()
-
-                        /** 检测指定地址（addr 空 = 检测本机 127.0.0.1，通了直接把地址填好并自动保存） */
-                        fun detect(addr: String) {
-                            if (robotTesting) return
-                            val target = RobotClient.normalizeHost(addr) ?: "127.0.0.1"
-                            robotTesting = true
-                            robotOk = false
-                            robotResult = null
-                            robotScope.launch {
-                                val result = RobotClient(target).ping()
-                                robotTesting = false
-                                result.fold(
-                                    onSuccess = { name ->
-                                        if (addr.isBlank()) {
-                                            vm.updateDraft { it.copy(robotHost = "127.0.0.1") } // 改草稿即自动保存
-                                        }
-                                        robotOk = true
-                                        robotResult = if (addr.isBlank()) "✓ 本机检测到中枢：$name，地址已自动填好"
-                                            else "✓ 已连接：$name"
-                                    },
-                                    onFailure = { e ->
-                                        robotOk = false
-                                        robotResult = if (addr.isBlank()) "本机没有检测到中枢（旅游宝和机器人不在同一台设备），请填机器人的局域网 IP"
-                                            else (e.message ?: "连接失败")
-                                    },
-                                )
-                            }
-                        }
-
-                        // 开关打开/进设置页时地址还空着：先自动检测本机有没有中枢，有就一步填好，没有就引导填 IP
-                        LaunchedEffect(state.draft.robotEnabled) {
-                            if (state.draft.robotEnabled && state.draft.robotHost.isBlank()) detect("")
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            OutlinedTextField(
-                                value = state.draft.robotHost,
-                                // 改动即自动保存（对话界面读的是持久化配置），不靠用户记得按保存
-                                onValueChange = { value -> vm.updateDraft { it.copy(robotHost = value.trim()) } },
+                        Spacer(Modifier.height(12.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SecondaryButton(
+                                text = "生成同步二维码",
+                                onClick = {
+                                    vm.clearSyncResult()
+                                    vm.startSyncServer()
+                                    if (vm.ui.value.syncQrContent != null) showSyncQr = true
+                                },
                                 modifier = Modifier.weight(1f),
-                                singleLine = true,
-                                placeholder = { Text("机器人局域网 IP，如 192.168.3.102") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                                shape = RoundedCornerShape(14.dp),
                             )
-                            Spacer(Modifier.width(8.dp))
-                            Button(
-                                onClick = { detect(state.draft.robotHost) },
-                                enabled = !robotTesting,
-                            ) { Text(if (robotTesting) "检测中" else "检测") }
+                            PrimaryButton(
+                                text = "扫码推送",
+                                onClick = { vm.clearSyncResult(); showScanner = true },
+                                modifier = Modifier.weight(1f),
+                            )
                         }
-                        robotResult?.let { msg ->
+                        state.syncPushResult?.let { msg ->
+                            Spacer(Modifier.height(10.dp))
                             Text(
                                 msg,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (robotOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(top = 6.dp),
-                            )
-                        }
-                        // 快捷填入：旅游宝就装在机器人上时，点一下直接填本机地址
-                        Spacer(Modifier.height(6.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AssistChip(
-                                onClick = {
-                                    vm.updateDraft { it.copy(robotHost = "127.0.0.1") }
-                                    detect("127.0.0.1")
-                                },
-                                label = { Text("📍 本机 127.0.0.1") },
+                                color = if (state.syncPushFailed) p.danger else p.accent,
+                                fontSize = 11.sp,
+                                lineHeight = 17.sp,
                             )
                         }
                     }
+
+                    // ==================== 3. 服务商与 API 密钥集中管理 ====================
+                    SettingsSectionTitle(
+                        "服务商与 API 密钥集中管理",
+                        SectionAccent.Blue,
+                        badge = {
+                            SettingsBadge(
+                                "纯凭证配置 (共 8 家)",
+                                fg = p.dim,
+                                bg = if (dark) Color(0xFF1E293B) else Color(0xFFF1F5F9),
+                            )
+                        },
+                    )
+                    ProviderCredentialsCard(state, vm)
+
+                    // ==================== 4. 核心能力与模型调用方案 ====================
+                    SettingsSectionTitle(
+                        "核心能力与模型调用方案",
+                        SectionAccent.Teal,
+                        badge = {
+                            SettingsBadge(
+                                "模型能力调度",
+                                fg = if (dark) Color(0xFF22D3EE) else Color(0xFF0E7490),
+                                bg = if (dark) Color(0xFF083344) else Color(0xFFECFEFF),
+                                border = if (dark) Color(0xFF155E75) else Color(0xFFA5F3FC),
+                            )
+                        },
+                    )
+                    SettingsCard {
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            TextCapabilityCard(state, vm)
+                            VoiceConfigCard(state, vm)
+                        }
+                    }
+
+                    // ==================== 5. 常用地址管理 ====================
+                    SettingsSectionTitle("常用地址管理", SectionAccent.Emerald)
+                    SettingsCard {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "说「回XX」自动以该地址为目的地规划导航",
+                                color = p.textTertiary,
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text("支持添加任意个", color = p.dim, fontSize = 11.sp)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        AddressListEditor(
+                            addresses = state.draft.savedAddresses,
+                            onChange = { list -> vm.updateDraft { it.copy(savedAddresses = list) } },
+                        )
+                    }
+
+                    // ==================== 6. 桌面与后台 ====================
+                    SettingsSectionTitle("桌面与后台", SectionAccent.Indigo)
+                    SettingsCard {
+                        ToggleRowWide(
+                            title = "后台常驻运行",
+                            subtitle = "前台服务保活不被系统回收 · 通知栏常驻",
+                            checked = state.draft.keepAliveEnabled,
+                            onCheckedChange = { checked ->
+                                if (checked) notiPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                vm.updateDraft { it.copy(keepAliveEnabled = checked) }
+                                vm.save(onSaved = {})
+                                if (checked) KeepAliveService.start(context) else KeepAliveService.stop(context)
+                            },
+                        )
+                        CardDivider()
+                        ToggleRowWide(
+                            title = "开机自启",
+                            subtitle = "开机后自动拉起服务并尝试进入应用",
+                            checked = state.draft.bootStartEnabled,
+                            onCheckedChange = { checked ->
+                                vm.updateDraft { it.copy(bootStartEnabled = checked) }
+                                vm.save(onSaved = {})
+                            },
+                        )
+                        CardDivider()
+                        NavRow(
+                            title = "设为默认桌面（开机即进）",
+                            value = if (isDefaultHome) "已是默认" else "去设置",
+                            onClick = { if (!isDefaultHome) requestDefaultHome(context, homeRoleLauncher) },
+                            valueColor = p.accent,
+                        )
+                    }
+
+                    // ==================== 7. 诊断与日志 ====================
+                    SettingsSectionTitle(
+                        "诊断与日志",
+                        SectionAccent.Orange,
+                        badge = {
+                            SettingsBadge(
+                                "全链路排查",
+                                fg = p.dim,
+                                bg = if (dark) Color(0xFF1E293B) else Color(0xFFF1F5F9),
+                            )
+                        },
+                    )
+                    SettingsCard {
+                        Text(
+                            "诊断涵盖 API 连通性、按住说话 ASR、TTS 朗读播报、豆包全双工通话、高德地图周边检索及网络权限全维度体检。",
+                            color = p.muted,
+                            fontSize = 11.sp,
+                            lineHeight = 18.sp,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        var diagRunning by remember { mutableStateOf(false) }
+                        var diagReport by remember { mutableStateOf<String?>(null) }
+                        SecondaryButton(
+                            text = if (diagRunning) "诊断中…（约 10 秒）" else "🔍  全链路综合诊断（一键体检：API / 语音 / 地图 / 通话）",
+                            onClick = {
+                                if (diagRunning) return@SecondaryButton
+                                diagRunning = true
+                                diagReport = null
+                                scope.launch {
+                                    diagReport = FullDiagnostics.run(context, state.draft)
+                                    diagRunning = false
+                                }
+                            },
+                            enabled = !diagRunning,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        // 导出日志：cyan-950 底 + cyan-800 描边 + cyan-300 字
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(p.accentSoft)
+                                .clickable {
+                                    scope.launch {
+                                        runCatching {
+                                            val f = withContext(Dispatchers.IO) {
+                                                LogStore.export(File(context.filesDir, "exports"))
+                                            }
+                                            val uri = FileProvider.getUriForFile(
+                                                context, "${context.packageName}.fileprovider", f,
+                                            )
+                                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "text/plain"
+                                                putExtra(Intent.EXTRA_STREAM, uri)
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            context.startActivity(
+                                                Intent.createChooser(intent, "导出运行日志")
+                                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                            )
+                                        }
+                                    }
+                                }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "📤  导出全部运行日志（汇总系统、网络与业务全量日志发开发者）",
+                                color = p.accentSoftText,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                        diagReport?.let { report ->
+                            Spacer(Modifier.height(10.dp))
+                            Text(report, color = p.textTertiary, fontSize = 11.sp, lineHeight = 18.sp)
+                        }
+                    }
+
+                    // ==================== 8. 机器人控制 ====================
+                    SettingsSectionTitle("机器人控制", SectionAccent.Fuchsia)
+                    SettingsCard {
+                        ToggleRow(
+                            title = "语音指挥机器人",
+                            subtitle = "说「前进30厘米」「左转90度」「抬头」「停」「看看前面有什么」，AI 听懂就直接做 · 先支持优必选小方头",
+                            checked = state.draft.robotEnabled,
+                            onCheckedChange = { checked ->
+                                vm.updateDraft { it.copy(robotEnabled = checked) }
+                                vm.save(onSaved = {})
+                            },
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        CardDivider()
+                        Spacer(Modifier.height(10.dp))
+                        CsFieldLabel("机器人中枢地址（机器人本机可填 127.0.0.1）")
+                        Spacer(Modifier.height(6.dp))
+                        var robotTesting by remember { mutableStateOf(false) }
+                        var robotResult by remember { mutableStateOf<String?>(null) }
+                        var robotOk by remember { mutableStateOf(false) }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            SettingsField(
+                                value = state.draft.robotHost,
+                                onValueChange = { v -> vm.updateDraft { it.copy(robotHost = v.trim()) } },
+                                placeholder = "192.168.3.102",
+                                mono = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            PrimaryButton(
+                                text = if (robotTesting) "检测中" else "检测",
+                                onClick = {
+                                    robotTesting = true
+                                    robotResult = null
+                                    scope.launch {
+                                        val target = RobotClient.normalizeHost(state.draft.robotHost) ?: "127.0.0.1"
+                                        val result = withContext(Dispatchers.IO) {
+                                            runCatching { RobotClient(target).ping() }
+                                        }
+                                        val ok = result.isSuccess
+                                        robotOk = ok
+                                        robotResult = if (ok) "✓ 已连接：${result.getOrNull()}"
+                                        else "✗ 连接失败：${result.exceptionOrNull()?.message ?: "连不上"}"
+                                        robotTesting = false
+                                    }
+                                },
+                                enabled = !robotTesting,
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            robotResult ?: "本机没有检测到中枢（旅游宝和机器人不在同一台设备），请填机器人的局域网 IP",
+                            color = if (robotResult != null && robotOk) p.accent else p.danger,
+                            fontSize = 10.sp,
+                            lineHeight = 15.sp,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        SecondaryButton(
+                            text = "",
+                            onClick = { vm.updateDraft { it.copy(robotHost = "127.0.0.1") } },
+                            content = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFFEF4444)))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("本机 127.0.0.1", color = p.textTertiary, fontSize = 11.sp)
+                                }
+                            },
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "改动自动保存。打开开关会先自动检测本机有没有中枢：检测到就直接填好 127.0.0.1，检测不到再填机器人的局域网 IP。" +
+                                "机器人上需安装 xrobotctl 控制中枢（github.com/jingrongx/xrobotctl）并打开一次启动常驻服务；三台设备需连同一个 Wi-Fi。",
+                            color = p.dim,
+                            fontSize = 10.sp,
+                            lineHeight = 16.sp,
+                        )
+                    }
+
+                    // ==================== 9. 数据管理与飞轮 ====================
+                    SettingsSectionTitle("数据管理与飞轮", SectionAccent.Rose)
+                    SettingsCard {
+                        NavRow(
+                            title = "纠正记录",
+                            subtitle = "用户手动修改的语音识别稿飞轮",
+                            value = "查看记录",
+                            onClick = { showVoiceFix = true },
+                        )
+                        CardDivider()
+                        NavRow(
+                            title = "导出对话备份 (ZIP 互通格式)",
+                            value = "导出",
+                            valueColor = p.accent,
+                            onClick = { exportSessions() },
+                        )
+                        CardDivider()
+                        NavRow(
+                            title = "导入对话记录 (支持 DeepSeek 格式)",
+                            value = "导入",
+                            valueColor = p.accent,
+                            onClick = {
+                                importLauncher.launch(arrayOf("application/json", "application/zip", "*/*"))
+                            },
+                        )
+                        dataManageMsg?.let { msg ->
+                            Spacer(Modifier.height(8.dp))
+                            Text(msg, color = p.accent, fontSize = 11.sp, lineHeight = 17.sp)
+                        }
+                    }
+
+                    // ==================== 10. 关于（设计稿此处无彩色竖条） ====================
+                    SettingsSectionTitle("关于")
+                    SettingsCard {
+                        NavRow(
+                            title = "检查更新",
+                            value = versionLabel,
+                            onClick = onOpenUpdate,
+                        )
+                        CardDivider()
+                        NavRow(
+                            title = "项目主页",
+                            value = "GitHub",
+                            valueColor = p.accent,
+                            chevron = false,
+                            arrowUp = true,
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/jingrongx/66"))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                    )
+                                }
+                            },
+                        )
+                    }
+
+                    Spacer(Modifier.height(8.dp))
                 }
             }
         }
-        Text(
-            "改动自动保存。打开开关会先自动检测本机有没有中枢：检测到就直接填好 127.0.0.1，检测不到再填机器人的局域网 IP。机器人上需安装 xrobotctl 控制中枢（github.com/jingrongx/xrobotctl）并打开一次启动常驻服务；两台设备需连同一个 Wi-Fi。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-        )
 
-        // ---------- 数据管理 ----------
-        SectionLabel("数据管理")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(vertical = 4.dp)) {
-                SettingRow(
-                    title = "导出对话备份",
-                    value = "ZIP / 互通格式",
-                    onClick = { exportSessions() },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "导入对话记录",
-                    value = "支持 DeepSeek 格式",
-                    onClick = {
-                        importLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/json", "*/*"))
-                    },
-                )
-            }
-        }
-        if (dataManageMsg != null) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                dataManageMsg!!,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 16.dp),
+        // ==================== 弹窗 ====================
+
+        if (showSyncQr) {
+            AlertDialog(
+                onDismissRequest = { showSyncQr = false; vm.stopSyncServer() },
+                title = { Text("等待手机扫码") },
+                text = {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                        state.syncQrContent?.let { content -> QrCodeImage(content) }
+                        Spacer(Modifier.height(12.dp))
+                        if (state.syncReceived) {
+                            Text("已收到手机推送的配置并自动保存 ✓", color = p.accent, fontWeight = FontWeight.Bold)
+                        } else {
+                            Text(
+                                "用手机上安装的本应用，点「扫码推送」扫此码。手机里已填好的配置会直接传到本机并自动保存。",
+                                color = p.dim,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showSyncQr = false; vm.stopSyncServer() }) { Text("完成") }
+                },
             )
         }
-        Text(
-            "导出产物为标准 ZIP 格式，与 DeepSeek 官方网页端/Demo 完全互通；支持导入电脑端导出的攻略继续在手机上聊。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-        )
 
-        // ---------- 关于 ----------
-        SectionLabel("关于")
-        ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Column(Modifier.padding(vertical = 4.dp)) {
-                SettingRow(title = "检查更新", value = versionLabel, onClick = onOpenUpdate)
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f))
-                SettingRow(
-                    title = "项目主页",
-                    value = "GitHub",
-                    onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/jingrongx/66"))
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                            )
-                        }
-                    },
-                )
-            }
+        if (showScanner) {
+            QrScanScreen(
+                onResult = { content ->
+                    showScanner = false
+                    vm.onQrScanned(content)
+                },
+                onClose = { showScanner = false },
+            )
         }
 
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "Key 只保存在本机（DataStore）。深度思考与联网搜索开关在主页输入卡内；联网搜索按次计费（官方约 ¥5.4/千次成功请求）。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(16.dp))
-        Text(
-            "内容由 AI 生成，请仔细甄别，并合法使用。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-        )
-        Spacer(Modifier.height(32.dp))
-    }
+        if (showVoiceFix) {
+            VoiceFixScreen(app = app, onClose = { showVoiceFix = false })
+        }
 
-    if (showSyncQr) {
-        AlertDialog(
-            onDismissRequest = { showSyncQr = false; vm.stopSyncServer() },
-            title = { Text("等待手机扫码") },
-            text = {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    state.syncQrContent?.let { content -> QrCodeImage(content) }
-                    Spacer(Modifier.height(12.dp))
-                    if (state.syncReceived) {
-                        Text(
-                            "已收到手机推送的配置并自动保存 ✓",
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
+        if (largeFontDialog) {
+            FontScaleDialog(
+                title = "大字模式字号",
+                current = state.draft.largeTextFontScale,
+                onPick = { v ->
+                    vm.updateDraft { it.copy(largeTextFontScale = v) }
+                    vm.save(onSaved = {})
+                },
+                onDismiss = { largeFontDialog = false },
+            )
+        }
+        if (sparkFontDialog) {
+            FontScaleDialog(
+                title = "灵动模式字号",
+                current = state.draft.sparkFontScale,
+                onPick = { v ->
+                    vm.updateDraft { it.copy(sparkFontScale = v) }
+                    vm.save(onSaved = {})
+                },
+                onDismiss = { sparkFontDialog = false },
+            )
+        }
+
+        if (themeDialog) {
+            ChoiceDialog(
+                title = "外观",
+                options = listOf(
+                    Triple("system", "跟随系统", "跟随手机的深色/浅色开关"),
+                    Triple("light", "浅色", "日间模式：白卡片 + 浅灰底"),
+                    Triple("dark", "深色", "夜间模式：slate 深色卡片"),
+                ),
+                selected = state.draft.themeMode,
+                onPick = { value ->
+                    vm.updateDraft { it.copy(themeMode = value) }
+                    vm.save(onSaved = {})
+                },
+                onDismiss = { themeDialog = false },
+            )
+        }
+
+        if (styleDialog) {
+            ChoiceDialog(
+                title = "回答风格",
+                options = listOf(
+                    Triple("concise", "简洁", "平时问答一两句，问「详细」才展开"),
+                    Triple("medium", "中等", "攻略类给 3-5 条要点"),
+                    Triple("detailed", "详尽", "攻略类 5-8 条要点讲全"),
+                ),
+                selected = state.draft.answerStyle,
+                onPick = { value -> vm.updateDraft { it.copy(answerStyle = value) } },
+                onDismiss = { styleDialog = false },
+            )
+        }
+
+        // 语音与提醒偏好：设计稿未单列的三项，收进一个弹窗，主页面保持与设计稿一致
+        if (prefsDialog) {
+            AlertDialog(
+                onDismissRequest = { prefsDialog = false },
+                title = { Text("语音与提醒偏好") },
+                text = {
+                    Column(Modifier.fillMaxWidth()) {
+                        ToggleRow(
+                            title = "待机唤醒词监听",
+                            subtitle = "灵动模式待机时喊「小源小源」直接进连续对话",
+                            checked = state.draft.wakeWordEnabled,
+                            onCheckedChange = { checked -> vm.updateDraft { it.copy(wakeWordEnabled = checked) } },
                         )
-                    } else {
-                        Text(
-                            "用手机上安装的本应用，点「扫码推送」扫此码。手机里已填好的配置会直接传到本机并自动保存。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Spacer(Modifier.height(14.dp))
+                        CsLabel("语音打断灵敏度（连续对话）")
+                        Spacer(Modifier.height(6.dp))
+                        PillGroup(
+                            options = listOf(0, 1, 2),
+                            selected = state.draft.voiceBargeIn,
+                            label = { when (it) { 0 -> "关"; 2 -> "灵敏"; else -> "标准" } },
+                            onSelect = { v -> vm.updateDraft { it.copy(voiceBargeIn = v) } },
+                            itemPaddingH = 12,
+                            itemPaddingV = 5,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        ToggleRow(
+                            title = "主动提醒",
+                            subtitle = "电量低/充满时小源自己说一句 · 只在空闲时说",
+                            checked = state.draft.proactiveReminders,
+                            onCheckedChange = { checked -> vm.updateDraft { it.copy(proactiveReminders = checked) } },
                         )
                     }
-                }
-            },
-            confirmButton = {
-                Button(onClick = { showSyncQr = false; vm.stopSyncServer() }) { Text("完成") }
-            },
-        )
-    }
-
-    if (showScanner) {
-        QrScanScreen(
-            onResult = { content ->
-                showScanner = false
-                vm.onQrScanned(content)
-            },
-            onClose = { showScanner = false },
-        )
-    }
-
-    if (showVoiceFix) {
-        VoiceFixScreen(app = app, onClose = { showVoiceFix = false })
-    }
-
-    if (largeFontDialog) {
-        FontScaleDialog(
-            title = "大字模式字号",
-            current = state.draft.largeTextFontScale,
-            onPick = { v ->
-                vm.updateDraft { it.copy(largeTextFontScale = v) }
-                vm.save(onSaved = {})
-            },
-            onDismiss = { largeFontDialog = false },
-        )
-    }
-    if (sparkFontDialog) {
-        FontScaleDialog(
-            title = "灵动模式字号",
-            current = state.draft.sparkFontScale,
-            onPick = { v ->
-                vm.updateDraft { it.copy(sparkFontScale = v) }
-                vm.save(onSaved = {})
-            },
-            onDismiss = { sparkFontDialog = false },
-        )
-    }
-
-    if (bargeInDialog) {
-        AlertDialog(
-            onDismissRequest = { bargeInDialog = false },
-            title = { Text("语音打断灵敏度") },
-            text = {
-                Column {
-                    listOf(
-                        0 to "关（点按打断）——播报中不监听；个别设备喇叭回声压不住、自己打断自己时选这个",
-                        1 to "标准——多数设备都适用（推荐）",
-                        2 to "灵敏——嘈杂环境接话更快，误打断风险略高",
-                    ).forEach { (value, label) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    vm.updateDraft { it.copy(voiceBargeIn = value) }
-                                    bargeInDialog = false
-                                }
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = state.draft.voiceBargeIn == value,
-                                onClick = {
-                                    vm.updateDraft { it.copy(voiceBargeIn = value) }
-                                    bargeInDialog = false
-                                },
-                            )
-                            Text(label, style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { bargeInDialog = false }) { Text("好的") }
-            },
-        )
-    }
-
-    if (themeDialog) {
-        AlertDialog(
-            onDismissRequest = { themeDialog = false },
-            title = { Text("外观") },
-            text = {
-                Column {
-                    listOf(
-                        "system" to "跟随系统",
-                        "light" to "浅色",
-                        "dark" to "深色",
-                    ).forEach { (value, label) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { vm.updateDraft { it.copy(themeMode = value) } }
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = state.draft.themeMode == value,
-                                onClick = { vm.updateDraft { it.copy(themeMode = value) } },
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(label)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    vm.save(onSaved = {})
-                    themeDialog = false
-                }) { Text("确认") }
-            },
-            dismissButton = {
-                TextButton(onClick = { themeDialog = false }) { Text("取消") }
-            },
-        )
-    }
-
-    if (styleDialog) {
-        AlertDialog(
-            onDismissRequest = { styleDialog = false },
-            title = { Text("回答风格") },
-            text = {
-                Column {
-                    listOf(
-                        "concise" to "简洁 · 平时问答一两句，问“详细”才展开",
-                        "medium" to "中等 · 攻略类给 3-5 条要点",
-                        "detailed" to "详尽 · 攻略类 5-8 条要点讲全",
-                    ).forEach { (value, label) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { vm.updateDraft { it.copy(answerStyle = value) } }
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = state.draft.answerStyle == value,
-                                onClick = { vm.updateDraft { it.copy(answerStyle = value) } },
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(label)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    vm.save(onSaved = {})
-                    styleDialog = false
-                }) { Text("确认") }
-            },
-            dismissButton = {
-                TextButton(onClick = { styleDialog = false }) { Text("取消") }
-            },
-        )
-    }
-
-    if (asrSendDialog) {
-        AlertDialog(
-            onDismissRequest = { asrSendDialog = false },
-            title = { Text("语音后自动发送") },
-            text = {
-                Column {
-                    Text(
-                        "按住说话松手、识别（含智能纠错）完成后，等一会儿自动把这条发出去。" +
-                            "点一下输入框、再次按住说话或手动编辑都会取消。想连说几段再发，选 3 秒或 5 秒。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    listOf(
-                        -1 to "关 · 识别完停在输入框，自己点发送（默认）",
-                        0 to "立即 · 识别完马上发送",
-                        1 to "1 秒后发送",
-                        3 to "3 秒后发送",
-                        5 to "5 秒后发送",
-                    ).forEach { (value, label) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { vm.updateDraft { it.copy(asrAutoSendSeconds = value) } }
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = state.draft.asrAutoSendSeconds == value,
-                                onClick = { vm.updateDraft { it.copy(asrAutoSendSeconds = value) } },
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(label)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    vm.save(onSaved = {})
-                    asrSendDialog = false
-                }) { Text("确认") }
-            },
-            dismissButton = {
-                TextButton(onClick = { asrSendDialog = false }) { Text("取消") }
-            },
-        )
+                },
+                confirmButton = {
+                    TextButton(onClick = { vm.save(onSaved = {}); prefsDialog = false }) { Text("完成") }
+                },
+            )
+        }
     }
 }
 
+/** 从 Compose 的 Context 里找到宿主 Activity（状态栏图标外观要用 window） */
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
+
+/** 字号行：左说明 + 右侧青色「标准 (1.0x) ❯」 */
 @Composable
-private fun SectionLabel(text: String) {
-    Column {
-        Spacer(Modifier.height(20.dp))
-        Text(
-            text,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(8.dp))
+private fun PillRow(label: String, value: String, onClick: () -> Unit) {
+    val p = LocalSettingsPalette.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(p.inset)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = p.muted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+        Text("$value ❯", color = p.accent, fontSize = 11.sp)
     }
 }
 
+/** 单选弹窗：一行一项，左侧单选点 */
 @Composable
-private fun FieldLabel(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+private fun ChoiceDialog(
+    title: String,
+    options: List<Triple<String, String, String>>,
+    selected: String,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                options.forEach { (value, label, desc) ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(value) }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = selected == value, onClick = { onPick(value) })
+                        Spacer(Modifier.width(6.dp))
+                        Column {
+                            Text(label, fontSize = 14.sp)
+                            Text(desc, fontSize = 11.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
     )
 }
 
-/** 常用地址列表编辑器：任意个「标签 + 地址」，可增删，改动即保存 */
+/** 常用地址列表：任意个「标签 + 地址」，可增删，改动即保存 */
 @Composable
 private fun AddressListEditor(
     addresses: List<SavedAddress>,
     onChange: (List<SavedAddress>) -> Unit,
 ) {
-    FieldLabel("常用地址管理（任意个）——说「回XX」自动导航")
-    Spacer(Modifier.height(8.dp))
-    addresses.forEachIndexed { index, addr ->
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = addr.label,
-                onValueChange = { v -> onChange(addresses.toMutableList().also { it[index] = addr.copy(label = v) }) },
-                modifier = Modifier.width(72.dp),
-                singleLine = true,
-                placeholder = { Text("标签", style = MaterialTheme.typography.labelSmall) },
-                shape = RoundedCornerShape(12.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            OutlinedTextField(
-                value = addr.address,
-                onValueChange = { v -> onChange(addresses.toMutableList().also { it[index] = addr.copy(address = v) }) },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                placeholder = { Text("详细地址", style = MaterialTheme.typography.labelSmall) },
-                shape = RoundedCornerShape(12.dp),
-            )
-            IconButton(onClick = { onChange(addresses.toMutableList().also { it.removeAt(index) }) }) {
-                Text("✕", color = MaterialTheme.colorScheme.error)
+    val p = LocalSettingsPalette.current
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        addresses.forEachIndexed { index, addr ->
+            val labelColor = when (index) {
+                0 -> Color(0xFF22D3EE)
+                1 -> Color(0xFF34D399)
+                else -> Color(0xFFFBBF24)
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(p.inset)
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SettingsField(
+                    value = addr.label,
+                    onValueChange = { v ->
+                        onChange(addresses.toMutableList().also { it[index] = addr.copy(label = v.take(6)) })
+                    },
+                    placeholder = "标签",
+                    modifier = Modifier.width(56.dp),
+                    minHeight = 30,
+                    fill = if (p.isDark) Color(0xFF0F172A) else Color(0xFFF8FAFC),
+                    centered = true,
+                    textColor = labelColor,
+                    bold = true,
+                )
+                Spacer(Modifier.width(8.dp))
+                SettingsField(
+                    value = addr.address,
+                    onValueChange = { v ->
+                        onChange(addresses.toMutableList().also { it[index] = addr.copy(address = v) })
+                    },
+                    placeholder = "输入详细地址",
+                    modifier = Modifier.weight(1f),
+                    minHeight = 30,
+                    fill = Color.Transparent,
+                    stroke = Color.Transparent,
+                )
+                Text(
+                    "✕",
+                    color = p.dim,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { onChange(addresses.toMutableList().also { it.removeAt(index) }) }
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
             }
         }
-    }
-    Spacer(Modifier.height(8.dp))
-    OutlinedButton(
-        onClick = { onChange(addresses + SavedAddress("", "")) },
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-    ) { Text("+ 添加常用地址") }
-}
 
-/** 三段式模型下拉：ASR / LLM / TTS 共用同一控件，可空 id=跟随全局 */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun ModelSelectRow(
-    label: String,
-    options: List<VoiceModelOptions.Option>,
-    selectedId: String,
-    onPick: (String) -> Unit,
-) {
-    Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-    Spacer(Modifier.height(6.dp))
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        FilterChip(
-            selected = selectedId.isBlank(),
-            onClick = { onPick("") },
-            label = { Text("跟随全局/默认") },
-        )
-        options.forEach { opt ->
-            FilterChip(
-                selected = selectedId == opt.id,
-                onClick = { onPick(opt.id) },
-                label = { Text(opt.label.substringBefore("｜")) },
-            )
-        }
-    }
-    val current = options.firstOrNull { it.id == selectedId }
-    if (current != null) {
-        Text(current.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-    }
-}
-
-/**
- * 语音消息 + 实时通话（设计稿「两块并存配置区」）：
- * A 语音消息（按住说话）：ASR/LLM/TTS 三段独立 + 松手自动发送；
- * B 实时通话：通话引擎二选一（豆包全双工音色 / 经典串行三段），预留音视频禁用项。
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun VoiceCallConfigCard(
-    state: SettingsViewModel.UiState,
-    vm: SettingsViewModel,
-    showDuplexKey: Boolean,
-    onToggleDuplexKey: () -> Unit,
-) {
-    val d = state.draft
-    SectionLabel("语音消息与实时通话")
-    ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-        Column(Modifier.padding(16.dp)) {
-            // ========== A. 语音消息 ==========
-            Text("A. 语音消息（按住说话）", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Text("主界面输入区 · 松手转文字进草稿，可连说几段、可编辑", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-            ModelSelectRow("① 语音识别模型 (ASR)", VoiceModelOptions.ASR, d.voiceAsrModel) { v -> vm.updateDraft { it.copy(voiceAsrModel = v) } }
-            Spacer(Modifier.height(12.dp))
-            ModelSelectRow("② 对话大模型 (LLM)", VoiceModelOptions.LLM, d.voiceLlmModel) { v -> vm.updateDraft { it.copy(voiceLlmModel = v) } }
-            Spacer(Modifier.height(12.dp))
-            ModelSelectRow("③ 语音合成模型 (TTS)", VoiceModelOptions.TTS, d.voiceTtsModel) { v -> vm.updateDraft { it.copy(voiceTtsModel = v) } }
-            Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("松手后自动发送", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                    Text("松手倒计时自动提交，编辑输入框即取消", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                androidx.compose.material3.Switch(
-                    checked = d.asrAutoSendEnabled,
-                    onCheckedChange = { c -> vm.updateDraft { it.copy(asrAutoSendEnabled = c) } },
-                )
-            }
-            if (d.asrAutoSendEnabled) {
-                Spacer(Modifier.height(8.dp))
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    VoiceModelOptions.AUTO_SEND_DELAYS.filter { it > 0 }.forEach { sec ->
-                        FilterChip(
-                            selected = d.asrAutoSendSeconds == sec,
-                            onClick = { vm.updateDraft { it.copy(asrAutoSendSeconds = sec) } },
-                            label = { Text("${sec}秒") },
-                        )
-                    }
-                }
-            }
-
-            HorizontalDivider(Modifier.padding(vertical = 16.dp))
-
-            // ========== B. 实时通话 ==========
-            Text("B. 实时通话", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Text("点导航「通话」进全屏 · 松手即问、自动朗读、可插话", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-
-            // 豆包全双工专用 Key（独立于文本大模型 Key）
-            FieldLabel("豆包实时语音 Key（全双工端到端，走 X-Api-Key）")
-            OutlinedTextField(
-                value = d.duplexApiKey,
-                onValueChange = { v -> vm.updateDraft { it.copy(duplexApiKey = v.trim()) } },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                placeholder = { Text("火山「豆包语音」→ API Key 管理创建") },
-                visualTransformation = if (showDuplexKey) VisualTransformation.None else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                trailingIcon = {
-                    TextButton(onClick = onToggleDuplexKey) {
-                        Text(if (showDuplexKey) "隐藏" else "显示")
-                    }
-                },
-                shape = RoundedCornerShape(14.dp),
-            )
-            Text(
-                "注意：这把 Key 在「豆包语音」产品下创建，与方舟文本大模型的 Key 不同；仅全双工实时通话使用。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-
-            Text("通话引擎", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(6.dp))
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                FilterChip(
-                    selected = d.callEngine == "doubao",
-                    onClick = { vm.updateDraft { it.copy(callEngine = "doubao") } },
-                    label = { Text("豆包全双工（推荐）") },
-                )
-                FilterChip(
-                    selected = d.callEngine == "classic",
-                    onClick = { vm.updateDraft { it.copy(callEngine = "classic") } },
-                    label = { Text("经典串行") },
-                )
-                FilterChip(
-                    selected = false,
-                    enabled = false,
-                    onClick = {},
-                    label = { Text("音视频（暂未开放）") },
-                )
-            }
-            Spacer(Modifier.height(12.dp))
-
-            when (d.callEngine) {
-                "doubao" -> {
-                    Text("通话音色", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(6.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DuplexProtocol.VOICES.forEach { (id, name) ->
-                            FilterChip(
-                                selected = d.duplexVoice == id,
-                                onClick = { vm.updateDraft { it.copy(duplexVoice = id) } },
-                                label = { Text(name.substringBefore(" ｜").substringBefore(" (")) },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "端到端 S2S：模型直出 24kHz 语音，不经过 ASR/TTS，可自然插话打断。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                "classic" -> {
-                    ModelSelectRow("① 语音识别模型 (ASR)", VoiceModelOptions.ASR, d.callAsrModel) { v -> vm.updateDraft { it.copy(callAsrModel = v) } }
-                    Spacer(Modifier.height(12.dp))
-                    ModelSelectRow("② 对话大模型 (LLM)", VoiceModelOptions.LLM, d.callLlmModel) { v -> vm.updateDraft { it.copy(callLlmModel = v) } }
-                    Spacer(Modifier.height(12.dp))
-                    ModelSelectRow("③ 语音合成模型 (TTS)", VoiceModelOptions.TTS, d.callTtsModel) { v -> vm.updateDraft { it.copy(callTtsModel = v) } }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingRow(title: String, value: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(title, style = MaterialTheme.typography.bodyLarge)
-        Spacer(Modifier.weight(1f))
-        Text(
-            value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Icon(
-            Icons.Default.KeyboardArrowRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp),
+        DashedAddButton(
+            text = "+ 添加常用自定义地址",
+            onClick = { if (addresses.size < 12) onChange(addresses + SavedAddress("", "")) },
         )
     }
 }
@@ -1641,7 +1016,7 @@ internal fun fontScaleLabel(v: Float): String = when (v) {
 }
 
 /**
- * 字号选择弹窗（大字模式/灵动模式各一，同一组件）：
+ * 字号选择弹窗（大字模式/灵动模式各一）：
  * 选中即保存并生效——该模式全部 sp 文字经 fontScale 整体缩放，dp 骨架不动。
  */
 @Composable
@@ -1668,22 +1043,12 @@ private fun FontScaleDialog(
                         Spacer(Modifier.width(8.dp))
                         Text(label)
                         Spacer(Modifier.weight(1f))
-                        Text(
-                            "${(value * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Text("${(value * 100).toInt()}%", fontSize = 12.sp)
                     }
                 }
-                Text(
-                    "调整后该模式全部文字整体放大/缩小，立即生效",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Text("调整后该模式全部文字整体放大/缩小，立即生效", fontSize = 11.sp)
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("完成") }
-        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
     )
 }
