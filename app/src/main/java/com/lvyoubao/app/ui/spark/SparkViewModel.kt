@@ -1311,6 +1311,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     minSpeechMs = if (curVoiceSens >= 2) 180L else 220L,
                     bargeInSensitivity = 0, // 待机不需要打断：主动提醒播报期间不收音，防回灌
                     idleTimeoutMs = Long.MAX_VALUE / 2, // 待机监听常驻，不自动退
+                    // 单段上限收到 6 秒：屋里电视/聊天一响就是十几秒的长段，
+                    // 唤醒词埋在长段里识别容易被串音盖掉，切碎一点反而更容易命中
+                    maxUtteranceMs = 6_000L,
                     onsetMarginDb = if (curVoiceSens >= 2) 8f else 12f,
                     minOnsetDb = if (curVoiceSens >= 2) -46f else -42f,
                 ),

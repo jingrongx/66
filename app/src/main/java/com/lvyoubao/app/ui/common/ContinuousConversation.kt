@@ -97,8 +97,10 @@ class ContinuousConversation(
      * 顺序按实测可用性排：48k/voip 最稳，往下逐级降级。
      */
     private val captureLadder = listOf(
-        CaptureCfg(48_000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "48k/voip"),
+        // MIC 源优先：按住说话走的就是 MIC（MediaRecorder 44.1k），实测波形干净、识别准；
+        // voip 源在没切 MODE_IN_COMMUNICATION 时增益会被拉满，实测峰值 0dBFS 削顶。
         CaptureCfg(48_000, MediaRecorder.AudioSource.MIC, "48k/mic"),
+        CaptureCfg(48_000, MediaRecorder.AudioSource.VOICE_RECOGNITION, "48k/asr"),
         CaptureCfg(16_000, MediaRecorder.AudioSource.MIC, "16k/mic"),
         CaptureCfg(16_000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "16k/voip"),
     )
