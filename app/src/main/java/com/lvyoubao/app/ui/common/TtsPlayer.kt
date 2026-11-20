@@ -275,6 +275,12 @@ object TtsPlayer {
                 return@withContext true
             }
             s.ensureTrack(clip.sampleRate, clip.channels)
+            if (!s.formatMatches(clip.sampleRate, clip.channels)) {
+                // 轨道已经按首句的格式建好了，这一段的采样率/声道数却不一样：
+                // 硬写进去会被按错误的帧长解释，听感就是刺耳的破音。正常不会发生
+                // （Edge 固定 24kHz 单声道），真出现就先记清楚，便于定位。
+                ttsLog("段格式与音轨不一致：${clip.sampleRate}Hz ${clip.channels}ch，已按轨道格式写入")
+            }
             var off = 0
             while (off < pcm.size) {
                 if (gen != generation || !s.alive) return@withContext false
@@ -282,6 +288,8 @@ object TtsPlayer {
                 if (w <= 0) return@withContext false
                 off += w
             }
+            // 这一句写完：短句可能没攒到预滚量，兜底起播（否则要等下一句才出声）
+            s.ensureStarted()
             true
         }
     }
@@ -644,14 +652,24 @@ object TtsPlayer {
 
         private val writtenFrames: Long get() = writtenBytes / (2L * channels)
 
+        /**
+         * 起播前要攒够的 PCM：450ms。
+         * 老实现是「第一次写就 play」，而 MediaCodec 一次只吐 85ms 左右的 PCM——
+         * 缓冲里只有几十毫秒就开始放，而 Edge 的 WSS 推流接近实时（实测 4 秒收 3 秒音频），
+         * 网络稍抖立刻欠载，听感就是某个字突然「破」了（用户反馈的破音就是这么来的）。
+         * 450ms 是折中：足够盖住常见抖动，又不会让首句明显变慢。
+         */
+        private val prerollBytes: Long get() = sampleRate * 2L * channels * 450 / 1000
+
         fun ensureTrack(rate: Int, ch: Int) {
             if (!alive || track != null) return
             sampleRate = if (rate > 0) rate else 24_000
             channels = if (ch > 0) ch else 1
             val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
             val minBuf = AudioTrack.getMinBufferSize(sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT)
-            // 缓冲 ≈2 秒：解码耗时、网络抖动都靠它吸收，写入端永远不会卡住播放头
-            val bufSize = maxOf(minBuf * 4, 96_000)
+            // 缓冲 ≈4 秒：解码耗时、网络抖动都靠它吸收，写入端永远不会卡住播放头。
+            // 0.9.31 起是 96KB（≈2 秒），实测仍会在录音抢麦时出现瞬间欠载，这里加厚到 4 秒。
+            val bufSize = maxOf(minBuf * 4, 192_000)
             track = runCatching {
                 AudioTrack(
                     AudioManager.STREAM_MUSIC, sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT,
@@ -660,6 +678,10 @@ object TtsPlayer {
             }.getOrNull()
             ttsLog("共用音轨就绪：${sampleRate}Hz ${channels}ch 缓冲 ${bufSize}B")
         }
+
+        /** 这一段解码出来的格式跟已建的轨道一致吗（不一致会被按轨道格式解释，直接破音） */
+        fun formatMatches(rate: Int, ch: Int): Boolean =
+            track == null || (rate == sampleRate && ch == channels)
 
         fun writePcm(buf: java.nio.ByteBuffer, size: Int): Int {
             val t = track ?: return -1
@@ -679,9 +701,24 @@ object TtsPlayer {
 
         private fun count(bytes: Int) {
             writtenBytes += bytes
+            // 攒够预滚量才起播；不够就先让它攒着（见 prerollBytes 的说明）
+            if (started || writtenBytes < prerollBytes) return
+            startNow()
+        }
+
+        /** 兜底起播：短句可能永远攒不到预滚量，写完就必须放，否则一直不出声 */
+        fun ensureStarted() {
+            if (started || writtenBytes <= 0) return
+            startNow()
+        }
+
+        private fun startNow() {
             if (started) return
-            started = true
             val t = track ?: return
+            started = true
+            // 记下起播时的预滚量：太小 = 后面容易欠载破音，太大 = 首句变慢，调参全靠这行
+            val prerollMs = (writtenBytes * 1000 / (2L * channels * sampleRate)).toInt()
+            ttsLog("共用音轨起播：预滚 ${prerollMs}ms")
             runCatching { t.play() }
             onStarted()
         }
@@ -689,6 +726,7 @@ object TtsPlayer {
         /** 等播放头追上写入量（= 整段真的播完）；中断时立刻返回 */
         suspend fun awaitDrained() {
             val t = track ?: return
+            ensureStarted()
             if (!started) return
             var lastHead = -1L
             var sameMs = 0L
@@ -882,6 +920,7 @@ object TtsPlayer {
             var drained = false
             var idleAfterEos = 0 // EOS 后解码器一直无输出的空转计数（看门狗：解码器错误卡死时兜底退出）
             var leftover: ByteArray? = null
+            var pendingEos = false // 收到 EOS 但 leftover 还没喂完：等喂完再发 EOS
             try {
                 val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_MPEG)
                 codec = c
@@ -894,12 +933,21 @@ object TtsPlayer {
                         val inIdx = c.dequeueInputBuffer(10_000)
                         if (inIdx >= 0) {
                             val buf = c.getInputBuffer(inIdx)
+                            // 老实现是 `val data = leftover ?: polled`——只要 leftover 非空，
+                            // 刚从队列里 poll 出来的那一帧就再也没人用了，MP3 字节流中间被挖掉一块，
+                            // 解码出来就是某个字突然「破」掉。这里改成「接到 leftover 后面」，
+                            // 一个字节都不许丢；EOS 也先挂起，等 leftover 喂完再发。
                             val polled = input.poll()
-                            val data = leftover ?: polled
-                            if (data === EOS) {
+                            var data = leftover
+                            if (polled === EOS) {
+                                pendingEos = true
+                            } else if (polled != null) {
+                                data = if (data == null) polled else data + polled
+                                leftover = null
+                            }
+                            if (pendingEos && data == null) {
                                 c.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 eosQueued = true
-                                leftover = null
                             } else if (buf != null && data != null) {
                                 val cap = buf.capacity()
                                 if (data.size <= cap) {
@@ -967,6 +1015,8 @@ object TtsPlayer {
                     }
                     if (eosQueued && drained) break
                 }
+                // 流式段收尾：短句可能一直攒不到预滚量，强制起播，别让这一句憋着不出声
+                if (sink != null) sink.ensureStarted()
                 // 等播完：播放头追上写入量（部分 ROM 的回调不可靠，与 playFileAwait 同样用轮询）
                 // 共用音轨时不在这里等——整段回答的收尾由 awaitPlaybackDone 统一等
                 val t = track
