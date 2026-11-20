@@ -73,6 +73,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -122,6 +123,8 @@ fun SparkModeScreen(
 
     // 右上角「设置」进设置页（模式互斥，退出灵动模式只能在这里关开关）
     var showSettings by remember { mutableStateOf(false) }
+    // 触摸节流：手指划过时每个 move 事件都会重排息屏倒计时，没必要
+    var lastTouchAt by remember { mutableStateOf(0L) }
 
     // ---------- 豆包全双工实时通话（端到端 S2S，灵动模式顶栏 📞 直达） ----------
     // 灵动模式没有大字模式那排「通话」按钮，这里给一条独立入口：
@@ -376,6 +379,22 @@ fun SparkModeScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(SparkColors.bgTop, SparkColors.bgBottom))) // 墨玉：顶部微亮、底部近黑
+            // 触摸即「有人在场」：屏幕保持亮着，空闲息屏的倒计时从这一刻重新算。
+            // 用 Initial 阶段旁观，不消费事件，不影响下面任何点击/长按手势。
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.any { it.pressed }) {
+                            val now = System.currentTimeMillis()
+                            if (now - lastTouchAt > 800) {
+                                lastTouchAt = now
+                                com.lvyoubao.app.ui.common.ScreenAwake.idle()
+                            }
+                        }
+                    }
+                }
+            }
             // 倒计时铃响时点屏幕任意空白处停止（按钮类控件自己消费点击，不受影响）
             .pointerInput(Unit) { detectTapGestures { if (alarmActive) vm.stopAlarm() } },
     ) {

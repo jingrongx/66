@@ -117,6 +117,18 @@ fun SettingsScreen(
     var prefsDialog by remember { mutableStateOf(false) }
     var largeFontDialog by remember { mutableStateOf(false) }
     var sparkFontDialog by remember { mutableStateOf(false) }
+    var screenOffDialog by remember { mutableStateOf(false) }
+    // 授权「修改系统设置」回来后补一次：否则改完超时值要重启才生效
+    val writeSettingsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) {
+        if (android.provider.Settings.System.canWrite(context)) {
+            com.lvyoubao.app.ui.common.ScreenAwake.applySystemTimeout(
+                context,
+                state.draft.sparkScreenOffSec,
+            )
+        }
+    }
 
     // 桌面与后台：默认桌面角色
     var isDefaultHome by remember { mutableStateOf(false) }
@@ -311,6 +323,11 @@ fun SettingsScreen(
                             label = "灵动模式字号调节",
                             value = fontScaleLabel(state.draft.sparkFontScale),
                             onClick = { sparkFontDialog = true },
+                        )
+                        PillRow(
+                            label = "空闲息屏",
+                            value = screenOffLabel(state.draft.sparkScreenOffSec),
+                            onClick = { screenOffDialog = true },
                         )
                         Spacer(Modifier.height(10.dp))
                         CardDivider()
@@ -818,10 +835,42 @@ fun SettingsScreen(
             )
         }
 
+        if (screenOffDialog) {
+            ChoiceDialog(
+                title = "空闲息屏",
+                options = listOf(
+                    Triple("0", "常亮", "一直亮屏，最费电（插电使用时可选）"),
+                    Triple("15", "15 秒", "待机 15 秒熄屏，最省电"),
+                    Triple("30", "30 秒", "待机 30 秒熄屏（推荐）"),
+                    Triple("60", "1 分钟", "待机 1 分钟熄屏"),
+                    Triple("120", "2 分钟", "待机 2 分钟熄屏"),
+                ),
+                selected = state.draft.sparkScreenOffSec.toString(),
+                onPick = { value ->
+                    val sec = value.toIntOrNull() ?: 30
+                    vm.updateDraft { it.copy(sparkScreenOffSec = sec) }
+                    vm.save(onSaved = {})
+                    if (sec > 0 && !android.provider.Settings.System.canWrite(context)) {
+                        // 没有这个权限时，应用只能撤掉「保持亮屏」，系统若设成「永不熄屏」就不会灭
+                        runCatching {
+                            writeSettingsLauncher.launch(
+                                android.content.Intent(
+                                    android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                                    android.net.Uri.parse("package:${context.packageName}"),
+                                ),
+                            )
+                        }
+                    } else if (sec > 0) {
+                        com.lvyoubao.app.ui.common.ScreenAwake.applySystemTimeout(context, sec)
+                    }
+                },
+                onDismiss = { screenOffDialog = false },
+            )
+        }
+
         if (themeDialog) {
             ChoiceDialog(
-                title = "外观",
-                options = listOf(
+                title = "外观",                options = listOf(
                     Triple("system", "跟随系统", "跟随手机的深色/浅色开关"),
                     Triple("light", "浅色", "日间模式：白卡片 + 浅灰底"),
                     Triple("dark", "深色", "夜间模式：slate 深色卡片"),
@@ -1067,6 +1116,14 @@ internal fun fontScaleLabel(v: Float): String = when (v) {
     1.15f -> "大一档 115%"
     1.3f -> "特大 130%"
     else -> "${(v * 100).toInt()}%"
+}
+
+/** 空闲息屏时长文案：0 = 常亮，其余按秒显示（满 60 秒进位成分钟） */
+internal fun screenOffLabel(sec: Int): String = when {
+    sec <= 0 -> "常亮"
+    sec < 60 -> "$sec 秒"
+    sec % 60 == 0 -> "${sec / 60} 分钟"
+    else -> "$sec 秒"
 }
 
 /**

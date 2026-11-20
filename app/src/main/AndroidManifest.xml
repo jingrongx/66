@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -11,6 +12,17 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 唤醒亮屏：灵动模式空闲息屏后，喊唤醒词用唤醒锁把屏幕点亮 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+      空闲息屏需要把系统屏幕超时对齐到设定值（WRITE_SETTINGS，可在应用内授权），
+      并关掉「充电时保持唤醒」（WRITE_SECURE_SETTINGS，普通应用拿不到，
+      由部署方用 adb 授权或在 root/系统签名环境预置）。拿不到也不影响应用侧保持亮屏。
+    -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- 卡片分享保存到相册：Android 9 及以下写公共 Pictures 需要存储权限（10+ 走 MediaStore 免授权） -->
     <uses-permission

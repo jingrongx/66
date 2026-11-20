@@ -25,6 +25,7 @@ import com.lvyoubao.app.data.WeatherClient
 import com.lvyoubao.app.ui.common.ContinuousConversation
 import com.lvyoubao.app.ui.common.LocalKws
 import com.lvyoubao.app.ui.common.EdgeTts
+import com.lvyoubao.app.ui.common.ScreenAwake
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
 import kotlinx.coroutines.CancellationException
@@ -242,6 +243,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     /** 点会话消息：重新朗读这条内容（打断当前播报） */
     fun replayMessage(context: Context, text: String) {
         if (text.isBlank()) return
+        ScreenAwake.keepOn() // 点消息重播：屏幕必须亮着，否则「有声音没画面」
         TtsPlayer.stop()
         _eyeState.value = SparkEyeState.SPEAKING
         _statusHint.value = null
@@ -258,6 +260,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             sink(text)
             return
         }
+        ScreenAwake.keepOn() // 要说话了：屏幕不能在这时候熄
         _eyeState.value = SparkEyeState.SPEAKING
         TtsPlayer.speak(context, text)
     }
@@ -1357,6 +1360,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     /** 一遍回答真正播完：回待机眼睛 + 到点（EYES_RETURN_AFTER_MS）自动收起会话流 */
     private fun finishSpeaking() {
         _eyeState.value = if (_isContinuous.value) SparkEyeState.LISTENING else SparkEyeState.IDLE
+        // 一轮对话结束：屏幕进入「空闲 N 秒后熄屏」倒计时
+        ScreenAwake.idle()
         idleToEyesJob?.cancel()
         idleToEyesJob = viewModelScope.launch {
             delay(EYES_RETURN_AFTER_MS)
@@ -1409,6 +1414,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     fun onSparkActive() {
         sparkActive = true
         syncWakeEngine()
+        // 进入待机就开始算空闲：没人管它的话，到点自动熄屏省电；
+        // 喊「小源小源」时 onWakeConfirmed 会把屏幕点亮
+        ScreenAwake.idle()
     }
 
     /**
@@ -1661,6 +1669,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return
         }
         lastWakeConfirmAt = nowHit
+        // 息屏待机时被喊醒：先把屏幕点亮，再出声——
+        // 机器人放在桌上，声音回应了但屏幕黑着，用户会以为它没醒
+        ScreenAwake.wakeUp(appContext)
         _showEyes.value = true
         TtsPlayer.stop() // 唤醒这一刻不要有任何残留播报，免得盖住第一句
         // 回应：一句真人声「我在/在呢/来了」，比原来的电子提示音更像在对话
@@ -1789,6 +1800,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 顺序：本地快路（电量 / 音量）→ 本机意图（机器人、计时、记事、记忆查找）→ 聊天。
      */
     private suspend fun answerVoiceQuestion(clean: String, photos: List<PendingPhoto> = emptyList()) {
+        ScreenAwake.keepOn() // 一轮问答期间屏幕全程亮着，播完再重新计时
         appendMessage(SparkMessage(role = "user", text = clean, photos = photos.map { it.bitmap }))
         _showEyes.value = false // 提问完成，自动切到会话流展示
         _eyeState.value = SparkEyeState.THINKING
@@ -1811,6 +1823,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 15 秒一直没人说话就回待机。拿到的语音交给 handleWakeOnce。
      */
     private fun startWakeOneShot() {
+        ScreenAwake.keepOn() // 正在听人说话，屏幕不能灭
         wakeOnceSession?.stop()
         wakeOnceSession = null
         // 待机监听必须先让出麦克风：一台设备同一时刻只能有一个 AudioRecord。

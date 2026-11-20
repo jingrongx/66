@@ -1,5 +1,6 @@
 package com.lvyoubao.app
 
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -43,6 +44,14 @@ import com.lvyoubao.app.ui.update.UpdateViewModel
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 空闲息屏 / 唤醒亮屏的总开关在设置里，这里只负责把手交给 ScreenAwake。
+        // 息屏后靠录音链路维持待机，人喊唤醒词时用唤醒锁把屏幕点亮；
+        // 27+ 再声明「可在锁屏上显示」+「可点亮屏幕」，免得亮屏后停在锁屏界面。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        com.lvyoubao.app.ui.common.ScreenAwake.bind(this)
         enableEdgeToEdge()
         setContent {
             val app = LocalContext.current.applicationContext as TravelApp
@@ -64,6 +73,28 @@ class MainActivity : ComponentActivity() {
                     com.lvyoubao.app.KeepAliveService.start(this@MainActivity)
                 } else {
                     com.lvyoubao.app.KeepAliveService.stop(this@MainActivity)
+                }
+            }
+            // 灵动模式：空闲息屏 + 唤醒亮屏。
+            // 只有灵动模式接管屏幕（普通/大字模式保持系统原本的息屏行为）。
+            // 这里顺带把系统屏幕超时对齐到设定值——机器人出厂常设成「永不熄屏」，
+            // 不改系统设置的话，应用这边撤了「保持亮屏」屏幕也不会灭。
+            LaunchedEffect(appSettings.sparkMode, appSettings.sparkScreenOffSec) {
+                val spark = appSettings.sparkMode
+                com.lvyoubao.app.ui.common.ScreenAwake.setEnabled(spark)
+                if (spark) {
+                    val sec = appSettings.sparkScreenOffSec
+                    com.lvyoubao.app.ui.common.ScreenAwake.setIdleTimeout(sec * 1000L)
+                    if (sec > 0) {
+                        com.lvyoubao.app.ui.common.ScreenAwake.applySystemTimeout(
+                            this@MainActivity,
+                            sec,
+                        )
+                    }
+                    com.lvyoubao.app.data.LogStore.log(
+                        "screen",
+                        com.lvyoubao.app.ui.common.ScreenAwake.describe(this@MainActivity),
+                    )
                 }
             }
             val density = LocalDensity.current
@@ -135,6 +166,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 屏幕被点亮（按键/唤醒锁/回到前台）后重新计时：
+        // 刚亮就保持亮着，同时从这一刻起算空闲——没人管它，N 秒后照常熄屏
+        com.lvyoubao.app.ui.common.ScreenAwake.idle()
+    }
+
+    override fun onDestroy() {
+        com.lvyoubao.app.ui.common.ScreenAwake.unbind(this)
+        super.onDestroy()
     }
 }
 

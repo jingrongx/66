@@ -50,6 +50,7 @@ class SettingsRepository(private val context: Context) {
         val wakeWordEnabled = booleanPreferencesKey("wake_word_enabled")
         val largeTextFontScale = floatPreferencesKey("large_text_font_scale")
         val sparkFontScale = floatPreferencesKey("spark_font_scale")
+        val sparkScreenOffSec = intPreferencesKey("spark_screen_off_sec")
         val savedProviders = stringPreferencesKey("saved_providers")
         val duplexApiKey = stringPreferencesKey("duplex_api_key")
         val duplexVoice = stringPreferencesKey("duplex_voice")
@@ -96,6 +97,7 @@ class SettingsRepository(private val context: Context) {
             wakeWordEnabled = p[Keys.wakeWordEnabled] ?: true,
             largeTextFontScale = p[Keys.largeTextFontScale] ?: 1.0f,
             sparkFontScale = p[Keys.sparkFontScale] ?: 1.0f,
+            sparkScreenOffSec = p[Keys.sparkScreenOffSec] ?: 30,
             savedProviders = p[Keys.savedProviders]?.let { s ->
                 runCatching { providerJson.decodeFromString<Map<String, ProviderCredentials>>(s) }
                     .getOrDefault(emptyMap())
@@ -149,6 +151,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.wakeWordEnabled] = settings.wakeWordEnabled
             p[Keys.largeTextFontScale] = settings.largeTextFontScale
             p[Keys.sparkFontScale] = settings.sparkFontScale
+            p[Keys.sparkScreenOffSec] = settings.sparkScreenOffSec
             p[Keys.savedProviders] = providerJson.encodeToString(settings.savedProviders)
             p[Keys.duplexApiKey] = settings.duplexApiKey
             p[Keys.duplexVoice] = settings.duplexVoice
