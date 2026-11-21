@@ -16,6 +16,7 @@ import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.QuickAnswers
 import com.lvyoubao.app.data.RichBlocks
 import com.lvyoubao.app.data.observation.FatigueEngine
@@ -23,7 +24,6 @@ import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.MapIntent
 import com.lvyoubao.app.data.MapPoi
 import com.lvyoubao.app.data.MemoryStore
-import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.RouteMode
 import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
@@ -173,12 +173,32 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
      * 豆包全双工一轮对话落会话历史：把用户语音识别稿与模型回答各存一条，
      * 通话中的拍照图片作为该轮 user 消息的附图一起落盘，刷新/重进/导出备份都不丢。
      * 纯语音 S2S 不解析图片内容（那是音视频版能力），图片只作记录随对话保存。
+     *
+     * FC 之后一轮可能分多段收口（模型先说「我查一下」→ 工具 → 再说结果）：
+     * 同一句识别的后续段落就地并进最后一条 assistant，不再叠新卡片。
      */
     fun appendDuplexTurn(asr: String, answer: String, imagePaths: List<String> = emptyList()) {
         if (asr.isBlank() && answer.isBlank() && imagePaths.isEmpty()) return
         viewModelScope.launch {
             var sid = sessions.currentSessionId.firstOrNull()
             if (sid == null || sessions.get(sid) == null) sid = sessions.create().id
+            val msgs = sessions.get(sid)?.messages.orEmpty()
+            val norm = { s: String -> s.filterNot { it.isWhitespace() } }
+            val lastTwo = msgs.takeLast(2)
+            val sameTurn = lastTwo.size == 2 &&
+                lastTwo[0].role == "user" && lastTwo[1].role == "assistant" &&
+                asr.isNotBlank() && norm(lastTwo[0].text) == norm(asr) &&
+                System.currentTimeMillis() - lastTwo[1].ts < 30_000L
+            if (sameTurn && answer.isNotBlank()) {
+                val prev = lastTwo[1].text
+                // 整段重复（同一轮被二次下发）直接吞掉；真是新段落才拼接
+                if (norm(answer) != norm(prev)) {
+                    val merged = if (norm(answer).startsWith(norm(prev))) answer
+                    else prev.trimEnd() + "\n" + answer.trimStart()
+                    sessions.updateLastAssistant(sid, merged)
+                }
+                return@launch
+            }
             val hadImage = imagePaths.isNotEmpty()
             sessions.appendMessage(
                 sid,
@@ -200,6 +220,18 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     ),
                 )
             }
+        }
+    }
+
+    /** 豆包通话开工配置用：当前会话转 OutMessage（DuplexCallSetup 裁成成对 QA 注入记忆） */
+    fun duplexHistory(sid: String?): List<OutMessage> =
+        sessions.get(sid)?.messages.orEmpty().map { OutMessage(role = it.role, text = it.text) }
+
+    /** 通话中 FC 工具带回的地图卡，挂到当前会话最后一条回答上 */
+    fun attachDuplexMapCard(card: com.lvyoubao.app.data.MapCardData) {
+        viewModelScope.launch {
+            val sid = sessions.currentSessionId.firstOrNull() ?: return@launch
+            sessions.attachMapCard(sid, card)
         }
     }
 

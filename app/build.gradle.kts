@@ -17,8 +17,10 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 175
-        versionName = "0.9.52"
+        versionCode = 176
+        versionName = "0.9.53"
+        // 应用名走占位符：debug 构建在 buildTypes 里覆盖成「旅游宝β」，真机上和正式版好区分
+        manifestPlaceholders["appLabel"] = "@string/app_name"
 
         // RNNoise 只编两个 ARM ABI：这台设备是 armeabi-v7a，arm64 兼顾其他机器。
         // x86 只跑模拟器，没必要进包。
@@ -54,6 +56,12 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+        }
+        // 并排安装：debug 包名加后缀，可以和正式签名版共存在同一台设备上真机联调
+        // （release key 只在 CI，本地 debug 签名装不上去覆盖，只能并排）
+        debug {
+            applicationIdSuffix = ".debug"
+            manifestPlaceholders["appLabel"] = "旅游宝β"
         }
     }
 

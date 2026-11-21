@@ -62,6 +62,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -79,10 +80,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.ChatSession
 import com.lvyoubao.app.data.HotwordCorrector
+import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
+import com.lvyoubao.app.data.duplex.DuplexCallSetup
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.SentImageThumbnails
@@ -292,6 +297,10 @@ fun LargeTextScreen(
     var duplexHint by remember { mutableStateOf<String?>(null) }
     // 豆包通话中的拍照缓冲：图片随该轮对话落会话历史（纯语音 S2S 不解析图内容，只作记录）
     var duplexPhotos by remember { mutableStateOf<List<ChatViewModel.PendingAttachment>>(emptyList()) }
+    // 通话中 FC 工具带回的地图卡缓冲：随本轮回答一起挂到会话
+    val duplexMapCards = remember { mutableStateListOf<MapCardData>() }
+    // 上一轮已落库的（识别|回答）指纹：同一轮被重复收口只落一次
+    var lastDuplexTurnKey by remember { mutableStateOf("") }
 
     /** 豆包通话专用：拍照/选图只读附件加入 duplexPhotos，不走 vm 的经典发送链 */
     fun handleDuplexPicked(uri: android.net.Uri) {
@@ -739,21 +748,47 @@ fun LargeTextScreen(
                 is DoubaoDuplexClient.Event.Answer -> {
                     if (ev.isFinal) {
                         duplexAnswer = ev.text
-                        // 一轮结束：ASR + 回答 + 本轮拍的照片一起落会话历史，刷新/导出都不丢
-                        val paths = duplexPhotos.mapNotNull { it.localPath }
-                        vm.appendDuplexTurn(duplexAsr, ev.text, paths)
-                        duplexPhotos = emptyList()
                     } else {
                         // 兼容两种下发：累计快照（新文本以旧文本开头）直接替换，真增量才追加
                         duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
                         else duplexAnswer + ev.text
                     }
                 }
+                // 模型决定调工具（天气/附近/路线）：本地执行，结果回传，模型接着说。
+                // 失败也要回传——不回传模型就一直干等。
+                is DoubaoDuplexClient.Event.ToolCall -> {
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                AppTools.execute(context, settings, ev.name, ev.arguments) { duplexMapCards.add(it) }
+                            }.getOrElse { "工具执行失败：${it.message ?: "未知原因"}。请如实告知用户。" }
+                        }
+                        duplexClient.sendToolResult(ev.callId, result)
+                    }
+                }
+                // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
+                // FC 一轮可能多段收口，ChatViewModel 里会就地并进同一张卡。
+                is DoubaoDuplexClient.Event.TurnDone -> {
+                    duplexAnswer = ev.answer
+                    if (ev.answer.isNotBlank()) {
+                        val key = ev.answer.filterNot { it.isWhitespace() }
+                        if (key != lastDuplexTurnKey) {
+                            lastDuplexTurnKey = key
+                            val paths = duplexPhotos.mapNotNull { it.localPath }
+                            vm.appendDuplexTurn(duplexAsr, ev.answer, paths)
+                            duplexPhotos = emptyList()
+                        }
+                    }
+                    duplexMapCards.lastOrNull()?.let { vm.attachDuplexMapCard(it) }
+                    duplexMapCards.clear()
+                }
                 is DoubaoDuplexClient.Event.SessionReady -> {
                     duplexAsr = ""
                     duplexAnswer = ""
                     duplexHint = null
                     duplexPhotos = emptyList()
+                    duplexMapCards.clear()
+                    lastDuplexTurnKey = ""
                 }
                 is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
                     "CONFIG" -> "未配置豆包实时语音 Key，请到设置里填写后再通话"
@@ -780,7 +815,19 @@ fun LargeTextScreen(
             } else if (!SpeechInput.hasRecordPermission(context)) {
                 duplexHint = "需要麦克风权限才能全双工通话"
             } else {
-                duplexClient.start(settings.duplexApiKey, settings.duplexVoice)
+                // 记忆 + 能力一次带上：人设/长期记忆/时间位置进 instructions，
+                // 共享受话的最近成对 QA 进 dialog_context，天气/附近/路线进 tools
+                val setup = DuplexCallSetup.build(
+                    context,
+                    persona = DuplexCallSetup.PERSONA_TRAVEL,
+                    history = vm.duplexHistory(currentSessionId),
+                )
+                duplexClient.start(
+                    settings.duplexApiKey, settings.duplexVoice,
+                    systemPrompt = setup.instructions,
+                    callTools = setup.tools,
+                    historyContext = setup.dialogContext,
+                )
             }
         }
         onDispose {

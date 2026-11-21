@@ -1,13 +1,23 @@
 package com.lvyoubao.app.data.duplex
 
+import com.lvyoubao.app.data.AppTools
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * dialog_context 里的一条历史（user/assistant 严格成对，官方最多记 20 轮）。
+ * 顶层 public：DuplexProtocol 是 internal，客户端/组装层的公开 API 也要传它。
+ */
+data class DialogTurn(val role: String, val text: String, val ts: Long)
 
 /**
  * 豆包端到端实时语音（Seeduplex，全双工）Realtime 事件协议模型。
@@ -47,7 +57,13 @@ internal object DuplexProtocol {
 
     // ============ 上行事件 ============
 
-    /** 建会话：session.create。extension 三块留空 map，专有配置后续可在此扩展。 */
+    /**
+     * 建会话：session.create。
+     * @param sessionId 断线续接时传 session.created 返回的 id（服务端上下文跟着走）；新会话传随机 id
+     * @param tools Function Calling 工具定义（AppTools.definitions 直传），模型语音里决定要不要调
+     * @param dialogContext 初始化上下文：三种模式共用会话的最近成对 QA。注意续接时不要再传，
+     *   否则服务端已有的上下文 + 注入的历史会双份重复
+     */
     fun sessionCreate(
         sessionId: String,
         instructions: String,
@@ -56,6 +72,8 @@ internal object DuplexProtocol {
         loudness: Int = 0,
         inputType: String = "pcm",
         outputType: String = "pcm_s16le",
+        tools: List<AppTools.ToolDef> = emptyList(),
+        dialogContext: List<DialogTurn> = emptyList(),
     ): String = buildJsonObject {
         put("type", "session.create")
         put("event_id", newEventId())
@@ -80,12 +98,56 @@ internal object DuplexProtocol {
                     put("loudness", loudness)
                 }
             }
+            if (tools.isNotEmpty()) {
+                put("tools", buildJsonArray {
+                    tools.forEach { t ->
+                        add(buildJsonObject {
+                            put("type", "function")
+                            put("name", t.name)
+                            put("description", t.description)
+                            // parameters 是现成的 JSON Schema 字符串，parse 后原样塞入
+                            put("parameters", runCatching { json.parseToJsonElement(t.parameters) }.getOrNull() ?: buildJsonObject {})
+                        })
+                    }
+                })
+            }
         }
         putJsonObject("extension") {
             putJsonObject("asr") { putJsonObject("extra") {} }
             putJsonObject("tts") { putJsonObject("extra") {} }
-            putJsonObject("dialog") { putJsonObject("extra") {} }
+            putJsonObject("dialog") {
+                putJsonObject("extra") {}
+                if (dialogContext.isNotEmpty()) {
+                    put("dialog_context", buildJsonArray {
+                        dialogContext.forEach { t ->
+                            add(buildJsonObject {
+                                put("role", t.role)
+                                put("text", t.text)
+                                put("timestamp", t.ts / 1000)
+                            })
+                        }
+                    })
+                }
+            }
         }
+    }.toString()
+
+    /** FC 结果回传：response.function_call_arguments.done 之后，本地执行完把结果交给模型继续说 */
+    fun toolResult(callId: String, result: String): String = buildJsonObject {
+        put("type", "conversation.item.create")
+        put("event_id", newEventId())
+        put("items", buildJsonArray {
+            add(buildJsonObject {
+                put("call_id", callId)
+                put("role", "tool")
+                put("content", buildJsonArray {
+                    add(buildJsonObject {
+                        put("type", "input_text")
+                        put("text", result)
+                    })
+                })
+            })
+        })
     }.toString()
 
     /** 更新会话（音色/语速/工具等），一次性全量覆盖 */
@@ -146,7 +208,14 @@ internal object DuplexProtocol {
         data class Error(val code: String, val message: String, val type: String) : Downstream
         /** 一轮交互结束（携带用量）。这是播报态切换的权威信号，不依赖 ASR。 */
         data class ResponseDone(val responseId: String, val raw: String) : Downstream
+        /** FC：模型决定调工具，参数已生成完。一次可能带多个调用项。 */
+        data class FunctionCalls(val calls: List<FnCall>) : Downstream
+        /** conversation.item.create 的 ack（上下文/FC 回传成功），仅确认用 */
+        data object ItemAdded : Downstream
     }
+
+    /** 一次函数调用：callId 用于结果回传配对 */
+    data class FnCall(val callId: String, val name: String, val arguments: String)
 
     fun parse(frame: String): Downstream? {
         val root = runCatching { json.parseToJsonElement(frame).jsonObject }.getOrNull() ?: return null
@@ -176,6 +245,19 @@ internal object DuplexProtocol {
             "response.created" -> Downstream.ResponseCreated(s("response_id"))
             "response.canceled" -> Downstream.Interrupted(s("event_id"))
             "response.done" -> Downstream.ResponseDone(s("response_id"), frame)
+            "response.function_call_arguments.done" -> {
+                // items 数组，每项 call_id / name / arguments（arguments 是 JSON 字符串）
+                val calls = (root["items"] as? JsonArray)?.mapNotNull { el ->
+                    val obj = el as? JsonObject ?: return@mapNotNull null
+                    FnCall(
+                        callId = obj["call_id"]?.jsonPrimitive?.content ?: "",
+                        name = obj["name"]?.jsonPrimitive?.content ?: "",
+                        arguments = obj["arguments"]?.jsonPrimitive?.content ?: "{}",
+                    )
+                }.orEmpty().filter { it.callId.isNotBlank() && it.name.isNotBlank() }
+                Downstream.FunctionCalls(calls)
+            }
+            "conversation.item.added" -> Downstream.ItemAdded
             "error" -> {
                 val err = root["error"]?.jsonObject
                 Downstream.Error(

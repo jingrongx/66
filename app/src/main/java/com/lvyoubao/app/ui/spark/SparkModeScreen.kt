@@ -57,6 +57,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -91,12 +92,17 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.R
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.ui.map.RouteMapCard
+import com.lvyoubao.app.data.AppTools
+import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
+import com.lvyoubao.app.data.duplex.DuplexCallSetup
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.largetext.DoubaoCallOverlay
 import com.lvyoubao.app.ui.settings.SettingsScreen
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
@@ -146,6 +152,8 @@ fun SparkModeScreen(
     // 本轮已被本机能力接走的识别文本：模型那条迟到的回答不再落第二张卡片
     var localHandledAsr by remember { mutableStateOf("") }
     var localHandledAt by remember { mutableStateOf(0L) }
+    // 通话中 FC 工具带回的地图卡缓冲：随本轮回答一起挂到会话
+    val duplexMapCards = remember { mutableStateListOf<MapCardData>() }
     val callScope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -186,6 +194,30 @@ fun SparkModeScreen(
                     lastVoiceAt = System.currentTimeMillis()
                     if (ev.isFinal) {
                         duplexAnswer = ev.text
+                    } else {
+                        // 兼容两种下发：累计快照直接替换，真增量才追加
+                        duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
+                        else duplexAnswer + ev.text
+                    }
+                }
+                // 模型决定调工具（天气/附近/路线）：本地执行，结果回传，模型接着说。
+                // 机器人动作/电量/计时这类本机能力不走 FC——Asr final 时已经抢先本地执行了。
+                is DoubaoDuplexClient.Event.ToolCall -> {
+                    lastVoiceAt = System.currentTimeMillis()
+                    callScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                AppTools.execute(context, settings, ev.name, ev.arguments) { duplexMapCards.add(it) }
+                            }.getOrElse { "工具执行失败：${it.message ?: "未知原因"}。请如实告知用户。" }
+                        }
+                        duplexClient.sendToolResult(ev.callId, result)
+                    }
+                }
+                // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
+                is DoubaoDuplexClient.Event.TurnDone -> {
+                    lastVoiceAt = System.currentTimeMillis()
+                    duplexAnswer = ev.answer
+                    if (ev.answer.isNotBlank()) {
                         // 本轮若已被本机能力接走（并已 cancelResponse），模型这条是残留的下发：
                         // 只在通话界面显示，不再往会话里落第二张卡片。
                         val handledLocally = duplexAsr.isNotBlank() &&
@@ -193,18 +225,17 @@ fun SparkModeScreen(
                             System.currentTimeMillis() - localHandledAt < 15_000L
                         if (!handledLocally) {
                             // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
-                            SparkChatStore.appendDuplexTurn(duplexAsr, ev.text)
+                            SparkChatStore.appendDuplexTurn(duplexAsr, ev.answer)
                         }
-                    } else {
-                        // 兼容两种下发：累计快照直接替换，真增量才追加
-                        duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
-                        else duplexAnswer + ev.text
                     }
+                    duplexMapCards.lastOrNull()?.let { SparkChatStore.attachMapCard(it) }
+                    duplexMapCards.clear()
                 }
                 is DoubaoDuplexClient.Event.SessionReady -> {
                     duplexAsr = ""
                     duplexAnswer = ""
                     duplexHint = null
+                    duplexMapCards.clear()
                 }
                 is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
                     "CONFIG" -> "未配置豆包实时语音 Key，请到设置 → 凭证中心 → 豆包 填写"
@@ -232,7 +263,19 @@ fun SparkModeScreen(
             } else if (!SpeechInput.hasRecordPermission(context)) {
                 duplexHint = "需要麦克风权限才能全双工通话"
             } else {
-                duplexClient.start(settings.duplexApiKey, settings.duplexVoice)
+                // 记忆 + 能力一次带上：小源人设/长期记忆/时间位置进 instructions，
+                // 共享受话的最近成对 QA 进 dialog_context，天气/附近/路线进 tools
+                val setup = DuplexCallSetup.build(
+                    context,
+                    persona = DuplexCallSetup.PERSONA_SPARK,
+                    history = SparkChatStore.historyBudget(8_000),
+                )
+                duplexClient.start(
+                    settings.duplexApiKey, settings.duplexVoice,
+                    systemPrompt = setup.instructions,
+                    callTools = setup.tools,
+                    historyContext = setup.dialogContext,
+                )
             }
         }
         onDispose {

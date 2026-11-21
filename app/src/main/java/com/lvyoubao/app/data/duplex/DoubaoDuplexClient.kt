@@ -3,9 +3,11 @@ package com.lvyoubao.app.data.duplex
 import android.content.Context
 import android.util.Base64
 import android.util.Log
+import com.lvyoubao.app.data.AppTools
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -51,6 +53,13 @@ class DoubaoDuplexClient(private val context: Context) {
         data class Level(val value: Float) : Event
         data class Error(val code: String, val message: String) : Event
         data object SessionReady : Event
+        /** 模型决定调工具（FC）：本地执行完用 sendToolResult 回传，模型再接着说 */
+        data class ToolCall(val callId: String, val name: String, val arguments: String) : Event
+        /**
+         * 一轮回答收口（response.done / 被打断时的残句）。落会话历史以这个为准：
+         * TextDone 不一定到（纯音频段、被打断），answer 是本轮已生成的全文/残文。
+         */
+        data class TurnDone(val answer: String, val interrupted: Boolean) : Event
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -64,6 +73,17 @@ class DoubaoDuplexClient(private val context: Context) {
     private var apiKey: String = ""
     private var voice: String = DuplexProtocol.VOICE_VIVI
     private var dialogId: String = ""
+    /** FC 工具定义 + 初始化上下文：start 时传入，建会话时带上 */
+    private var tools: List<AppTools.ToolDef> = emptyList()
+    private var dialogContext: List<DialogTurn> = emptyList()
+    /** 下一次建会话是否续接（断线自愈复用 dialogId，且不再注入上下文防重复） */
+    private var resumeNext = false
+    /** 断线自愈次数：每次 start 重置，最多一次，避免弱网下无限重连 */
+    private var retries = 0
+    /** 本轮回答文本累积：TurnDone 的权威来源（TextDone 可能不来，如被打断/纯音频段） */
+    private val turnText = StringBuilder()
+    /** 本地 speech_text（打招呼/干预回复）触发的 response 周期数：不是模型回答，不外发 TurnDone */
+    private var localSpeechCycles = 0
     @Volatile private var muted = false
     @Volatile private var userSpeaking = false
 
@@ -78,11 +98,16 @@ class DoubaoDuplexClient(private val context: Context) {
         override fun onOpen(ws: WebSocket, response: Response) {
             Log.d(TAG, "WS 已连接 logid=${response.header("X-Tt-Logid") ?: "-"}")
             setState(State.CONNECTED)
-            // 建连成功后立刻建会话
+            // 建连成功后立刻建会话。断线自愈时复用上次 dialogId（服务端上下文还在），
+            // 并跳过 dialog_context 注入——同一份历史注入两遍，模型会把旧话当新事说。
+            val resuming = resumeNext
+            resumeNext = false
             ws.send(DuplexProtocol.sessionCreate(
-                sessionId = DuplexProtocol.newSessionId(),
+                sessionId = if (resuming && dialogId.isNotBlank()) dialogId else DuplexProtocol.newSessionId(),
                 instructions = instructions,
                 voice = voice,
+                tools = tools,
+                dialogContext = if (resuming) emptyList() else dialogContext,
             ))
         }
 
@@ -91,6 +116,7 @@ class DoubaoDuplexClient(private val context: Context) {
             when (ev) {
                 is DuplexProtocol.Downstream.SessionCreated -> {
                     dialogId = ev.id
+                    retries = 0
                     Log.d(TAG, "session.created dialogId=$dialogId")
                     startAudio(ws)
                     _events.tryEmit(Event.SessionReady)
@@ -102,6 +128,9 @@ class DoubaoDuplexClient(private val context: Context) {
                     // ASR 只做本地停播（插话手感），不切 SPEAKING/LISTENING：
                     // 官方明确播放状态机与 ASR 解耦，状态只由 response.created/done/canceled 驱动。
                     audio?.flushPlayback()
+                    // 用户开新话头：还挂着的本地话术标记作废（speech_text 被打断时不会有 response 周期来消耗它），
+                    // 不清零的话下一个真实回答会被误吞一次。
+                    localSpeechCycles = 0
                 }
                 is DuplexProtocol.Downstream.AsrDelta ->
                     _events.tryEmit(Event.Asr(ev.delta, isFinal = false))
@@ -109,13 +138,24 @@ class DoubaoDuplexClient(private val context: Context) {
                     _events.tryEmit(Event.Asr(ev.transcript, isFinal = true))
                     userSpeaking = false
                 }
-                is DuplexProtocol.Downstream.TextDelta ->
+                is DuplexProtocol.Downstream.TextDelta -> {
+                    turnText.append(ev.delta)
                     _events.tryEmit(Event.Answer(ev.delta, isFinal = false))
-                is DuplexProtocol.Downstream.TextDone ->
+                }
+                is DuplexProtocol.Downstream.TextDone -> {
+                    // 累积快照以 done 的全文为准；空 done（纯音频段）不动已有增量
+                    if (ev.text.isNotBlank()) {
+                        turnText.setLength(0)
+                        turnText.append(ev.text)
+                    }
                     _events.tryEmit(Event.Answer(ev.text, isFinal = true))
+                }
                 // 播报开始：Seeduplex 用 output_audio.started；Realtime-1.0 用 response.created。
                 // 两者都纳入，谁先到谁触发，避免跨模型切换时状态机失灵。
-                is DuplexProtocol.Downstream.ResponseCreated -> setState(State.SPEAKING)
+                is DuplexProtocol.Downstream.ResponseCreated -> {
+                    turnText.setLength(0)
+                    setState(State.SPEAKING)
+                }
                 is DuplexProtocol.Downstream.AudioStarted -> setState(State.SPEAKING)
                 is DuplexProtocol.Downstream.AudioDelta -> audio?.enqueuePlayback(ev.pcm)
                 is DuplexProtocol.Downstream.AudioDone -> {
@@ -125,11 +165,15 @@ class DoubaoDuplexClient(private val context: Context) {
                 is DuplexProtocol.Downstream.ResponseDone -> {
                     Log.d(TAG, "response.done 一轮结束 responseId=${ev.responseId}")
                     setState(State.LISTENING)
+                    finishTurn(interrupted = false)
                 }
                 is DuplexProtocol.Downstream.Interrupted -> {
                     audio?.flushPlayback()
                     setState(State.LISTENING)
+                    finishTurn(interrupted = true)
                 }
+                is DuplexProtocol.Downstream.FunctionCalls ->
+                    ev.calls.forEach { _events.tryEmit(Event.ToolCall(it.callId, it.name, it.arguments)) }
                 is DuplexProtocol.Downstream.SessionClosed -> {
                     Log.d(TAG, "session.closed，可以安全断连")
                     finishClose()
@@ -148,16 +192,43 @@ class DoubaoDuplexClient(private val context: Context) {
 
         override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
             Log.e(TAG, "WS 失败：${t.message}", t)
+            val wasMidCall = _state.value in listOf(State.CONNECTED, State.LISTENING, State.SPEAKING)
             _events.tryEmit(Event.Error(code = "-1", message = t.message ?: "网络错误"))
             setState(State.ERROR)
             audio?.stop()
             audio = null
+            // 通话中意外断线：带原 dialogId 静默自愈一次（这台设备 WiFi 偶发掉线，
+            // 用户听到的就是「突然没反应」）。主动挂断走 close()，不会进这里。
+            if (wasMidCall && retries < 1 && apiKey.isNotBlank()) {
+                retries++
+                Log.w(TAG, "通话中意外断线，1.2 秒后自动续接 dialogId=$dialogId")
+                scope.launch {
+                    delay(1_200)
+                    if (_state.value == State.ERROR) {
+                        resumeNext = true
+                        setState(State.CONNECTING)
+                        connect()
+                    }
+                }
+            }
         }
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "WS 已关闭 code=$code reason=$reason")
             if (_state.value != State.CLOSED) finishClose()
         }
+    }
+
+    /** 一个 response 周期收口：把累积文本作为 TurnDone 交给上层落会话历史 */
+    private fun finishTurn(interrupted: Boolean) {
+        val text = turnText.toString()
+        turnText.setLength(0)
+        // 本地话术（打招呼/干预回复）的合成周期：不走会话历史
+        if (localSpeechCycles > 0) {
+            localSpeechCycles--
+            return
+        }
+        if (text.isNotBlank()) _events.tryEmit(Event.TurnDone(text, interrupted))
     }
 
     private var instructions: String = "你是旅游宝，一个简洁、口语化、带数字的随身助手。回答尽量短，像朋友聊天。"
@@ -172,9 +243,17 @@ class DoubaoDuplexClient(private val context: Context) {
      * 建连并开始全双工对话。
      * @param key 实时语音 API Key（豆包语音控制台创建，X-Api-Key）
      * @param voiceId 音色 ID，见 DuplexProtocol.VOICES
-     * @param systemPrompt 系统提示词（≤64K tokens 含上下文/FC）
+     * @param systemPrompt 系统提示词（人设 + 长期记忆 + 时间/位置情境，≤64K tokens 含上下文/FC）
+     * @param callTools Function Calling 工具（AppTools.definitions），语音里模型自己决定调用
+     * @param historyContext 初始化上下文：共享受话数据的最近成对 QA（跨模式/跨通话记忆）
      */
-    fun start(key: String, voiceId: String = voice, systemPrompt: String? = null): Boolean {
+    fun start(
+        key: String,
+        voiceId: String = voice,
+        systemPrompt: String? = null,
+        callTools: List<AppTools.ToolDef> = emptyList(),
+        historyContext: List<DialogTurn> = emptyList(),
+    ): Boolean {
         if (key.isBlank()) {
             _events.tryEmit(Event.Error("CONFIG", "未配置实时语音 API Key"))
             return false
@@ -186,14 +265,21 @@ class DoubaoDuplexClient(private val context: Context) {
         apiKey = key
         voice = voiceId
         if (systemPrompt != null) instructions = systemPrompt
+        tools = callTools
+        dialogContext = historyContext
+        retries = 0
+        resumeNext = false
         setState(State.CONNECTING)
+        connect()
+        return true
+    }
 
+    private fun connect() {
         val request = Request.Builder()
             .url(DuplexProtocol.WS_URL)
             .addHeader("X-Api-Key", apiKey)
             .build()
         webSocket = client.newWebSocket(request, listener)
-        return true
     }
 
     private fun startAudio(ws: WebSocket) {
@@ -242,9 +328,17 @@ class DoubaoDuplexClient(private val context: Context) {
     }
 
     fun greet(text: String) {
+        // 标记一个本地话术周期：这段音频对应的服务端 response 不算「模型回答」，
+        // 否则打招呼文本会被 TurnDone 当成模型回答落进会话历史。
+        localSpeechCycles++
         val sid = DuplexProtocol.newSessionId()
         webSocket?.send(DuplexProtocol.speechText("speech_text_buffer.append", sid, text))
         webSocket?.send(DuplexProtocol.speechText("speech_text_buffer.commit", sid, ""))
+    }
+
+    /** FC 结果回传：本地工具执行完（成功或失败都要）把结果交给模型，模型基于结果继续生成语音 */
+    fun sendToolResult(callId: String, result: String) {
+        webSocket?.send(DuplexProtocol.toolResult(callId, result))
     }
 
     /** 优雅关闭：先停采集，再发 session.close，等服务端 session.closed 后再断连 */
