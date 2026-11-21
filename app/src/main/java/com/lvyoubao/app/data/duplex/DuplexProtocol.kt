@@ -1,6 +1,7 @@
 package com.lvyoubao.app.data.duplex
 
 import com.lvyoubao.app.data.AppTools
+import com.lvyoubao.app.data.RobotIntent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -74,6 +75,8 @@ internal object DuplexProtocol {
         outputType: String = "pcm_s16le",
         tools: List<AppTools.ToolDef> = emptyList(),
         dialogContext: List<DialogTurn> = emptyList(),
+        dialect: String = "",
+        music: Boolean = false,
     ): String = buildJsonObject {
         put("type", "session.create")
         put("event_id", newEventId())
@@ -114,9 +117,16 @@ internal object DuplexProtocol {
         }
         putJsonObject("extension") {
             putJsonObject("asr") { putJsonObject("extra") {} }
-            putJsonObject("tts") { putJsonObject("extra") {} }
+            putJsonObject("tts") {
+                putJsonObject("extra") {
+                    // 方言：仅 4 个精品音色支持（东北/四川/陕西/粤语/北京/河南/天津/上海）
+                    if (dialect.isNotBlank()) put("explicit_dialect", dialect)
+                }
+            }
             putJsonObject("dialog") {
-                putJsonObject("extra") {}
+                putJsonObject("extra") {
+                    if (music) put("enable_music", true)
+                }
                 if (dialogContext.isNotEmpty()) {
                     put("dialog_context", buildJsonArray {
                         dialogContext.forEach { t ->
@@ -131,6 +141,9 @@ internal object DuplexProtocol {
             }
         }
     }.toString()
+
+    /** 识别流里的即时急停判定：交给 RobotIntent 的急停词表（停/别动/站住…，含否定句排除） */
+    fun instantStopHit(text: String): Boolean = RobotIntent.matchStopFast(text)
 
     /** FC 结果回传：response.function_call_arguments.done 之后，本地执行完把结果交给模型继续说 */
     fun toolResult(callId: String, result: String): String = buildJsonObject {

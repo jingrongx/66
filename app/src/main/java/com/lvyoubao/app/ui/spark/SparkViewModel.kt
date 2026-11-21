@@ -1524,6 +1524,25 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /** 通话落库后触发：通话也是会话，攒够新 user 消息就总结进长期画像（与文本聊天同口径） */
+    fun summarizeCallTurns() {
+        val settingsNow = settings.value
+        if (settingsNow.apiKey.isBlank()) return
+        viewModelScope.launch {
+            runCatching {
+                val store = (appContext as? com.lvyoubao.app.TravelApp)?.sessionStore ?: return@launch
+                val sid = repo.currentSessionId.firstOrNull() ?: return@launch
+                val session = store.get(sid) ?: return@launch
+                val userCount = session.messages.count { it.role == "user" }
+                if (userCount == 0 || userCount <= session.summarizedUserCount) return@launch
+                if (userCount - session.summarizedUserCount < 3) return@launch
+                if (memory.updateProfileFromSession(session, settingsNow)) {
+                    store.updateSummarizedUserCount(sid, userCount)
+                }
+            }
+        }
+    }
+
     /**
      * 全双工通话开关：通话期间把麦克风整条链路让给豆包客户端，
      * 停朗读、停连聊、停待机唤醒监听；挂断后按原设置恢复唤醒监听。

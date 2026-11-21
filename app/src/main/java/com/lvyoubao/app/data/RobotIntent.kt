@@ -203,6 +203,36 @@ object RobotIntent {
         单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、NOD 2、SHAKE 1、BOW、LOOK_AROUND、LOOK、BATTERY、TIMER 900 关火、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、CONTINUOUS_OFF、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
     """.trimIndent()
 
+    /**
+     * FC 工具的 actions JSON → 文本指令行（复用 parseReply 的解析/钳制/展开管线）。
+     * part 映射：nod→NOD 次数、shake→SHAKE 次数、bow→BOW、look_around→LOOK_AROUND、
+     * head/move/turn→HEAD/MOVE/TURN 数值、stop→STOP。
+     */
+    fun actionsToJsonCommands(argumentsJson: String): String {
+        val out = mutableListOf<String>()
+        runCatching {
+            val arr = kotlinx.serialization.json.Json.parseToJsonElement(argumentsJson.ifBlank { "{}" })
+                .let { it as? kotlinx.serialization.json.JsonObject }?.get("actions")
+                as? kotlinx.serialization.json.JsonArray ?: return ""
+            for (el in arr) {
+                val obj = el as? kotlinx.serialization.json.JsonObject ?: continue
+                fun s(k: String) = (obj[k] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                fun n(k: String) = (obj[k] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull()
+                when (s("part")?.lowercase()) {
+                    "nod" -> out += "NOD ${(n("reps") ?: 1.0).toInt()}"
+                    "shake" -> out += "SHAKE ${(n("reps") ?: 1.0).toInt()}"
+                    "bow" -> out += "BOW"
+                    "look_around" -> out += "LOOK_AROUND"
+                    "head" -> out += "HEAD ${(n("value") ?: 0.0).toInt()}"
+                    "move" -> out += "MOVE ${(n("value") ?: 30.0).toInt()}"
+                    "turn" -> out += "TURN ${(n("value") ?: 90.0).toInt()}"
+                    "stop" -> out += "STOP"
+                }
+            }
+        }
+        return out.joinToString("\n")
+    }
+
     /** AI 解析：超 8 秒或网络/服务失败一律返回空表（回落聊天，控制不能卡死语音主流程） */
     suspend fun parse(text: String, settings: AiSettings): List<Command> {
         val reply = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
@@ -237,11 +267,13 @@ object RobotIntent {
                 }
                 continue
             }
-            // TIMER 带提醒事项（「TIMER 900 关火」）：先于通用动作行单独抠
+            // TIMER 带提醒事项（「TIMER 900 关火」）：先于通用动作行单独抠。
+            // 注意取「秒数组之后」的余文：整 match 的 range 会吞到行尾，label 永远空串
             val timerM = Regex("^TIMER\\s+(\\d{1,6})\\s*(.*)$").find(upper)
             if (timerM != null) {
                 val sec = timerM.groupValues[1].toIntOrNull() ?: 60
-                val label = upper.substring(timerM.range.last + 1).trim()
+                val label = timerM.groups[1]?.range?.last
+                    ?.let { upper.substring(it + 1) }?.trim().orEmpty()
                 out += Command.Timer(sec, label)
                 continue
             }

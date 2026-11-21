@@ -56,6 +56,11 @@ class DoubaoDuplexClient(private val context: Context) {
         /** 模型决定调工具（FC）：本地执行完用 sendToolResult 回传，模型再接着说 */
         data class ToolCall(val callId: String, val name: String, val arguments: String) : Event
         /**
+         * 识别流里蹦出急停词（停/别动…）：客户端已 flush 播放 + response.cancel，
+         * 上层再把机器人也停住——急停不等句尾判停。
+         */
+        data object StopRequested : Event
+        /**
          * 一轮回答收口（response.done / 被打断时的残句）。落会话历史以这个为准：
          * TextDone 不一定到（纯音频段、被打断），answer 是本轮已生成的全文/残文。
          * asr 是本轮回答对应的用户识别稿——response 开始时冻结的快照。全双工下
@@ -91,6 +96,11 @@ class DoubaoDuplexClient(private val context: Context) {
     private var pendingAsr = ""
     /** 本轮 response 开始时冻结的识别稿：TurnDone 随事件带给上层落库 */
     private var turnAsr = ""
+    /** 本话头是否还允许触发即时急停（一个话头只触发一次，防重复 cancel） */
+    private var stopArmed = true
+    /** 方言（explicit_dialect，空=关）与唱歌开关 */
+    private var dialect: String = ""
+    private var music: Boolean = false
     @Volatile private var muted = false
     @Volatile private var userSpeaking = false
 
@@ -115,6 +125,8 @@ class DoubaoDuplexClient(private val context: Context) {
                 voice = voice,
                 tools = tools,
                 dialogContext = if (resuming) emptyList() else dialogContext,
+                dialect = dialect,
+                music = music,
             ))
         }
 
@@ -132,6 +144,7 @@ class DoubaoDuplexClient(private val context: Context) {
                 is DuplexProtocol.Downstream.AsrStarted -> {
                     userSpeaking = true
                     pendingAsr = ""
+                    stopArmed = true
                     _events.tryEmit(Event.AsrStarted)
                     // ASR 只做本地停播（插话手感），不切 SPEAKING/LISTENING：
                     // 官方明确播放状态机与 ASR 解耦，状态只由 response.created/done/canceled 驱动。
@@ -144,6 +157,14 @@ class DoubaoDuplexClient(private val context: Context) {
                     // delta 是本轮识别的累计快照（真机抓包确认），直接覆盖
                     pendingAsr = ev.delta
                     _events.tryEmit(Event.Asr(ev.delta, isFinal = false))
+                    // 即时急停：识别流里一出现停类词立刻停播+取消回答，不等句尾判停
+                    if (stopArmed && DuplexProtocol.instantStopHit(ev.delta)) {
+                        stopArmed = false
+                        Log.w(TAG, "识别流命中急停词：「$pendingAsr」，立即停播并取消回答")
+                        audio?.flushPlayback()
+                        ws.send(DuplexProtocol.simple("response.cancel"))
+                        _events.tryEmit(Event.StopRequested)
+                    }
                 }
                 is DuplexProtocol.Downstream.AsrCompleted -> {
                     Log.d(TAG, "ASR final：${ev.transcript.take(40)}")
@@ -201,8 +222,11 @@ class DoubaoDuplexClient(private val context: Context) {
                     Log.e(TAG, "服务端 error code=${ev.code} msg=${ev.message}")
                     _events.tryEmit(Event.Error(ev.code, ev.message))
                     if (ev.code.startsWith("5")) {
-                        // 5xx 统一重连（demo 最佳实践），这里只记录，重连交给上层
+                        // 5xx 统一重连（demo 最佳实践）：静默自愈一次
                         setState(State.ERROR)
+                        audio?.stop()
+                        audio = null
+                        selfHeal("服务端 5xx（code=${ev.code}）")
                     }
                 }
                 else -> Unit
@@ -218,18 +242,7 @@ class DoubaoDuplexClient(private val context: Context) {
             audio = null
             // 通话中意外断线：带原 dialogId 静默自愈一次（这台设备 WiFi 偶发掉线，
             // 用户听到的就是「突然没反应」）。主动挂断走 close()，不会进这里。
-            if (wasMidCall && retries < 1 && apiKey.isNotBlank()) {
-                retries++
-                Log.w(TAG, "通话中意外断线，1.2 秒后自动续接 dialogId=$dialogId")
-                scope.launch {
-                    delay(1_200)
-                    if (_state.value == State.ERROR) {
-                        resumeNext = true
-                        setState(State.CONNECTING)
-                        connect()
-                    }
-                }
-            }
+            if (wasMidCall) selfHeal("通话中意外断线")
         }
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
@@ -271,8 +284,10 @@ class DoubaoDuplexClient(private val context: Context) {
      * @param key 实时语音 API Key（豆包语音控制台创建，X-Api-Key）
      * @param voiceId 音色 ID，见 DuplexProtocol.VOICES
      * @param systemPrompt 系统提示词（人设 + 长期记忆 + 时间/位置情境，≤64K tokens 含上下文/FC）
-     * @param callTools Function Calling 工具（AppTools.definitions），语音里模型自己决定调用
+     * @param callTools Function Calling 工具（AppTools.definitions 等），语音里模型自己决定调用
      * @param historyContext 初始化上下文：共享受话数据的最近成对 QA（跨模式/跨通话记忆）
+     * @param dialect 方言（explicit_dialect，空=普通话；仅 4 个精品音色支持）
+     * @param music 唱歌能力开关（enable_music）
      */
     fun start(
         key: String,
@@ -280,6 +295,8 @@ class DoubaoDuplexClient(private val context: Context) {
         systemPrompt: String? = null,
         callTools: List<AppTools.ToolDef> = emptyList(),
         historyContext: List<DialogTurn> = emptyList(),
+        dialect: String = "",
+        music: Boolean = false,
     ): Boolean {
         if (key.isBlank()) {
             _events.tryEmit(Event.Error("CONFIG", "未配置实时语音 API Key"))
@@ -294,6 +311,8 @@ class DoubaoDuplexClient(private val context: Context) {
         if (systemPrompt != null) instructions = systemPrompt
         tools = callTools
         dialogContext = historyContext
+        this.dialect = dialect
+        this.music = music
         retries = 0
         resumeNext = false
         setState(State.CONNECTING)
@@ -307,6 +326,25 @@ class DoubaoDuplexClient(private val context: Context) {
             .addHeader("X-Api-Key", apiKey)
             .build()
         webSocket = client.newWebSocket(request, listener)
+    }
+
+    /** 断线/5xx 静默自愈：带原 dialogId 重连（每次通话最多一次），复用服务端上下文 */
+    private fun selfHeal(reason: String) {
+        if (retries >= 1 || apiKey.isBlank()) return
+        retries++
+        Log.w(TAG, "$reason，1.2 秒后自动续接 dialogId=$dialogId")
+        scope.launch {
+            delay(1_200)
+            if (_state.value == State.ERROR) {
+                webSocket?.cancel()
+                webSocket = null
+                audio?.stop()
+                audio = null
+                resumeNext = true
+                setState(State.CONNECTING)
+                connect()
+            }
+        }
     }
 
     private fun startAudio(ws: WebSocket) {

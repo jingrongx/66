@@ -2,6 +2,7 @@ package com.lvyoubao.app
 
 import android.app.Application
 import com.lvyoubao.app.data.AutoUpdater
+import com.lvyoubao.app.data.CallTimer
 import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.MemoryStore
 import com.lvyoubao.app.data.NoteStore
@@ -22,6 +23,8 @@ class TravelApp : Application() {
         super.onCreate()
         // 运行日志：朗读链路等关键事件落本机文件，设置页可一键导出分享（排查「为什么不播」）
         LogStore.init(filesDir)
+        // 通话 FC 的共享倒计时到点要开口说话，先喂 applicationContext
+        CallTimer.attach(this)
         val ver = runCatching {
             val pi = packageManager.getPackageInfo(packageName, 0)
             "v${pi.versionName}(${pi.longVersionCode})"

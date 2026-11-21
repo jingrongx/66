@@ -93,11 +93,13 @@ import com.lvyoubao.app.R
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.ui.map.RouteMapCard
 import com.lvyoubao.app.data.AppTools
+import com.lvyoubao.app.data.DeviceTools
 import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
 import com.lvyoubao.app.data.duplex.DuplexCallSetup
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.largetext.DoubaoCallOverlay
+import com.lvyoubao.app.ui.largetext.DuplexTurnUi
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -154,7 +156,28 @@ fun SparkModeScreen(
     var localHandledAt by remember { mutableStateOf(0L) }
     // 通话中 FC 工具带回的地图卡缓冲：随本轮回答一起挂到会话
     val duplexMapCards = remember { mutableStateListOf<MapCardData>() }
+    // 通话会话流（识别=右、回答=左），覆盖层直接渲染
+    val duplexTurns = remember { mutableStateListOf<DuplexTurnUi>() }
     val callScope = rememberCoroutineScope()
+
+    fun duplexNewUserTurn() {
+        duplexTurns.add(DuplexTurnUi("user", "", streaming = true))
+        if (duplexTurns.size > 30) duplexTurns.removeAt(0)
+    }
+    fun duplexUpdateUser(text: String) {
+        val i = duplexTurns.lastIndex
+        if (i >= 0 && duplexTurns[i].role == "user") duplexTurns[i] = duplexTurns[i].copy(text = text)
+        else { duplexNewUserTurn(); duplexUpdateUser(text) }
+    }
+    fun duplexUpdateAssistant(text: String, done: Boolean) {
+        val i = duplexTurns.lastIndex
+        if (i >= 0 && duplexTurns[i].role == "assistant") {
+            duplexTurns[i] = duplexTurns[i].copy(text = text, streaming = !done)
+        } else {
+            duplexTurns.add(DuplexTurnUi("assistant", text, streaming = !done))
+            if (duplexTurns.size > 30) duplexTurns.removeAt(0)
+        }
+    }
 
     LaunchedEffect(Unit) {
         duplexClient.onEvent.collect { ev ->
@@ -162,11 +185,13 @@ fun SparkModeScreen(
                 // 服务端切新 item = 新一轮说话：上一轮的识别文字先清掉，避免跨轮越滚越长
                 is DoubaoDuplexClient.Event.AsrStarted -> {
                     duplexAsr = ""
+                    duplexNewUserTurn()
                 }
                 // 注意：豆包的 transcription.delta 是「累计快照」而不是增量，直接覆盖；
                 // 早前用 += 拼会出现「你你好你好啊」这种叠字。
                 is DoubaoDuplexClient.Event.Asr -> {
                     duplexAsr = ev.text
+                    duplexUpdateUser(ev.text)
                     lastVoiceAt = System.currentTimeMillis()
                     // 界面收起时只要有人开口，就把通话界面拉回来（通话一直没断）
                     if (!callUiVisible && ev.text.isNotBlank()) {
@@ -183,9 +208,11 @@ fun SparkModeScreen(
                                 duplexClient.cancelResponse()
                                 duplexClient.speak(confirm)
                                 duplexAnswer = confirm
+                                duplexUpdateAssistant(confirm, done = true)
                                 localHandledAsr = said
                                 localHandledAt = System.currentTimeMillis()
                                 SparkChatStore.appendDuplexTurn(said, confirm)
+                                vm.summarizeCallTurns()
                             }
                         }
                     }
@@ -199,24 +226,38 @@ fun SparkModeScreen(
                         duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
                         else duplexAnswer + ev.text
                     }
+                    duplexUpdateAssistant(duplexAnswer, done = ev.isFinal)
                 }
                 // 模型决定调工具（天气/附近/路线）：本地执行，结果回传，模型接着说。
                 // 机器人动作/电量/计时这类本机能力不走 FC——Asr final 时已经抢先本地执行了。
                 is DoubaoDuplexClient.Event.ToolCall -> {
                     lastVoiceAt = System.currentTimeMillis()
+                    val ackJob = callScope.launch {
+                        delay(1_200)
+                        duplexClient.speak("我查一下哈") // 执行超过 1.2 秒先出声，别让通话死寂
+                    }
                     callScope.launch {
                         val result = withContext(Dispatchers.IO) {
                             runCatching {
                                 AppTools.execute(context, settings, ev.name, ev.arguments) { duplexMapCards.add(it) }
                             }.getOrElse { "工具执行失败：${it.message ?: "未知原因"}。请如实告知用户。" }
                         }
+                        ackJob.cancel()
                         duplexClient.sendToolResult(ev.callId, result)
+                    }
+                }
+                // 识别流里蹦出急停词：客户端已停播+取消回答，这里把机器人也停住（本地链的急停要等句尾）
+                is DoubaoDuplexClient.Event.StopRequested -> {
+                    callScope.launch {
+                        DeviceTools.stopRobot(context, settings)
+                        duplexClient.speak("好的，已停下")
                     }
                 }
                 // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
                 is DoubaoDuplexClient.Event.TurnDone -> {
                     lastVoiceAt = System.currentTimeMillis()
                     duplexAnswer = ev.answer
+                    duplexUpdateAssistant(ev.answer, done = true)
                     if (ev.answer.isNotBlank()) {
                         // 本轮若已被本机能力接走（并已 cancelResponse），模型这条是残留的下发：
                         // 只在通话界面显示，不再往会话里落第二张卡片。
@@ -226,6 +267,7 @@ fun SparkModeScreen(
                         if (!handledLocally) {
                             // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
                             SparkChatStore.appendDuplexTurn(ev.asr, ev.answer)
+                            vm.summarizeCallTurns() // 通话也是会话：攒够了就总结进长期记忆
                         }
                     }
                     duplexMapCards.lastOrNull()?.let { SparkChatStore.attachMapCard(it) }
@@ -236,6 +278,7 @@ fun SparkModeScreen(
                     duplexAnswer = ""
                     duplexHint = null
                     duplexMapCards.clear()
+                    duplexTurns.clear()
                 }
                 is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
                     "CONFIG" -> "未配置豆包实时语音 Key，请到设置 → 凭证中心 → 豆包 填写"
@@ -269,12 +312,17 @@ fun SparkModeScreen(
                     context,
                     persona = DuplexCallSetup.PERSONA_SPARK,
                     history = SparkChatStore.historyBudget(8_000),
+                    settings = settings,
+                    // 灵动模式不挂本机能力工具：本地命令链更快，双挂会重复执行
+                    deviceTools = false,
                 )
                 duplexClient.start(
                     settings.duplexApiKey, settings.duplexVoice,
                     systemPrompt = setup.instructions,
                     callTools = setup.tools,
                     historyContext = setup.dialogContext,
+                    dialect = setup.dialect,
+                    music = setup.music,
                 )
             }
         }
@@ -969,8 +1017,7 @@ fun SparkModeScreen(
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 DoubaoCallOverlay(
                     state = duplexState,
-                    asrText = duplexAsr.takeLast(240),
-                    answerText = duplexAnswer,
+                    turns = duplexTurns,
                     hint = duplexHint,
                     photos = emptyList(),
                     onPickCamera = {},

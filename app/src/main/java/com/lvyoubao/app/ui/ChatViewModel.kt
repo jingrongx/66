@@ -235,6 +235,14 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    /** 通话落库后触发：通话也是会话，攒够新 user 消息就总结进长期画像（与文本聊天同口径） */
+    fun summarizeCallTurns() {
+        viewModelScope.launch {
+            val sid = sessions.currentSessionId.firstOrNull() ?: return@launch
+            maybeSummarizeSession(sid, repo.settings.firstOrNull() ?: AiSettings())
+        }
+    }
+
     // ---------- 语音识别后自动发送（设置 asrAutoSendSeconds：-1 关 /0 立即 /1/3/5 秒） ----------
     // 取消路径：点输入框（聚焦）、手动编辑草稿、清空、再次按住说话、手动/自动发送本身。
 

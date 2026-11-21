@@ -1,8 +1,10 @@
 package com.lvyoubao.app.data.duplex
 
 import android.content.Context
+import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.CalendarContext
+import com.lvyoubao.app.data.DeviceTools
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.TravelApp
@@ -34,13 +36,25 @@ object DuplexCallSetup {
         val instructions: String,
         val tools: List<AppTools.ToolDef>,
         val dialogContext: List<DialogTurn>,
+        /** 方言（explicit_dialect，空=普通话）与唱歌开关，session.create 时带上 */
+        val dialect: String = "",
+        val music: Boolean = false,
     )
 
     /**
      * @param history 共享受话的历史（普通/大字取 SessionStore 当前会话；灵动取 SparkChatStore），
      * 内部裁成成对 QA；为空则不带 dialog_context（纯新开场）
+     * @param settings 取方言/唱歌设置
+     * @param deviceTools 挂本机能力工具（机器人/计时/记事/记忆/音量/电量）。灵动模式不挂：
+     * 它有自己的本地命令链（更快），双挂会重复执行；普通/大字没有本地链，靠 FC 补齐
      */
-    fun build(context: Context, persona: String, history: List<OutMessage>): Built {
+    fun build(
+        context: Context,
+        persona: String,
+        history: List<OutMessage>,
+        settings: AiSettings? = null,
+        deviceTools: Boolean = false,
+    ): Built {
         val ctx = context.applicationContext
         val situation = buildString {
             CalendarContext.block()?.let { appendLine(it) }
@@ -68,10 +82,13 @@ object DuplexCallSetup {
             )
         }.trim()
 
+        val tools = if (deviceTools) AppTools.definitions + DeviceTools.definitions else AppTools.definitions
         return Built(
             instructions = instructions,
-            tools = AppTools.definitions,
+            tools = tools,
             dialogContext = pairedTurns(history),
+            dialect = settings?.duplexDialect.orEmpty(),
+            music = settings?.duplexMusic ?: false,
         )
     }
 

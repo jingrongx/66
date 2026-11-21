@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -82,6 +83,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.ChatSession
+import com.lvyoubao.app.data.DeviceTools
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.SessionMessage
@@ -301,6 +303,27 @@ fun LargeTextScreen(
     val duplexMapCards = remember { mutableStateListOf<MapCardData>() }
     // 上一轮已落库的（识别|回答）指纹：同一轮被重复收口只落一次
     var lastDuplexTurnKey by remember { mutableStateOf("") }
+    // 通话会话流（识别=右、回答=左），覆盖层直接渲染
+    val duplexTurns = remember { mutableStateListOf<DuplexTurnUi>() }
+
+    fun duplexNewUserTurn() {
+        duplexTurns.add(DuplexTurnUi("user", "", streaming = true))
+        if (duplexTurns.size > 30) duplexTurns.removeAt(0)
+    }
+    fun duplexUpdateUser(text: String) {
+        val i = duplexTurns.lastIndex
+        if (i >= 0 && duplexTurns[i].role == "user") duplexTurns[i] = duplexTurns[i].copy(text = text)
+        else { duplexNewUserTurn(); duplexUpdateUser(text) }
+    }
+    fun duplexUpdateAssistant(text: String, done: Boolean) {
+        val i = duplexTurns.lastIndex
+        if (i >= 0 && duplexTurns[i].role == "assistant") {
+            duplexTurns[i] = duplexTurns[i].copy(text = text, streaming = !done)
+        } else {
+            duplexTurns.add(DuplexTurnUi("assistant", text, streaming = !done))
+            if (duplexTurns.size > 30) duplexTurns.removeAt(0)
+        }
+    }
 
     /** 豆包通话专用：拍照/选图只读附件加入 duplexPhotos，不走 vm 的经典发送链 */
     fun handleDuplexPicked(uri: android.net.Uri) {
@@ -742,9 +765,15 @@ fun LargeTextScreen(
     LaunchedEffect(Unit) {
         duplexClient.onEvent.collect { ev ->
             when (ev) {
-                is DoubaoDuplexClient.Event.AsrStarted -> duplexAsr = ""
+                is DoubaoDuplexClient.Event.AsrStarted -> {
+                    duplexAsr = ""
+                    duplexNewUserTurn()
+                }
                 // transcription.delta 是累计快照，直接覆盖（用 += 会叠成「你你好你好啊」）
-                is DoubaoDuplexClient.Event.Asr -> duplexAsr = ev.text
+                is DoubaoDuplexClient.Event.Asr -> {
+                    duplexAsr = ev.text
+                    duplexUpdateUser(ev.text)
+                }
                 is DoubaoDuplexClient.Event.Answer -> {
                     if (ev.isFinal) {
                         duplexAnswer = ev.text
@@ -753,23 +782,39 @@ fun LargeTextScreen(
                         duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
                         else duplexAnswer + ev.text
                     }
+                    duplexUpdateAssistant(duplexAnswer, done = ev.isFinal)
                 }
-                // 模型决定调工具（天气/附近/路线）：本地执行，结果回传，模型接着说。
+                // 模型决定调工具：地图三件套走 AppTools，本机能力（机器人/计时/记事/记忆/音量/电量）
+                // 走 DeviceTools——大字/普通模式没有本地命令链，全靠这条 FC 路补齐。
                 // 失败也要回传——不回传模型就一直干等。
                 is DoubaoDuplexClient.Event.ToolCall -> {
+                    val ackJob = scope.launch {
+                        delay(1_200)
+                        duplexClient.speak("我查一下哈") // 执行超过 1.2 秒先出声，别让通话死寂
+                    }
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
                             runCatching {
-                                AppTools.execute(context, settings, ev.name, ev.arguments) { duplexMapCards.add(it) }
+                                when (ev.name) {
+                                    AppTools.POI, AppTools.WEATHER, AppTools.ROUTE ->
+                                        AppTools.execute(context, settings, ev.name, ev.arguments) { duplexMapCards.add(it) }
+                                    else -> DeviceTools.execute(context, settings, ev.name, ev.arguments)
+                                }
                             }.getOrElse { "工具执行失败：${it.message ?: "未知原因"}。请如实告知用户。" }
                         }
+                        ackJob.cancel()
                         duplexClient.sendToolResult(ev.callId, result)
                     }
+                }
+                // 识别流里蹦出急停词：客户端已停播+取消回答，这里把机器人也停住
+                is DoubaoDuplexClient.Event.StopRequested -> {
+                    scope.launch { DeviceTools.stopRobot(context, settings) }
                 }
                 // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
                 // FC 一轮可能多段收口，ChatViewModel 里会就地并进同一张卡。
                 is DoubaoDuplexClient.Event.TurnDone -> {
                     duplexAnswer = ev.answer
+                    duplexUpdateAssistant(ev.answer, done = true)
                     if (ev.answer.isNotBlank()) {
                         val key = ev.asr.filterNot { it.isWhitespace() } + "|" + ev.answer.filterNot { it.isWhitespace() }
                         if (key != lastDuplexTurnKey) {
@@ -777,6 +822,7 @@ fun LargeTextScreen(
                             val paths = duplexPhotos.mapNotNull { it.localPath }
                             vm.appendDuplexTurn(ev.asr, ev.answer, paths)
                             duplexPhotos = emptyList()
+                            vm.summarizeCallTurns() // 通话也是会话：攒够了就总结进长期记忆
                         }
                     }
                     duplexMapCards.lastOrNull()?.let { vm.attachDuplexMapCard(it) }
@@ -789,6 +835,7 @@ fun LargeTextScreen(
                     duplexPhotos = emptyList()
                     duplexMapCards.clear()
                     lastDuplexTurnKey = ""
+                    duplexTurns.clear()
                 }
                 is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
                     "CONFIG" -> "未配置豆包实时语音 Key，请到设置里填写后再通话"
@@ -821,12 +868,16 @@ fun LargeTextScreen(
                     context,
                     persona = DuplexCallSetup.PERSONA_TRAVEL,
                     history = vm.duplexHistory(currentSessionId),
+                    settings = settings,
+                    deviceTools = true, // 大字/普通没有本地命令链，机器人/计时等靠 FC 补齐
                 )
                 duplexClient.start(
                     settings.duplexApiKey, settings.duplexVoice,
                     systemPrompt = setup.instructions,
                     callTools = setup.tools,
                     historyContext = setup.dialogContext,
+                    dialect = setup.dialect,
+                    music = setup.music,
                 )
             }
         }
@@ -847,8 +898,7 @@ fun LargeTextScreen(
         if (settings.callEngine == "doubao") {
             DoubaoCallOverlay(
                 state = duplexState,
-                asrText = duplexAsr.takeLast(240),
-                answerText = duplexAnswer,
+                turns = duplexTurns,
                 hint = duplexHint,
                 photos = duplexPhotos,
                 onPickCamera = {
@@ -1217,16 +1267,18 @@ private fun LargeTextHistoryOverlay(
     }
 }
 
+/** 通话会话流的一条消息：user=识别稿（右侧），assistant=回答（左侧）；streaming=还在收字 */
+data class DuplexTurnUi(val role: String, val text: String, val streaming: Boolean = false)
+
 /**
  * 豆包全双工通话界面（端到端 S2S）：不走 ASR→LLM→TTS 串行链路，
- * 音频由 DuplexAudioEngine 实时收发；界面只展示识别流/回答流文字稿与状态，
+ * 音频由 DuplexAudioEngine 实时收发；界面按会话流排版（识别右/回答左），
  * 插话按一下（bargeIn）即可打断播报。 fab 按钮常驻，无需按住说话。
  */
 @Composable
 internal fun DoubaoCallOverlay(
     state: DoubaoDuplexClient.State,
-    asrText: String,
-    answerText: String,
+    turns: List<DuplexTurnUi>,
     hint: String?,
     photos: List<ChatViewModel.PendingAttachment>,
     onPickCamera: () -> Unit,
@@ -1293,30 +1345,38 @@ internal fun DoubaoCallOverlay(
                 )
             }
 
-            // 文字稿：用户识别流 + 回答流
-            Column(
+            // 文字稿：会话流排版（识别=右、回答=左，像聊天一样往下滚，新内容自动滚到底）
+            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            LaunchedEffect(turns.size, turns.lastOrNull()?.text?.length, turns.lastOrNull()?.streaming) {
+                if (turns.isNotEmpty()) listState.animateScrollToItem(turns.lastIndex)
+            }
+            androidx.compose.foundation.lazy.LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (asrText.isNotBlank()) {
-                    Surface(
-                        color = Color(0xFFD8EEF8),
-                        shape = RoundedCornerShape(18.dp),
-                        modifier = Modifier.padding(vertical = 6.dp).align(Alignment.End),
-                    ) {
-                        Text(asrText, fontSize = 22.sp, color = Color(0xFF0B3A55), modifier = Modifier.padding(16.dp))
-                    }
-                }
-                if (answerText.isNotBlank()) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(18.dp),
-                        modifier = Modifier.padding(vertical = 6.dp).align(Alignment.Start),
-                    ) {
-                        Text(answerText, fontSize = 22.sp, modifier = Modifier.padding(16.dp))
+                items(turns.size) { idx ->
+                    val t = turns[idx]
+                    val body = if (t.streaming && t.text.isBlank()) "…" else t.text
+                    if (t.role == "user") {
+                        Surface(
+                            color = Color(0xFFD8EEF8),
+                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier.fillMaxWidth().wrapContentWidth(Alignment.End),
+                        ) {
+                            Text(body, fontSize = 22.sp, color = Color(0xFF0B3A55), modifier = Modifier.padding(16.dp))
+                        }
+                    } else {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier.fillMaxWidth().wrapContentWidth(Alignment.Start),
+                        ) {
+                            Text(body, fontSize = 22.sp, modifier = Modifier.padding(16.dp))
+                        }
                     }
                 }
             }

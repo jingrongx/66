@@ -56,6 +56,22 @@ internal fun VoiceConfigCard(state: SettingsViewModel.UiState, vm: SettingsViewM
         VoiceOption("zh_male_yunzhou_jupiter_bigtts", "云舟 2.0 (沉稳男声)"),
         VoiceOption("zh_female_xiaotian_jupiter_bigtts", "小天 2.0 (甜美女声)"),
     )
+    // 官方 explicit_dialect 取值；仅 4 个精品音色支持，选了才有方言效果
+    val dialects = listOf(
+        VoiceOption("", "普通话（默认）"),
+        VoiceOption("dongbei", "东北话"),
+        VoiceOption("sichuan", "四川话"),
+        VoiceOption("shaanxi", "陕西话"),
+        VoiceOption("yue", "粤语"),
+        VoiceOption("beijing", "北京话"),
+        VoiceOption("henan", "河南话"),
+        VoiceOption("tianjin", "天津话"),
+        VoiceOption("shanghai", "上海话"),
+    )
+    val musicOptions = listOf(
+        VoiceOption("0", "关闭（默认）"),
+        VoiceOption("1", "开启（说「唱一首…」会开唱）"),
+    )
 
     Column(
         Modifier
@@ -294,6 +310,34 @@ internal fun VoiceConfigCard(state: SettingsViewModel.UiState, vm: SettingsViewM
                                 selected = voices.firstOrNull { it.id == d.duplexVoice } ?: voices.first(),
                                 label = { it.label },
                                 onSelect = { v -> vm.updateDraft { it.copy(duplexVoice = v.id) } },
+                                fill = fieldBg,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        CsLabel("通话方言")
+                        Spacer(Modifier.width(10.dp))
+                        Box(Modifier.weight(1f)) {
+                            SettingsDropdown(
+                                options = dialects,
+                                selected = dialects.firstOrNull { it.id == d.duplexDialect } ?: dialects.first(),
+                                label = { it.label },
+                                onSelect = { v -> vm.updateDraft { it.copy(duplexDialect = v.id) } },
+                                fill = fieldBg,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        CsLabel("唱歌能力")
+                        Spacer(Modifier.width(10.dp))
+                        Box(Modifier.weight(1f)) {
+                            SettingsDropdown(
+                                options = musicOptions,
+                                selected = musicOptions.firstOrNull { it.id == (if (d.duplexMusic) "1" else "0") } ?: musicOptions.first(),
+                                label = { it.label },
+                                onSelect = { v -> vm.updateDraft { it.copy(duplexMusic = v.id == "1") } },
                                 fill = fieldBg,
                             )
                         }

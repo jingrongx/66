@@ -39,6 +39,8 @@ data class AiSettings(
     val savedProviders: Map<String, ProviderCredentials> = emptyMap(), // 每个供应商各自记住的接口配置，切换时恢复自己的，互不带Key
     val duplexApiKey: String = "",     // 豆包端到端实时语音（Seeduplex 全双工）专用 Key：火山「实时语音」产品，走 X-Api-Key，非文本大模型 Key
     val duplexVoice: String = "zh_female_vv_jupiter_bigtts", // 全双工通话音色 ID（默认 Vivi 2.0）
+    val duplexDialect: String = "",    // 全双工通话方言（explicit_dialect）：空=普通话；dongbei/sichuan/shaanxi/yue/beijing/henan/tianjin/shanghai，仅 4 个精品音色支持
+    val duplexMusic: Boolean = false,  // 全双工通话唱歌能力（enable_music）：说「唱一首…」会检索曲库开唱
 
     // ===== 以下为设置页设计稿新增字段（批次 A）=====
     val reasoningEffort: String = "high", // 思考强度（DeepSeek 专属）：low / high / max
