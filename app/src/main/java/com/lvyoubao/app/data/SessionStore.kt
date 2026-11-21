@@ -211,6 +211,23 @@ class SessionStore(private val context: Context, private val repo: SettingsRepos
         persist()
     }
 
+
+    /** 给最后一条 assistant 挂地图卡（灵动模式的工具结果要和普通模式落到同一份数据里） */
+    suspend fun attachMapCard(sessionId: String, card: MapCardData) = mutex.withLock {
+        _sessions.value = _sessions.value.map { s ->
+            if (s.id != sessionId) s
+            else {
+                val idx = s.messages.indexOfLast { it.role == "assistant" }
+                if (idx < 0) s
+                else s.copy(
+                    messages = s.messages.toMutableList().also { it[idx] = it[idx].copy(mapCard = card) },
+                    updatedAt = System.currentTimeMillis(),
+                )
+            }
+        }
+        persist()
+    }
+
     /** 更新并持久化会话滚动摘要 */
     suspend fun updateSummary(sessionId: String, droppedCount: Int, summaryText: String) = mutex.withLock {        _sessions.value = _sessions.value.map { s ->
             if (s.id == sessionId) s.copy(summaryDroppedCount = droppedCount, summaryText = summaryText) else s

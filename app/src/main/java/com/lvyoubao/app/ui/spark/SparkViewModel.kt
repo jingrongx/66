@@ -11,6 +11,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.AiClient
+import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.DeviceBattery
@@ -18,6 +19,7 @@ import com.lvyoubao.app.data.DeviceVolume
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.LogStore
+import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.RobotClient
 import com.lvyoubao.app.data.RobotIntent
@@ -62,6 +64,8 @@ data class SparkMessage(
     val role: String, // "user" / "assistant"
     val text: String,
     val photos: List<Bitmap> = emptyList(),
+    // 工具层带回的地图卡（路线 / 附近检索）：普通和大字模式一直有，灵动模式以前只有文字
+    val mapCard: MapCardData? = null,
 )
 
 /** 待发送照片：解码转正后的位图 + 视觉模型要的 base64 dataUrl */
@@ -1307,10 +1311,24 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 }
             }
 
+            // 工具层捕获的地图卡（问路线/地点时由 get_route / search_poi 带回）
+            val mapCards = java.util.Collections.synchronizedList(mutableListOf<MapCardData>())
+
             AiClient(curSettings).chat(
                 messages = fullPayload,
                 thinking = false,
                 searchEnabled = false,
+                // 三种模式功能对齐：路线 / 附近检索这些工具，灵动模式也要能用，
+                // 而不是「语音问导航只能听一句文字」。
+                // 但**只在问题确实要出门时才挂工具**：带上工具说明会让每次请求多几百个 token，
+                // 闲聊类问题不该为它多等那一下。
+                toolExecutor = if (wantsPlace) {
+                    { name, args ->
+                        AppTools.execute(appContext, curSettings, name, args) { card -> mapCards.add(card) }
+                    }
+                } else {
+                    null
+                },
                 onAnswer = { chunk ->
                     if (speechBuffer.isEmpty() && chunk.isNotBlank()) {
                         slowHint.cancel()
@@ -1358,6 +1376,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     slowHint.cancel()
                     val finalAnswer = reply.answer.trim()
                     SparkChatStore.updateLastAssistant(finalAnswer)
+                    mapCards.lastOrNull()?.let { card ->
+                        SparkChatStore.attachMapCard(card)
+                        LogStore.log("spark", "地图卡已挂载：${card.title}")
+                    }
                     _isStreaming.value = false
 
                     SparkChatStore.appendHistory(currentUserMsg)

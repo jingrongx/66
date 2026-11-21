@@ -67,7 +67,7 @@ object SparkChatStore {
                 BitmapFactory.decodeFile(path, opt)
             }.getOrNull()
         }
-        return SparkMessage(role = role, text = text, photos = bitmaps)
+        return SparkMessage(role = role, text = text, photos = bitmaps, mapCard = mapCard)
     }
 
     /** 照片落盘（和普通模式共用 filesDir/sent_images，切模式互相看得到） */
@@ -123,6 +123,20 @@ object SparkChatStore {
                 )
             }
         }
+    }
+
+
+    /** 把工具带回的地图卡挂到最后一条回答上（内存 + 落库都做，切模式回来也还在） */
+    fun attachMapCard(card: com.lvyoubao.app.data.MapCardData) {
+        val list = messages.value.toMutableList()
+        val idx = list.indexOfLast { it.role == "assistant" }
+        if (idx < 0) return
+        list[idx] = list[idx].copy(mapCard = card)
+        messages.value = list
+        val sid = sessionId ?: return
+        val st = store ?: return
+        val sc = scope ?: return
+        sc.launch { st.attachMapCard(sid, card) }
     }
 
     fun append(msg: SparkMessage) {

@@ -90,6 +90,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.R
 import com.lvyoubao.app.TravelApp
+import com.lvyoubao.app.ui.map.RouteMapCard
 import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.largetext.DoubaoCallOverlay
@@ -972,6 +973,7 @@ private fun ChatStream(
     onMsgLongPress: (SparkMessage) -> Unit = {},
 ) {
     val scrollState = rememberScrollState()
+    val app = LocalContext.current.applicationContext as TravelApp
 
     // 新内容到达自动滚到底部
     LaunchedEffect(messages) {
@@ -1075,20 +1077,27 @@ private fun ChatStream(
                             .background(SparkColors.accent.copy(alpha = 0.85f), CircleShape),
                     )
                     Spacer(Modifier.width((7 * scale).dp))
-                    Text(
-                        text = msg.text.ifBlank { "…" },
-                        color = SparkColors.text,
-                        fontSize = (11 * scale).sp,
-                        lineHeight = (16 * scale).sp,
-                        modifier = Modifier
-                            .weight(1f)
-                            .pointerInput(msg) {
-                                detectTapGestures(
-                                    onTap = { onMsgTap(msg) },
-                                    onLongPress = { onMsgLongPress(msg) },
-                                )
-                            },
-                    )
+                    // 正文下面可以挂地图卡（路线 / 附近检索的工具结果）——和小源说的话在同一个气泡区
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = msg.text.ifBlank { "…" },
+                            color = SparkColors.text,
+                            fontSize = (11 * scale).sp,
+                            lineHeight = (16 * scale).sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .pointerInput(msg) {
+                                    detectTapGestures(
+                                        onTap = { onMsgTap(msg) },
+                                        onLongPress = { onMsgLongPress(msg) },
+                                    )
+                                },
+                        )
+                        msg.mapCard?.let { card ->
+                            Spacer(Modifier.height((6 * scale).dp))
+                            RouteMapCard(card = card, app = app, largeText = false)
+                        }
+                    }
                 }
             }
         }

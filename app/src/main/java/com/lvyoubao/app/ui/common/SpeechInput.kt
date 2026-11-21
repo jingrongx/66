@@ -1,6 +1,7 @@
 package com.lvyoubao.app.ui.common
 
 import android.Manifest
+import com.lvyoubao.app.data.LogStore
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -74,7 +75,11 @@ object SpeechInput {
     private const val MAX_RECORD_MS = 300_000
 
     /** 云端转文字进行中的一段录音 */
-    data class Recording(val recorder: MediaRecorder, val file: File)
+    data class Recording(
+        val recorder: MediaRecorder,
+        val file: File,
+        val startedAt: Long = System.currentTimeMillis(),
+    )
 
     fun isAvailable(context: Context): Boolean =
         runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false)
@@ -168,7 +173,21 @@ object SpeechInput {
 
     /** 开始录音（云端转文字路径；调用前确保已授予 RECORD_AUDIO） */
     fun startRecording(context: Context): Result<Recording> = runCatching {
+        // 用户还在说话的时候就把 DNS/TCP/TLS 建起来：松手后直接发正文，
+        // 省掉那 200~400ms 的握手（这台设备上冷连接尤其明显）。
+        warmConnectionAsync()
         val file = File(context.cacheDir, "asr_${System.currentTimeMillis()}.m4a")
+        val startedAt = System.currentTimeMillis()
+        // ASR 只吃 16k 单声道：以前 44.1k/96kbps 录出来的 m4a 是它的 6 倍大，
+        // 上传、服务端解码都跟着变慢，说 10 秒能拖出上百 KB。
+        // 个别机型不认 16k AAC 编码器，退回原来的参数，不能让录音直接失败。
+        val recorder = runCatching { buildRecorder(context, file, 16_000, 48_000) }
+            .recoverCatching { buildRecorder(context, file, 44_100, 96_000) }
+            .getOrThrow()
+        Recording(recorder, file, startedAt)
+    }
+
+    private fun buildRecorder(context: Context, file: File, sampleRate: Int, bitRate: Int): MediaRecorder {
         val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
         } else {
@@ -178,13 +197,34 @@ object SpeechInput {
         recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
         recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-        recorder.setAudioEncodingBitRate(96_000)
-        recorder.setAudioSamplingRate(44_100)
+        recorder.setAudioEncodingBitRate(bitRate)
+        recorder.setAudioSamplingRate(sampleRate)
+        recorder.setAudioChannels(1)
         recorder.setMaxDuration(MAX_RECORD_MS)
         recorder.setOutputFile(file.absolutePath)
         recorder.prepare()
         recorder.start()
-        Recording(recorder, file)
+        return recorder
+    }
+
+    @Volatile
+    private var lastWarmAt = 0L
+
+    /** 录音期间预热连接：只建连不发业务请求（401/404 都无所谓，连接池已经拿到连接了） */
+    private fun warmConnectionAsync() {
+        val now = System.currentTimeMillis()
+        if (now - lastWarmAt < 30_000L) return
+        lastWarmAt = now
+        kotlin.concurrent.thread(isDaemon = true, name = "asr-warm") {
+            runCatching {
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$ASR_BASE_URL/audio/transcriptions")
+                        .head()
+                        .build(),
+                ).execute().close()
+            }
+        }
     }
 
     /**
@@ -202,13 +242,29 @@ object SpeechInput {
             kotlinx.coroutines.delay(postRollMs)
         }
         // stop() 抛错有两种情况：压根没录进去（文件极小）或到时长上限被自动停了（文件是好的），
-        // 所以只看文件大小判断，别误伤长录音
-        runCatching { recording.recorder.stop() }
-        runCatching { recording.recorder.release() }
+        // 所以只看文件大小判断，别误伤长录音。
+        // **必须在 IO 线程 stop**：MediaRecorder.stop() 要把 m4a 收尾写盘，主线程上会卡住界面，
+        // 而且它耗时随录音长度增长——这就是「有时候按完半天没反应」的一大来源。
+        val tStop = android.os.SystemClock.elapsedRealtime()
+        withContext(Dispatchers.IO) {
+            runCatching { recording.recorder.stop() }
+            runCatching { recording.recorder.release() }
+        }
+        val stopCost = android.os.SystemClock.elapsedRealtime() - tStop
+        val durMs = (System.currentTimeMillis() - recording.startedAt).coerceAtLeast(0)
+        val sizeKb = recording.file.length() / 1024
         val result = if (recording.file.length() < 2_000) {
             Result.failure(SpeechException(SpeechFailure.NOT_HEARD, message = "没录到声音，请贴近手机再说一次"))
         } else {
-            transcribeFile(recording.file, asrKey, dialect)
+            val tAsr = android.os.SystemClock.elapsedRealtime()
+            val r = transcribeFile(recording.file, asrKey, dialect)
+            val asrCost = android.os.SystemClock.elapsedRealtime() - tAsr
+            LogStore.log(
+                "asr",
+                "按住说话：录音 ${durMs}ms / ${sizeKb}KB，收尾 ${stopCost}ms，转写 ${asrCost}ms" +
+                    (if (r.isSuccess) "（${r.getOrNull()?.trim().orEmpty().take(20)}）" else "（失败 ${r.exceptionOrNull()?.message}）"),
+            )
+            r
         }
         recording.file.delete()
         return result
