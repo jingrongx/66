@@ -799,6 +799,10 @@ fun LargeTextScreen(
     DisposableEffect(showCall, settings.callEngine) {
         if (showCall && settings.callEngine == "doubao") {
             TtsPlayer.stop() // 先让 classic 朗读闭嘴，避免抢音频输出
+            // 通话期间不许熄屏 + 压住 WiFi 省电：息屏后 WiFi 入睡会让实时音频流断开，
+            // 现象就是「黑屏之后听不到声音」（大字/普通模式同样需要，不只在灵动模式）
+            com.lvyoubao.app.ui.common.ScreenAwake.pin("豆包通话")
+            com.lvyoubao.app.ui.common.NetKeep.acquire(context, "doubao-call")
             duplexAsr = ""
             duplexAnswer = ""
             duplexHint = null
@@ -811,7 +815,11 @@ fun LargeTextScreen(
             }
         }
         onDispose {
-            if (settings.callEngine == "doubao") duplexClient.close()
+            if (settings.callEngine == "doubao") {
+                duplexClient.close()
+                com.lvyoubao.app.ui.common.NetKeep.release("doubao-call")
+                com.lvyoubao.app.ui.common.ScreenAwake.unpin("豆包通话")
+            }
         }
     }
     // 彻底退出应用时释放 OkHttp 线程池（不可复用，仅 exit 时调用）
