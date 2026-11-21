@@ -189,6 +189,91 @@ object EdgeTts {
      * onAudio 在 OkHttp 回调线程上执行，必须非阻塞（入队即返回）。
      */
 
+    /**
+     * 预连接好的 WebSocket：在「用户刚问完、模型还在出字」的空档里就把 WSS 握手做完，
+     * 首句一到直接发 SSML。实测握手 1.0~1.2 秒，这一下能省掉大半。
+     *
+     * 单条连接只做一轮合成（发完 ssml、收到 turn.end 就关），不做多轮复用——
+     * 微软那边对同一连接的第二个 turn 不保证支持，宁可保守。
+     */
+    private class Prepared(val createdAt: Long) {
+        val opened = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        @Volatile var ws: okhttp3.WebSocket? = null
+        @Volatile var failed = false
+        @Volatile var gotAudio = false
+        @Volatile var sink: ((ByteArray) -> Unit)? = null
+    }
+
+    /** 复用长连接的开关：出问题可以在设置里一键退回「每句都重新握手」的老链路 */
+    @Volatile
+    var reuseSocket: Boolean = true
+
+    @Volatile
+    private var prepared: Prepared? = null
+
+    private fun preparedListener(p: Prepared) = object : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            // 只发 config，不发 ssml —— 文字还没到
+            runCatching { webSocket.send(configMessage()) }
+            p.opened.complete(true)
+        }
+
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            if (bytes.size < 2) return
+            val headerLen = ((bytes[0].toInt() and 0xFF) shl 8) or (bytes[1].toInt() and 0xFF)
+            if (bytes.size <= headerLen + 2) return
+            val header = bytes.substring(2, 2 + headerLen).utf8()
+            if (header.contains("Path:audio")) {
+                p.gotAudio = true
+                runCatching { p.sink?.invoke(bytes.substring(2 + headerLen).toByteArray()) }
+            }
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            if (text.contains("Path:turn.end")) {
+                runCatching { webSocket.close(1000, "done") }
+                p.done.complete(true)
+            }
+        }
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            p.failed = true
+            p.opened.complete(false)
+            p.done.complete(false)
+            noteFailure(t, response, "预连接合成")
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            if (!p.gotAudio) {
+                p.failed = true
+                p.opened.complete(false)
+            }
+            p.done.complete(p.gotAudio)
+        }
+    }
+
+    /** 预热：先开一条 WebSocket 并发出 config，等首句 */
+    fun prewarmSocket() {
+        if (!reuseSocket) return
+        val cur = prepared
+        if (cur != null && !cur.failed && System.currentTimeMillis() - cur.createdAt < 20_000L) return
+        val p = Prepared(System.currentTimeMillis())
+        prepared = p
+        runCatching { p.ws = client.newWebSocket(buildRequest(), preparedListener(p)) }
+            .onFailure { p.failed = true; p.opened.complete(false) }
+        // 3 秒还没连上就作废，别让首句等它
+        kotlin.concurrent.thread(isDaemon = true, name = "tts-warm-watch") {
+            Thread.sleep(CONNECT_WATCHDOG_MS + 200)
+            if (!p.opened.isCompleted) {
+                p.failed = true
+                p.opened.complete(false)
+                runCatching { p.ws?.cancel() }
+                if (prepared === p) prepared = null
+            }
+        }
+    }
+
     @Volatile
     private var lastWarmAt = 0L
 
@@ -197,6 +282,8 @@ object EdgeTts {
      * 等首句切出来直接做 WSS 升级。实测握手 0.9 秒，和模型首字延迟重叠掉能省掉大半。
      */
     fun warmUp() {
+        // 真正的加速来自预连接 WebSocket（省 1 秒握手），TLS 预热只当兜底
+        prewarmSocket()
         val now = System.currentTimeMillis()
         if (now - lastWarmAt < 60_000L) return
         lastWarmAt = now
@@ -212,6 +299,27 @@ object EdgeTts {
     suspend fun streamSynthesize(text: String, onAudio: (ByteArray) -> Unit): Boolean {
         val body = text.trim().take(STREAM_MAX_CHARS)
         if (body.isEmpty()) return false
+
+        // 先试预连接：命中就直接发 SSML，省掉 1 秒出头的握手
+        val p = prepared
+        prepared = null
+        if (p != null && !p.failed) {
+            val opened = kotlinx.coroutines.withTimeoutOrNull(900) { p.opened.await() } == true
+            if (opened) {
+                p.sink = onAudio
+                val sent = runCatching { p.ws?.send(ssmlMessage(body)) }.getOrNull() == true
+                if (sent) {
+                    val finished = kotlinx.coroutines.withTimeoutOrNull(STREAM_TURN_TIMEOUT_MS) { p.done.await() }
+                    if (finished == true && p.gotAudio) {
+                        ttsLog("EdgeTts 复用预连接成功（" + body.length + " 字）")
+                        lastFailure = null
+                        return true
+                    }
+                    ttsLog("EdgeTts 预连接合成未出音频（got=" + p.gotAudio + "），回落重连")
+                }
+            }
+            runCatching { p.ws?.cancel() }
+        }
         var gotAudio = false
         var ok = false
         repeat(2) { attempt ->
@@ -229,6 +337,7 @@ object EdgeTts {
     }
 
     private val CONNECT_WATCHDOG_MS = 3_000L
+    private val STREAM_TURN_TIMEOUT_MS = 12_000L
 
     private suspend fun streamOnce(body: String, onFirstAudio: (ByteArray) -> Unit): Boolean =
         suspendCancellableCoroutine { cont ->

@@ -57,6 +57,20 @@ class MainActivity : ComponentActivity() {
             val app = LocalContext.current.applicationContext as TravelApp
             val appSettings by app.settingsRepository.settings
                 .collectAsState(initial = AiSettings())
+            // 屏幕方向：机器人（优必选 Visbot）默认锁横屏，手机上默认跟随系统；
+            // 设置页可以改成跟随系统 / 锁定横屏 / 锁定竖屏。
+            LaunchedEffect(appSettings.screenOrientation) {
+                val target = when (appSettings.screenOrientation) {
+                    "landscape" -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                    "portrait" -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                    else -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }
+                if (requestedOrientation != target) requestedOrientation = target
+            }
+            // 语音播报是否复用长连接（出问题能在设置里一键退回）
+            LaunchedEffect(appSettings.ttsReuseSocket) {
+                com.lvyoubao.app.ui.common.EdgeTts.reuseSocket = appSettings.ttsReuseSocket
+            }
             // 把语音识别 Key 同时作为云端朗读兜底的 Key（同一硅基流动账号）：
             // Edge 朗读中途失败时换云端接力，剩余段落不再陪葬
             LaunchedEffect(appSettings.asrKey) {

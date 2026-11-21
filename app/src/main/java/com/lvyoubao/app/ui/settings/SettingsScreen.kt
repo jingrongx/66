@@ -118,6 +118,7 @@ fun SettingsScreen(
     var largeFontDialog by remember { mutableStateOf(false) }
     var sparkFontDialog by remember { mutableStateOf(false) }
     var screenOffDialog by remember { mutableStateOf(false) }
+    var screenOrientDialog by remember { mutableStateOf(false) }
     // 授权「修改系统设置」回来后补一次：否则改完超时值要重启才生效
     val writeSettingsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -329,6 +330,15 @@ fun SettingsScreen(
                             label = "灵动模式字号调节",
                             value = fontScaleLabel(state.draft.sparkFontScale),
                             onClick = { sparkFontDialog = true },
+                        )
+                        PillRow(
+                            label = "屏幕方向",
+                            value = when (state.draft.screenOrientation) {
+                                "landscape" -> "锁定横屏"
+                                "portrait" -> "锁定竖屏"
+                                else -> "跟随系统"
+                            },
+                            onClick = { screenOrientDialog = true },
                         )
                         PillRow(
                             label = "空闲熄屏时间",
@@ -920,6 +930,23 @@ fun SettingsScreen(
             )
         }
 
+        if (screenOrientDialog) {
+            ChoiceDialog(
+                title = "屏幕方向",
+                options = listOf(
+                    Triple("auto", "跟随系统", "由系统自动旋转决定（手机上一般选这个）"),
+                    Triple("landscape", "锁定横屏", "优必选这类横屏机器人建议锁定，避免翻来翻去"),
+                    Triple("portrait", "锁定竖屏", "始终竖屏显示"),
+                ),
+                selected = state.draft.screenOrientation,
+                onPick = { value ->
+                    vm.updateDraft { it.copy(screenOrientation = value) }
+                    vm.save(onSaved = {})
+                },
+                onDismiss = { screenOrientDialog = false },
+            )
+        }
+
         if (themeDialog) {
             ChoiceDialog(
                 title = "外观",                options = listOf(
@@ -979,6 +1006,13 @@ fun SettingsScreen(
                             onSelect = { v -> vm.updateDraft { it.copy(voiceBargeIn = v) } },
                             itemPaddingH = 12,
                             itemPaddingV = 5,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        ToggleRow(
+                            title = "语音播报复用长连接",
+                            subtitle = "首句更快出声；某台设备出现没声音时关掉，退回每句重新连接",
+                            checked = state.draft.ttsReuseSocket,
+                            onCheckedChange = { checked -> vm.updateDraft { it.copy(ttsReuseSocket = checked) } },
                         )
                         Spacer(Modifier.height(14.dp))
                         ToggleRow(

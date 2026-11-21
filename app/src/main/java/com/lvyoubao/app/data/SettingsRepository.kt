@@ -45,6 +45,8 @@ class SettingsRepository(private val context: Context) {
         val bootStartEnabled = booleanPreferencesKey("boot_start_enabled")
         val robotEnabled = booleanPreferencesKey("robot_enabled")
         val robotHost = stringPreferencesKey("robot_host")
+        val screenOrientation = stringPreferencesKey("screen_orientation")
+        val ttsReuseSocket = booleanPreferencesKey("tts_reuse_socket")
         val proactiveReminders = booleanPreferencesKey("proactive_reminders")
         val voiceBargeIn = intPreferencesKey("voice_barge_in")
         val wakeWordEnabled = booleanPreferencesKey("wake_word_enabled")
@@ -92,6 +94,8 @@ class SettingsRepository(private val context: Context) {
             bootStartEnabled = p[Keys.bootStartEnabled] ?: false,
             robotEnabled = p[Keys.robotEnabled] ?: false,
             robotHost = p[Keys.robotHost] ?: "",
+            screenOrientation = p[Keys.screenOrientation] ?: DeviceProfile.defaultOrientation,
+            ttsReuseSocket = p[Keys.ttsReuseSocket] ?: true,
             proactiveReminders = p[Keys.proactiveReminders] ?: true,
             voiceBargeIn = p[Keys.voiceBargeIn] ?: 1,
             wakeWordEnabled = p[Keys.wakeWordEnabled] ?: true,
@@ -146,6 +150,8 @@ class SettingsRepository(private val context: Context) {
             p[Keys.bootStartEnabled] = settings.bootStartEnabled
             p[Keys.robotEnabled] = settings.robotEnabled
             p[Keys.robotHost] = settings.robotHost
+            p[Keys.screenOrientation] = settings.screenOrientation
+            p[Keys.ttsReuseSocket] = settings.ttsReuseSocket
             p[Keys.proactiveReminders] = settings.proactiveReminders
             p[Keys.voiceBargeIn] = settings.voiceBargeIn
             p[Keys.wakeWordEnabled] = settings.wakeWordEnabled
