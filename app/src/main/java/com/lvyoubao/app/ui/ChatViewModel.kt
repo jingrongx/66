@@ -29,6 +29,7 @@ import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.WeatherClient
+import com.lvyoubao.app.ui.common.EdgeTts
 import com.lvyoubao.app.ui.common.LiveTtsSession
 import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.data.presetById
@@ -682,6 +683,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     images = imageAttachments.mapNotNull { it.dataUrl },
                 ),
             )
+
+            // 先把 TTS 主机的连接预热上：模型出首字的这一两秒里顺带完成 TLS，
+            // 首句切出来时 WSS 握手已经不需要再等
+            if (liveSpeakEnabled) EdgeTts.warmUp()
 
             // 工具层捕获的地图卡（问路线/地点时由 get_route / search_poi 带回）
             val mapCards = java.util.Collections.synchronizedList(mutableListOf<MapCardData>())

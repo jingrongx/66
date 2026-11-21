@@ -1501,7 +1501,10 @@ class LiveTtsSession(context: Context) {
             if (len < minLen) {
                 // 太碎的片段不单独成段（「好。」「是的。」各自起播听感像结巴）：
                 // 注意这里**不能动 spokenUpTo**，只是跳过这个切点，让它并进下一句
-                cut = findCut(cut + 1, false)
+                // 关键：这里必须是「首句还没落地就继续按首句规则找」。
+                // 写死 false 会导致「好的，……」这种短开头被跳过之后，
+                // 下一次切点要等 40 字或句号——短回答于是整段合成，声音永远晚于文字。
+                cut = findCut(cut + 1, !firstPiece.isCompleted)
                 continue
             }
             val piece = buffer.substring(spokenUpTo, cut + 1).trim()
@@ -1568,6 +1571,6 @@ class LiveTtsSession(context: Context) {
     private companion object {
         const val MIN_FIRST_PIECE = 4
         const val MIN_PIECE = 10
-        const val FIRST_TTS_CHARS = 18
+        const val FIRST_TTS_CHARS = 12
     }
 }

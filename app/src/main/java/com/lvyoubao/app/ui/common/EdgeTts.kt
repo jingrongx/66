@@ -188,6 +188,27 @@ object EdgeTts {
      * 已收到过音频帧就不重试——重试会从头读一遍，播出去就是复读。
      * onAudio 在 OkHttp 回调线程上执行，必须非阻塞（入队即返回）。
      */
+
+    @Volatile
+    private var lastWarmAt = 0L
+
+    /**
+     * 预热到微软 TTS 主机的连接：模型还在出第一个字的时候把 DNS/TCP/TLS 建好，
+     * 等首句切出来直接做 WSS 升级。实测握手 0.9 秒，和模型首字延迟重叠掉能省掉大半。
+     */
+    fun warmUp() {
+        val now = System.currentTimeMillis()
+        if (now - lastWarmAt < 60_000L) return
+        lastWarmAt = now
+        kotlin.concurrent.thread(isDaemon = true, name = "tts-warm") {
+            runCatching {
+                client.newCall(
+                    Request.Builder().url("https://speech.platform.bing.com/").head().build(),
+                ).execute().close()
+            }
+        }
+    }
+
     suspend fun streamSynthesize(text: String, onAudio: (ByteArray) -> Unit): Boolean {
         val body = text.trim().take(STREAM_MAX_CHARS)
         if (body.isEmpty()) return false

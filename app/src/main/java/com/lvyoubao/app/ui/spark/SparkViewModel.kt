@@ -87,7 +87,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         const val MIN_WAKE_SEG_MS = 550L
 
         /** 首句最少几个字就允许在逗号处切：够成一口气，又不至于让人干等 */
-        const val FIRST_SENTENCE_CHARS = 10
+        const val FIRST_SENTENCE_CHARS = 8
 
         /** 首句说到多少字还没标点就强制切走播报（后续句子仍用 48 字兜底） */
         const val FIRST_TTS_CHARS = 18
@@ -1227,6 +1227,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 }
             }
 
+            // 预热 TTS 主机：模型出首字的这一两秒里顺带把 TLS 建好
+            EdgeTts.warmUp()
             // 流式播报：拿到的字按句子切开，一句一句送合成、顺序播，不再等全文再开口。
             // 旧逻辑要等 onSuccess 才 TtsPlayer.speak(全文)，长回答要干等好几秒。
             ttsStreaming = true
@@ -1353,7 +1355,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         // 并到下一句一起播，语义和语调反而更自然。
                         val minLen = if (!firstPiece.isCompleted) MIN_FIRST_PIECE else MIN_PIECE
                         if (len < minLen) {
-                            cut = findSentenceEnd(speechBuffer, cut + 1, false)
+                            // 同上：首句没落地前继续用首句规则，否则「好的，……」会把整段拖到句号
+                            cut = findSentenceEnd(speechBuffer, cut + 1, !firstPiece.isCompleted)
                             continue
                         }
                         val piece = speechBuffer.substring(spokenUpTo, cut + 1).trim()
