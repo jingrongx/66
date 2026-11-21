@@ -1427,6 +1427,13 @@ class LiveTtsSession(context: Context) {
     var onFirstSound: (() -> Unit)? = null
 
     init {
+        // 音轨一开播就算「接上了」。不能等 playStreamedPiece 返回——它要等整段流式音频
+        // 播完才返回（实测 4.3 秒），而兜底判定在 4 秒左右就问了，晚一步就等于每次都误判成没出声。
+        scope.launch {
+            TtsPlayer.state.collect { st ->
+                if (st is TtsPlayer.State.Speaking && TtsPlayer.isActive(gen)) markSpoke()
+            }
+        }
         // 合成器：句子一到就合成，不等播放（合成约 1.5s/句，播放 4~6s/句，队列会稳定领先）
         scope.launch(Dispatchers.IO) {
             try {
@@ -1475,6 +1482,8 @@ class LiveTtsSession(context: Context) {
                 // 兜底：任何路径退出时都要给出裁决，否则调用方会一直等
                 if (!decision.isCompleted) decision.complete(spoke)
                 TtsPlayer.endStreamSession(gen)
+                // 这一轮结束：顺手把状态监听协程收掉，别留一个常驻 collect
+                job.cancel()
             }
         }
     }
