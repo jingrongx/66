@@ -1,6 +1,8 @@
 package com.lvyoubao.app.ui.map
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -377,7 +380,14 @@ fun MapScreen(onClose: () -> Unit, app: TravelApp) {
                     onDismissRequest = { manualDialog = false },
                     title = { Text("手动连接") },
                     text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // 三个输入框在小屏上会顶出弹窗边界（308×240 这台只剩 ~190dp 可用），
+                        // 弹窗内容默认不滚动，加窗口高度约束后仍要显式给滚动
+                        Column(
+                            Modifier
+                                .heightIn(max = 170.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
                             Text(
                                 "三项都印在对方「出示二维码」界面下方",
                                 style = MaterialTheme.typography.labelSmall,

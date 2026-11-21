@@ -956,7 +956,13 @@ fun SettingsScreen(
                 onDismissRequest = { prefsDialog = false },
                 title = { Text("语音与提醒偏好") },
                 text = {
-                    Column(Modifier.fillMaxWidth()) {
+                    // 三项加间距在 320dp 高的屏上正好顶满，稍一放大就被裁掉——统一给上限 + 滚动
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 170.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
                         ToggleRow(
                             title = "待机唤醒词监听",
                             subtitle = "灵动模式待机时喊「小源小源」或「嗨小源」直接进连续对话",
@@ -1036,7 +1042,13 @@ private fun ChoiceDialog(
         onDismissRequest = onDismiss,
         title = { Text(title, fontWeight = FontWeight.Bold) },
         text = {
-            Column {
+            // 小屏（这台 308×240，约 320dp 高）上选项一多就溢出，而弹窗内容本身不会滚，
+            // 症状是「划不动、选不到下面的项」——必须显式给上限 + 纵向滚动。
+            Column(
+                Modifier
+                    .heightIn(max = 170.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
                 options.forEach { (value, label, desc) ->
                     Row(
                         Modifier
@@ -1229,7 +1241,12 @@ private fun FontScaleDialog(
         onDismissRequest = onDismiss,
         title = { Text(title, fontWeight = FontWeight.Bold) },
         text = {
-            Column {
+            // 同上：4 档字号 + 说明，在 320dp 高的屏上会顶到边界，加滚动保险
+            Column(
+                Modifier
+                    .heightIn(max = 170.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
                 listOf(0.85f to "小一档", 1.0f to "标准", 1.15f to "大一档", 1.3f to "特大").forEach { (value, label) ->
                     Row(
                         modifier = Modifier
