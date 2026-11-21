@@ -428,10 +428,18 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     // 与灵动模式同一条流水线：AI 一开始吐字就按句切、首句流式秒播。
     // 开关（自动朗读 / 通话中）由界面告知，这里只管「什么时候开始出声」。
     private var liveTts: LiveTtsSession? = null
-    private val _streamSpoke = MutableStateFlow(false)
 
-    /** 本次回答是否已被流式播报接手：true 时界面不要再整段朗读一遍 */
-    val streamSpoke: StateFlow<Boolean> = _streamSpoke.asStateFlow()
+    /**
+     * 这一轮回答的播报状态，界面据此决定要不要整段兜底：
+     *  NONE      = 这轮不播（自动朗读关着）
+     *  PENDING   = 流式播报在跑，还没出声
+     *  STREAMING = 已经出声 → 界面不要再整段读
+     *  FALLBACK  = 首句彻底没出声 → 界面整段朗读兜底
+     */
+    enum class Speech { NONE, PENDING, STREAMING, FALLBACK }
+
+    private val _speech = MutableStateFlow(Speech.NONE)
+    val speechState: StateFlow<Speech> = _speech.asStateFlow()
 
     @Volatile
     private var liveSpeakEnabled = false
@@ -668,7 +676,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             // 普通模式和大字模式因此比灵动模式慢好几秒，同一个应用两套手感。
             liveTts?.cancel()
             liveTts = null
-            _streamSpoke.value = false
+            _speech.value = Speech.NONE
             AiClient(settingsValue).chat(
                 messages = payload,
                 thinking = settingsValue.thinking,
@@ -682,9 +690,10 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     if (liveSpeakEnabled && d.isNotBlank()) {
                         val live = liveTts ?: LiveTtsSession(appContext).also {
                             // 第一声真的出来时立刻置位：极短回答可能在 AI 结束时还没起播，
-                            // 界面那边靠这个标记判断「已接手」，别整段再读一遍
-                            it.onFirstSound = { _streamSpoke.value = true }
+                            // 界面那边靠这个状态判断「已接手」，别整段再读一遍
+                            it.onFirstSound = { _speech.value = Speech.STREAMING }
                             liveTts = it
+                            _speech.value = Speech.PENDING
                         }
                         live.feed(d)
                     }
@@ -695,7 +704,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     _stream.value = StreamState()
                     liveTts?.cancel()
                     liveTts = null
-                    _streamSpoke.value = false
+                    _speech.value = Speech.NONE
                 },
                 onTitle = { title ->
                     viewModelScope.launch {
@@ -728,14 +737,23 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     val live = liveTts
                     live?.finish()
                     liveTts = null
-                    _streamSpoke.value = live?.spoke == true
+                    if (live == null) {
+                        _speech.value = Speech.NONE
+                    } else {
+                        // 等首句自己给结论（最多 4 秒）：流式接上了就 STREAMING，
+                        // 彻底没出声才让界面整段兜底——不用固定计时器猜
+                        viewModelScope.launch {
+                            val ok = live.awaitSpoken(4_000)
+                            _speech.value = if (ok) Speech.STREAMING else Speech.FALLBACK
+                        }
+                    }
                     maybeSummarizeSession(sessionId, settingsValue)
                     refreshSessionSummary(sessionId, settingsValue)
                 },
                 onFailure = { e ->
                     liveTts?.cancel()
                     liveTts = null
-                    _streamSpoke.value = false
+                    _speech.value = Speech.NONE
                     _stream.value = null
                     _ui.update { it.copy(sending = false, error = e.message ?: "请求失败") }
                 },

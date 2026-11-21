@@ -1406,6 +1406,19 @@ class LiveTtsSession(context: Context) {
         private set
 
     /**
+     * 「这轮播报到底谁来出声」的裁决，只在有答案时完成一次：
+     * true = 流式播报已经接上；false = 首句彻底没出声（连不上/解码失败），调用方该整段兜底。
+     *
+     * 为什么不用固定计时器：实测 4 字首句从送出到出声要 1.7 秒（WSS 握手 0.9s + 首帧 + 预滚），
+     * 用 1.2 秒判定就会把还没起播的流式播报掐死、再整段重读一遍——又慢又重复。
+     */
+    private val decision = CompletableDeferred<Boolean>()
+
+    /** 等裁决（最多 [timeoutMs]）；超时按「没出声」处理 */
+    suspend fun awaitSpoken(timeoutMs: Long = 4_000): Boolean =
+        kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { decision.await() } ?: spoke
+
+    /**
      * 第一声真的出来时回调（主线程）。
      * 极短的回答可能在 AI 结束时还没起播，调用方靠它把「已接手」这个状态补上，
      * 否则会误判成没出声、再整段朗读一遍——同一段话放两遍。
@@ -1443,6 +1456,9 @@ class LiveTtsSession(context: Context) {
                         }
                     }
                 }
+                // 首句这一轮已经定生死了：还没出声就赶紧告诉上层，让它整段兜底，
+                // 别一直等着后面那些还没合成的句子
+                if (!spoke) decision.complete(false)
                 for (f in audio) {
                     if (!TtsPlayer.isActive(gen)) {
                         runCatching { f.delete() }
@@ -1456,6 +1472,8 @@ class LiveTtsSession(context: Context) {
             } catch (_: CancellationException) {
                 TtsPlayer.stop()
             } finally {
+                // 兜底：任何路径退出时都要给出裁决，否则调用方会一直等
+                if (!decision.isCompleted) decision.complete(spoke)
                 TtsPlayer.endStreamSession(gen)
             }
         }
@@ -1507,6 +1525,7 @@ class LiveTtsSession(context: Context) {
     /** 打断（用户又问了 / 离开页面）：立刻静音并释放 */
     fun cancel() {
         finished = true
+        decision.complete(false)
         TtsPlayer.stop()
         job.cancel()
         pieces.close()
@@ -1516,6 +1535,7 @@ class LiveTtsSession(context: Context) {
     private fun markSpoke() {
         if (spoke) return
         spoke = true
+        decision.complete(true)
         runCatching { onFirstSound?.invoke() }
     }
 

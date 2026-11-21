@@ -320,7 +320,6 @@ fun LargeTextScreen(
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
     var spokenTs by remember { mutableStateOf(0L) }
     val ttsState by TtsPlayer.state.collectAsState()
-    val streamSpoke by vm.streamSpoke.collectAsState()
     // 先把「这次要不要出声」告诉 VM：它会在 AI 一开始吐字就按句开播，
     // 而不是等整段回答落地再整段合成——那正是普通/大字模式比灵动模式慢几秒的根因。
     LaunchedEffect(settings.autoSpeak, showCall, settings.callEngine) {
@@ -335,17 +334,16 @@ fun LargeTextScreen(
         // 豆包全双工自己走 WebSocket 出声（音频在 DuplexAudioEngine 里播放），
         // 绝不能再让 TtsPlayer 读同一段回答，否则两套音频抢 AudioTrack 双重发声。
         val duplexCall = showCall && settings.callEngine == "doubao"
-        // 已经边生成边播过就别再整段读一遍，否则同一段话放两遍
-        if (streamSpoke) {
-            spokenTs = msg.ts
-            return@LaunchedEffect
-        }
         if (!duplexCall && (showCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
-            // 流式播报可能还在接第一句（极短回答尤其明显）：给它 1.2 秒，
-            // 这期间一旦出声就把标记置位，这里就不再整段读——否则会话说两遍
-            delay(1_200)
-            if (vm.streamSpoke.value) return@LaunchedEffect
+            // 等这一轮的播报裁决：PENDING = 流式还在接第一句（4 字首句实测要 1.7 秒才出声），
+            // 最多等 4.5 秒；已经出声就什么都不做，只有彻底没出声才整段读
+            val deadline = System.currentTimeMillis() + 4_500
+            while (System.currentTimeMillis() < deadline && vm.speechState.value == ChatViewModel.Speech.PENDING) {
+                delay(120)
+            }
+            if (vm.speechState.value == ChatViewModel.Speech.STREAMING) return@LaunchedEffect
+            com.lvyoubao.app.data.LogStore.log("autospeak", "整段兜底播报：流式没出声，回答 ${msg.text.length} 字")
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         }
     }

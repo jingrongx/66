@@ -289,23 +289,20 @@ fun AskScreen(
     // 自动播报：开关打开时，**AI 一开始吐字就按句开播**（与灵动模式同一条流水线）
     var spokenTs by remember { mutableStateOf(0L) }
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
-    val streamSpoke by vm.streamSpoke.collectAsState()
     LaunchedEffect(settings.autoSpeak) { vm.setLiveSpeakEnabled(settings.autoSpeak) }
     LaunchedEffect(lastAssistant?.ts, settings.autoSpeak) {
         val msg = lastAssistant ?: return@LaunchedEffect
         // 只读 20 秒内的新回答：切页面/切会话/重进 App 不再把旧消息读一遍
         val fresh = System.currentTimeMillis() - msg.ts < 20_000
-        // 已经边生成边播过了就别再整段读一遍，否则同一段话放两遍
-        if (streamSpoke) {
-            spokenTs = msg.ts
-            return@LaunchedEffect
-        }
         if (settings.autoSpeak && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
-            // 流式播报可能还在接第一句（极短回答尤其明显）：给它 1.2 秒，
-            // 期间一旦出声就不再整段读，否则同一段话放两遍
-            delay(1_200)
-            if (vm.streamSpoke.value) {
+            // 等这一轮的播报裁决：PENDING = 流式还在接第一句（4 字首句实测要 1.7 秒才出声），
+            // 最多等 4.5 秒；已经出声就跳过，只有彻底没出声才整段兜底
+            val deadline = System.currentTimeMillis() + 4_500
+            while (System.currentTimeMillis() < deadline && vm.speechState.value == ChatViewModel.Speech.PENDING) {
+                delay(120)
+            }
+            if (vm.speechState.value == ChatViewModel.Speech.STREAMING) {
                 com.lvyoubao.app.data.LogStore.log("autospeak", "流式播报已接手，跳过整段朗读")
                 return@LaunchedEffect
             }
