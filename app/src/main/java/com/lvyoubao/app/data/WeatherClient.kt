@@ -75,8 +75,9 @@ object WeatherClient {
             amapBlockedUntil = System.currentTimeMillis() + 10 * 60 * 1000L
             LogStore.log(
                 "weather",
-                "高德 Key 不是「Web服务」类型（$text），10 分钟内改用国内免 Key 源；" +
-                    "去 lbs.amap.com 加一个「Web服务」Key 填到设置里即可恢复",
+                "高德拒绝（$text）：服务端判定这把 Key 与调用平台不符（10009）。" +
+                    "若控制台里它确实标着「Web服务」，检查是否绑在另一个应用/账号下、或开了「数字签名」；" +
+                    "这 10 分钟内天气走国内免 Key 源（中国天气网），不影响使用",
             )
         }
     }
