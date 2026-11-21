@@ -14,6 +14,9 @@ object RobotIntent {
         data class Move(val distCm: Int) : Command()
         data class Turn(val angleDeg: Int) : Command()
         data class Head(val angleDeg: Int) : Command()
+        /** 成套动作流程：AI 只报流程名+次数，本地展开成指令链（流程起止都是平视/原朝向） */
+        data class Flow(val kind: FlowKind, val reps: Int = 1) : Command()
+        enum class FlowKind { NOD, SHAKE, BOW, LOOK_AROUND }
         data object Look : Command()
         data object Battery : Command()
         data class Volume(val action: DeviceVolume.Action, val percent: Int = 60) : Command()
@@ -47,6 +50,12 @@ object RobotIntent {
                     angleDeg == 0 -> "好的，平视了"
                     else -> "好的，低头啦"
                 }
+                is Flow -> when (kind) {
+                    FlowKind.NOD -> if (reps > 1) "好的，点了${reps}下头" else "好的，点个头"
+                    FlowKind.SHAKE -> "好的，摇摇头"
+                    FlowKind.BOW -> "好的，鞠个躬"
+                    FlowKind.LOOK_AROUND -> "好的，我看看四周"
+                }
                 Look -> "好的，我看看"
                 Battery -> ""
                 is Volume -> ""
@@ -69,6 +78,12 @@ object RobotIntent {
                     angleDeg > 0 -> "抬头"
                     angleDeg == 0 -> "平视"
                     else -> "低头"
+                }
+                is Flow -> when (kind) {
+                    FlowKind.NOD -> if (reps > 1) "点${reps}下头" else "点头"
+                    FlowKind.SHAKE -> "摇头"
+                    FlowKind.BOW -> "鞠躬"
+                    FlowKind.LOOK_AROUND -> "看看四周"
                 }
                 Look -> "看看前面"
                 Battery -> "报一下电量"
@@ -121,22 +136,54 @@ object RobotIntent {
         }
     }
 
+    /**
+     * 动作流程展开：成套动作 = 清晰的流程定义（起点平视/原朝向 → 动作 → 终点回正），
+     * AI 只报流程名+次数，这里负责转成控制指令序列。播报用流程名，不逐条念指令。
+     */
+    fun expandFlow(cmd: Command): List<Command> = when (cmd) {
+        is Command.Flow -> when (cmd.kind) {
+            // 点头：平视 → (抬头 → 低头)×次数 → 回平视
+            Command.FlowKind.NOD -> buildList {
+                add(Command.Head(0))
+                repeat(cmd.reps.coerceIn(1, 3)) {
+                    add(Command.Head(12))
+                    add(Command.Head(-8))
+                }
+                add(Command.Head(0))
+            }
+            // 摇头：头部没有左右自由度，身体小幅左右转模拟，净转角回正
+            Command.FlowKind.SHAKE -> buildList {
+                repeat(cmd.reps.coerceIn(1, 3)) {
+                    add(Command.Turn(20))
+                    add(Command.Turn(-40))
+                    add(Command.Turn(20))
+                }
+            }
+            // 鞠躬：平视 → 低头到接近最低 → 回平视
+            Command.FlowKind.BOW -> listOf(Command.Head(0), Command.Head(-20), Command.Head(0))
+            // 东张西望：左右转看一圈，净转角回正
+            Command.FlowKind.LOOK_AROUND -> listOf(Command.Turn(30), Command.Turn(-60), Command.Turn(30))
+        }
+        else -> listOf(cmd)
+    }
+
     /** AI 解析协议：每行一个「动作 数值」，一句话可含多个动作按顺序输出；宁 NONE 勿动 */
     private val SYSTEM_PROMPT = """
         你是机器人语音指令解析器。把用户这句话解析成指令序列，每个动作单独一行「动作 数值」，绝不解释。
         可用动作（优必选小方头）：
         MOVE 厘米——底盘前进/后退：正数前进、负数后退，没说距离默认30。例：「向前走30厘米」→MOVE 30；「后退一点」→MOVE -15；「往前走走」→MOVE 30
         TURN 度——转向：正数左转、负数右转；没说角度按「左转/右转90、转个身180、一点30」。例：「左转90度」→TURN 90；「右转一点」→TURN -30；「转个身」→TURN 180
-        HEAD 度——头部抬头/低头/摆正：范围-25到23，正抬头负低头，0是平视。例：「抬头」→HEAD 15；「低头」→HEAD -10；「平视」「正视」「头摆正」「头回正」→HEAD 0
-        自然语义映射（用户说的是意思不是标准指令，按语义翻译成动作链；物理结构：底盘可前后/转向，头部只能俯仰，没有头部左右摇/侧歪的自由度）：
-        「点头」「点点头」「点个头」→ 两行：HEAD 12 和 HEAD -8；「连续点头」「点两下头」「一直点头」→ 四行：HEAD 12、HEAD -8、HEAD 12、HEAD -8
-        「摇头」「摇摇头」→ 头不能左右摇，身体小幅模拟，三行：TURN 20、TURN -40、TURN 20
-        「歪头」「歪着看看」→ 头不能侧歪，两行：TURN 15 和 TURN -15
-        「看天上」「看天花板」「抬头看天」→HEAD 22；「看地上」「低头找找」「找找地上」→HEAD -18
-        「东张西望」「到处看看」「环顾四周」→ 三行：TURN 30、TURN -60、TURN 30
-        「鞠躬」→HEAD -20（没有腰部关节，用最大低头近似）
-        「转过身来」「转过来面向我」「转个身」→TURN 180
-        「使点劲点头」「大力点头」幅度放大：HEAD 20 和 HEAD -12
+        HEAD 度——头部抬头/低头/摆正：范围-25到23，正抬头负低头，0是平视。例：「抬头」→HEAD 15；「低头」→HEAD -10；「平视」「正视」「头摆正」「头回正」→HEAD 0；「看天上」「看天花板」→HEAD 22；「看地上」→HEAD -18
+        成套动作用「动作流程」，流程起止都有定义（起点平视/原朝向，终点回正），只输出「流程 次数」一行，不要自己拆成 HEAD/TURN：
+        NOD 次数——点头流程（平视→抬头→低头→回平视）：「点头」「点点头」→NOD 1；「连续点头」「点两下头」→NOD 2；次数限1-3
+        SHAKE 次数——摇头流程（头没有左右自由度，身体小幅左右转模拟、转角回正）：「摇头」「摇摇头」→SHAKE 1
+        BOW——鞠躬流程（平视→低头到接近最低→回平视）：「鞠躬」「行个礼」→BOW
+        LOOK_AROUND——环顾流程（左右转看一圈、转角回正）：「东张西望」「到处看看」「环顾四周」→LOOK_AROUND
+        复合移动动作要分解组合：机器人只有三个原语（MOVE 前后、TURN 转向、HEAD 俯仰），把用户要的复合动作按执行顺序逐行拆成原语，拆解规则：
+        ①朝向复原——为走斜向/侧移临时转的角度，走完必须转回来；只有用户明确要换朝向（转身/掉头/面向我）才保持
+        ②安全小值——没说距离用20-30厘米，没说角度用30-45度，绝不超过100厘米
+        ③来回类=去+回；绕圈类=「走一段+转一段」重复拼出圆形；最多10行
+        例：「向左前方走一点」→ 三行：TURN 45、MOVE 20、TURN -45；「来回走两趟」→ 四行：MOVE 30、MOVE -30、MOVE 30、MOVE -30；「原地转个圈」→TURN 360；「画个圈」→ 八行：MOVE 20、TURN 45 重复4次；「走个正方形」→ 八行：MOVE 30、TURN 90 重复4次；「后退着左转」→ 三行：TURN 30、MOVE -20、TURN -30；「扭一扭」「跳个舞」→ 四行：TURN 20、TURN -40、TURN 20、HEAD 0
         LOOK——用摄像头拍一张照片看看眼前。只要用户想让小源当场用摄像头看一眼（说法五花八门，不限于特定词），都算 LOOK：如「看看前面有什么」「前面是什么」「看看这是什么」「你看到了什么」「看看周围」「帮我看看眼前的」「拍张照看看」「瞅一眼」。判断标准：动作是「当场拍照看环境」，不是查资料问知识。注意「平视/正视/头摆正」是头部动作（HEAD 0），「抬头看看你」是抬头动作（HEAD），都不是 LOOK。
         BATTERY——报一下小源自己这台设备的电量。例：「你电量还剩多少」「快没电了吗」「电量多少」→BATTERY。注意问的是小源本机，不是机器人；只单发，不与其他动作同句。
         TIMER 秒数 要提醒的事——开始一个倒计时，把时长换算成总秒数；带提醒事项时把事项写在秒数后面：「定个5分钟的倒计时」→TIMER 300；「计时10分钟」→TIMER 600；「15分钟后提醒我去看锅」→TIMER 900 看锅；支持小时/分钟/秒组合（1小时30分=5400）
@@ -151,9 +198,9 @@ object RobotIntent {
         VOLUME_SET 百分比——直接定到某音量：「音量调到50」「声音百分之三十」→VOLUME_SET 50（0-100 的整数）
         STOP——立即停止。例：「停下」「别动了」→STOP
         NONE——这句话不是在指挥机器人（闲聊、问天气、问路线、查资料等），交给正常聊天。判断按语义不按字面：问「附近有什么好吃的」是 NONE，「帮我看看前面有什么」是 LOOK，「点头」是动作链（HEAD 12 和 HEAD -8）。
-        用户一句话里有几个动作就输出几行（最多4行），按说话的先后顺序排：
-        例：「抬头然后低头」→ 两行：HEAD 15 和 HEAD -10；「先前进30再左转90度」→ MOVE 30 和 TURN 90；「转个身看看前面」→ TURN 180 和 LOOK。
-        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、LOOK、BATTERY、TIMER 900 关火、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、CONTINUOUS_OFF、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
+        用户一句话里有几个动作就输出几行（复合移动拆解后最多10行），按说话的先后顺序排：
+        例：「点头然后摇头」→ 两行：NOD 1 和 SHAKE 1；「抬头然后低头」→ 两行：HEAD 15 和 HEAD -10；「先前进30再左转90度」→ MOVE 30 和 TURN 90；「转个身看看前面」→ TURN 180 和 LOOK。
+        单个动作就输出一行。只输出「动作 数值」行（如 MOVE 30、TURN -90、HEAD 15、NOD 2、SHAKE 1、BOW、LOOK_AROUND、LOOK、BATTERY、TIMER 900 关火、NOTE 明天九点开会、MEMORY_SEARCH 火锅、VOLUME_SET 50、CONTINUOUS_OFF、STOP），绝不输出其他任何内容；拿不准一律输出一行 NONE。
     """.trimIndent()
 
     /** AI 解析：超 8 秒或网络/服务失败一律返回空表（回落聊天，控制不能卡死语音主流程） */
@@ -198,17 +245,22 @@ object RobotIntent {
                 out += Command.Timer(sec, label)
                 continue
             }
-            // 「动作 数字」指令（一行内可能塞多个）
-            Regex("(TIMER_STOP|CONTINUOUS_OFF|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|VOLUME)\\s*(-?\\d+)?")
+            // 「动作 数字」指令（一行内可能塞多个）。LOOK_AROUND 必须排在 LOOK 前，否则会被截短
+            Regex("(TIMER_STOP|CONTINUOUS_OFF|LOOK_AROUND|NOD|SHAKE|BOW|MOVE|TURN|HEAD|STOP|LOOK|BATTERY|VOLUME_SET|VOLUME_UP|VOLUME_DOWN|VOLUME_MUTE|VOLUME_MAX|VOLUME_RESTORE|VOLUME)\\s*(-?\\d+)?")
                 .findAll(upper)
                 .forEach { m ->
                     val value = m.groupValues[2].toIntOrNull()
                     when (m.groupValues[1]) {
                         "STOP" -> out += Command.Stop
                         "CONTINUOUS_OFF" -> out += Command.AssistantOff
-                        "MOVE" -> out += Command.Move(value ?: 30)
-                        "TURN" -> out += Command.Turn(value ?: 90)
-                        "HEAD" -> out += Command.Head(value ?: 15)
+                        "NOD" -> out += Command.Flow(Command.FlowKind.NOD, (value ?: 1).coerceIn(1, 3))
+                        "SHAKE" -> out += Command.Flow(Command.FlowKind.SHAKE, (value ?: 1).coerceIn(1, 3))
+                        "BOW" -> out += Command.Flow(Command.FlowKind.BOW)
+                        "LOOK_AROUND" -> out += Command.Flow(Command.FlowKind.LOOK_AROUND)
+                        // 物理量钳制：AI 偶发输出离谱值时兜底，别让机器人疯跑
+                        "MOVE" -> out += Command.Move((value ?: 30).coerceIn(-100, 100))
+                        "TURN" -> out += Command.Turn((value ?: 90).coerceIn(-360, 360))
+                        "HEAD" -> out += Command.Head((value ?: 15).coerceIn(-25, 23))
                         "LOOK" -> out += Command.Look
                         "BATTERY" -> out += Command.Battery
                         "VOLUME_UP" -> out += Command.Volume(DeviceVolume.Action.UP)
@@ -222,6 +274,6 @@ object RobotIntent {
                     }
                 }
         }
-        return out.take(4)
+        return out.take(10)
     }
 }

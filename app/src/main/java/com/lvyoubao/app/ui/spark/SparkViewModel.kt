@@ -654,30 +654,38 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
         val robot = robotClientOrNull(context, curSettings) ?: return true
 
+        // 流程先行展开：AI 只给流程名（NOD/SHAKE/...），这里转成「起点平视/原朝向、终点回正」
+        // 的控制指令序列。播报按流程名（「好的，点个头」），不逐条念「平视、抬头、低头、平视」。
+        val steps = chain.map { it.label to RobotIntent.expandFlow(it) }
         val executed = mutableListOf<String>()
-        for ((i, cmd) in chain.withIndex()) {
-            if (cmd == RobotIntent.Command.Look) {
-                if (executed.isNotEmpty()) announceChain(context, executed)
-                executeLook(context)
-                return true
+        val total = steps.sumOf { it.second.size }
+        var done = 0
+        for ((label, cmds) in steps) {
+            for (cmd in cmds) {
+                if (cmd == RobotIntent.Command.Look) {
+                    if (executed.isNotEmpty()) announceChain(context, executed)
+                    executeLook(context)
+                    return true
+                }
+                val ok = executeRobot(robot, cmd).fold(
+                    onSuccess = {
+                        done++
+                        true
+                    },
+                    onFailure = { err ->
+                        appendMessage(SparkMessage("assistant", "机器人没动起来：${err.message ?: "连接失败"}"))
+                        _statusHint.value = err.message ?: "机器人没动起来"
+                        speakHint(context, err.message ?: "机器人没动起来")
+                        false
+                    },
+                )
+                if (!ok) return true // 失败即停编排
+                if (done < total) {
+                    _statusHint.value = "执行中（$done/$total）…"
+                    delay(estimateMillis(cmd)) // 留出动作的运动耗时，节奏可感知
+                }
             }
-            val ok = executeRobot(robot, cmd).fold(
-                onSuccess = {
-                    executed.add(cmd.label)
-                    true
-                },
-                onFailure = { err ->
-                    appendMessage(SparkMessage("assistant", "机器人没动起来：${err.message ?: "连接失败"}"))
-                    _statusHint.value = err.message ?: "机器人没动起来"
-                    speakHint(context, err.message ?: "机器人没动起来")
-                    false
-                },
-            )
-            if (!ok) return true // 失败即停编排
-            if (i < chain.lastIndex) {
-                _statusHint.value = "执行中（${i + 1}/${chain.size}）…"
-                delay(estimateMillis(cmd)) // 留出动作的运动耗时，节奏可感知
-            }
+            executed.add(label)
         }
         announceChain(context, executed)
         return true
@@ -731,7 +739,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private fun estimateMillis(cmd: RobotIntent.Command): Long = when (cmd) {
         is RobotIntent.Command.Move -> ((kotlin.math.abs(cmd.distCm) / 8f).coerceIn(1f, 8f) * 1000).toLong()
         is RobotIntent.Command.Turn -> ((kotlin.math.abs(cmd.angleDeg) / 60f).coerceIn(1f, 6f) * 1000).toLong()
-        is RobotIntent.Command.Head -> 1_200L
+        is RobotIntent.Command.Head -> 700L // 舵机俯仰本身很快；点头这类流程有 4 步，1.2s/步太拖
         else -> 500L
     }
 
