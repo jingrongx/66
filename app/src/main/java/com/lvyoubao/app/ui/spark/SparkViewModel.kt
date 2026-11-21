@@ -100,6 +100,22 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private val notes = app.noteStore
     private val appContext = app.applicationContext
 
+    init {
+        // 三种模式共用同一份会话数据：灵动模式以前把历史只放在内存里（SparkChatStore），
+        // 换到普通/大字模式就「看不到刚才聊的」，进程一死全丢。
+        // 现在绑定到 SessionStore 的「当前会话」，磁盘上就是同一份数据。
+        viewModelScope.launch {
+            runCatching {
+                val store = app.sessionStore
+                val cur = runCatching { repo.currentSessionId.firstOrNull() }.getOrNull()
+                val sid = cur
+                    ?: store.sessions.value.firstOrNull()?.id
+                    ?: store.create().id.also { store.setCurrent(it) }
+                SparkChatStore.bind(appContext, store, sid, viewModelScope)
+            }
+        }
+    }
+
     // 必须 Eagerly：灵动模式界面从不收集这个流，WhileSubscribed 会让上游永不启动，
     // settings.value 永远停在默认空配置——曾导致退出灵动模式把默认空配置整体写回、
     // 清空用户全部配置，以及误报「未配置语音识别 Key」

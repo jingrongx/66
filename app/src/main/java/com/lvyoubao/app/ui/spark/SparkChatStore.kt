@@ -1,7 +1,17 @@
 package com.lvyoubao.app.ui.spark
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.OutMessage
+import com.lvyoubao.app.data.SessionMessage
+import com.lvyoubao.app.data.SessionStore
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * 灵动模式会话仓库（进程内单例）：
@@ -24,8 +34,100 @@ object SparkChatStore {
     private var lastCommittedAsr: String = ""
     private var lastCommittedAt: Long = 0L
 
+
+    // ---------- 与 SessionStore 打通（三种模式共用同一份会话数据）----------
+    // 原则：三种模式只是界面不同，数据必须一致。灵动的历史以前只活在内存里，
+    // 换模式看不到、进程一死就没了；现在写穿到 SessionStore 的「当前会话」。
+    private var store: SessionStore? = null
+    private var sessionId: String? = null
+    private var scope: CoroutineScope? = null
+    private var appCtx: Context? = null
+    /** 当前这条 assistant 是否已经落库（流式只落一次，之后都是就地更新） */
+    private var assistantPersisted = false
+
+    /** 绑定到当前会话：把磁盘上的历史读进来，同时把 LLM 上下文也补齐 */
+    fun bind(context: Context, sessionStore: SessionStore, sid: String, coroutineScope: CoroutineScope) {
+        appCtx = context.applicationContext
+        store = sessionStore
+        sessionId = sid
+        scope = coroutineScope
+        val loaded = sessionStore.get(sid)?.messages.orEmpty()
+        messages.value = loaded.map { it.toSpark() }
+        history.clear()
+        loaded.forEach { history += OutMessage(role = it.role, text = it.toChatText()) }
+        assistantPersisted = loaded.lastOrNull()?.let { it.role == "assistant" && it.text.isNotBlank() } == true
+        LogStore.log("spark", "会话已打通：载入 " + loaded.size + " 条历史（session=" + sid.take(8) + "）")
+    }
+
+    /** 会话消息 → 灵动界面消息（图片按 1/2 降采样解码，别把内存吃穿） */
+    private fun SessionMessage.toSpark(): SparkMessage {
+        val bitmaps = imagePaths.mapNotNull { path ->
+            runCatching {
+                val opt = BitmapFactory.Options().apply { inSampleSize = 2 }
+                BitmapFactory.decodeFile(path, opt)
+            }.getOrNull()
+        }
+        return SparkMessage(role = role, text = text, photos = bitmaps)
+    }
+
+    /** 照片落盘（和普通模式共用 filesDir/sent_images，切模式互相看得到） */
+    private fun savePhotos(photos: List<Bitmap>): List<String> {
+        val ctx = appCtx ?: return emptyList()
+        if (photos.isEmpty()) return emptyList()
+        val dir = File(ctx.filesDir, "sent_images").apply { runCatching { mkdirs() } }
+        return photos.mapNotNull { bmp ->
+            runCatching {
+                val f = File(dir, "spark_" + System.currentTimeMillis() + "_" + (0..999).random() + ".jpg")
+                FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                f.absolutePath
+            }.getOrNull()
+        }
+    }
+
+    private fun persistAppend(msg: SparkMessage) {
+        val sid = sessionId ?: return
+        val st = store ?: return
+        val sc = scope ?: return
+        // assistant 的空占位不落库：请求失败/被打断时不能给历史留一张空卡
+        if (msg.role == "assistant" && msg.text.isBlank()) return
+        val paths = savePhotos(msg.photos)
+        assistantPersisted = msg.role == "assistant"
+        sc.launch {
+            st.appendMessage(
+                sid,
+                SessionMessage(
+                    role = msg.role,
+                    text = msg.text,
+                    hadImage = paths.isNotEmpty(),
+                    imagePaths = paths,
+                    ts = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+
+    /** 流式正文就地更新到最后一条 assistant（没落过库就先落一条） */
+    private fun persistAssistantText(text: String) {
+        if (text.isBlank()) return
+        val sid = sessionId ?: return
+        val st = store ?: return
+        val sc = scope ?: return
+        if (assistantPersisted) {
+            sc.launch { st.updateLastAssistant(sid, text) }
+        } else {
+            assistantPersisted = true
+            sc.launch {
+                st.appendMessage(
+                    sid,
+                    SessionMessage(role = "assistant", text = text, ts = System.currentTimeMillis()),
+                )
+            }
+        }
+    }
+
     fun append(msg: SparkMessage) {
         messages.value = (messages.value + msg).takeLast(40) // 上限防照片占内存
+        persistAppend(msg)
     }
 
     fun updateLastAssistant(text: String) {
@@ -34,6 +136,7 @@ object SparkChatStore {
             list[list.lastIndex] = list.last().copy(text = text)
             messages.value = list
         }
+        persistAssistantText(text)
     }
 
     /**
@@ -139,6 +242,7 @@ object SparkChatStore {
         if (idx < 0) return
         list[idx] = list[idx].copy(text = text)
         messages.value = list
+        persistAssistantText(text)
     }
 
     @Synchronized

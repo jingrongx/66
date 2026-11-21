@@ -6,6 +6,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -372,46 +379,42 @@ fun LargeTextScreen(
             color = MaterialTheme.colorScheme.surfaceVariant,
         ) {
         Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
-        // 头部：标题 + 设置 + 退出
+        // 头部：标题 + 五个功能入口（新对话 / 历史 / 通话 / 设置 / 退出）收成一行。
+        // 以前是「第一行 设置+退出、第二行 新对话+历史+通话」两排大按钮，
+        // 240px 高的小屏光控件就吃掉三分之一，手机上更显得散。退出单独留红字，不藏进菜单。
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 12.dp, top = 10.dp),
+                .padding(start = 14.dp, end = 10.dp, top = 6.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "旅游宝 · 大字模式",
-                fontSize = 20.sp,
+                "大字模式",
+                fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
+                maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
-            // 设置：家人帮着配的地方（AI、大字模式开关都在设置里），全屏盖在大字模式上
-            // 顶部导航一律白底深字（浅蓝只留给用户气泡，深青只留给按住说话/发送）
-            Button(
-                onClick = {
-                    keyboard?.hide()
-                    showSettings = true
-                },
-                modifier = Modifier.height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                contentPadding = PaddingValues(horizontal = 14.dp),
-            ) { Text("设置", fontSize = 17.sp, maxLines = 1) }
-            Spacer(Modifier.width(8.dp))
-            // 退出：直接退出应用回桌面，不再切模式（模式切换只认设置里的「大字模式」开关）
-            Button(
+            HeaderIcon(Icons.Default.Add, "新对话") { keyboard?.hide(); vm.newSession() }
+            HeaderIcon(Icons.Default.List, "历史对话") { keyboard?.hide(); showHistory = true }
+            HeaderIcon(Icons.Default.Phone, "通话") { keyboard?.hide(); showCall = true }
+            HeaderIcon(Icons.Default.Settings, "设置") { keyboard?.hide(); showSettings = true }
+            // 退出：直接退出应用回桌面（模式切换只认设置里的「大字模式」开关）
+            TextButton(
                 onClick = {
                     TtsPlayer.stop()
                     onExitApp()
                 },
-                modifier = Modifier.height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                contentPadding = PaddingValues(horizontal = 14.dp),
-            ) { Text("退出", fontSize = 17.sp, maxLines = 1) }
+                contentPadding = PaddingValues(horizontal = 8.dp),
+            ) {
+                Text(
+                    "退出",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                )
+            }
         }
         // 更新横幅：发现新版本时占满一行（大字模式下也要能看到、点得到）
         if (newVersion != null) {
@@ -429,44 +432,6 @@ fun LargeTextScreen(
                     maxLines = 1,
                 )
             }
-        }
-        // 第二行：三个大导航按钮（新对话 / 历史 / 语音通话）——白底深字浮在浅青灰操作带上
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Button(
-                onClick = { keyboard?.hide(); vm.newSession() },
-                modifier = Modifier.weight(1f).height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) { Text("新对话", fontSize = 17.sp, maxLines = 1) }
-            Button(
-                onClick = { keyboard?.hide(); showHistory = true },
-                modifier = Modifier.weight(1f).height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) { Text("历史对话", fontSize = 17.sp, maxLines = 1) }
-            Button(
-                onClick = { keyboard?.hide(); showCall = true },
-                modifier = Modifier.weight(1f).height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) { Text("通话", fontSize = 17.sp, maxLines = 1) }
         }
         }
         }
@@ -711,6 +676,8 @@ fun LargeTextScreen(
                             modifier = Modifier.padding(horizontal = 10.dp),
                             fontSize = 20.sp,
                             maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Clip,
                             fontWeight = FontWeight.Bold,
                             color = if (recording != null) {
                                 MaterialTheme.colorScheme.onError
@@ -1065,6 +1032,26 @@ private fun LargeTextAssistantCard(
     }
     CardShareDialog(shareState)
     CardShareTipDialog(shareState)
+}
+
+
+/** 顶部功能图标：40dp 触控区 + 22dp 图标（小屏上比 17sp 文字按钮省一半地方） */
+@Composable
+private fun HeaderIcon(icon: ImageVector, desc: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = desc,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(22.dp),
+        )
+    }
 }
 
 /** 生成中的回答：实时流式正文，超大字，可选中复制 */

@@ -191,9 +191,28 @@ class SessionStore(private val context: Context, private val repo: SettingsRepos
         deleteImageFiles(deadImages)
     }
 
-    /** 更新并持久化会话滚动摘要 */
-    suspend fun updateSummary(sessionId: String, droppedCount: Int, summaryText: String) = mutex.withLock {
+    /**
+     * 就地更新最后一条 assistant 的正文（流式过程中会被反复调用）。
+     * 灵动模式与普通/大字模式共用同一份会话数据后，流式文本也要落到同一个会话里，
+     * 否则切模式回来只能看到半句话或者干脆看不到。
+     */
+    suspend fun updateLastAssistant(sessionId: String, text: String) = mutex.withLock {
         _sessions.value = _sessions.value.map { s ->
+            if (s.id != sessionId) s
+            else {
+                val idx = s.messages.indexOfLast { it.role == "assistant" }
+                if (idx < 0) s
+                else s.copy(
+                    messages = s.messages.toMutableList().also { it[idx] = it[idx].copy(text = text) },
+                    updatedAt = System.currentTimeMillis(),
+                )
+            }
+        }
+        persist()
+    }
+
+    /** 更新并持久化会话滚动摘要 */
+    suspend fun updateSummary(sessionId: String, droppedCount: Int, summaryText: String) = mutex.withLock {        _sessions.value = _sessions.value.map { s ->
             if (s.id == sessionId) s.copy(summaryDroppedCount = droppedCount, summaryText = summaryText) else s
         }
         persist()
