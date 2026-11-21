@@ -1405,6 +1405,14 @@ class LiveTtsSession(context: Context) {
     var spoke: Boolean = false
         private set
 
+    /**
+     * 第一声真的出来时回调（主线程）。
+     * 极短的回答可能在 AI 结束时还没起播，调用方靠它把「已接手」这个状态补上，
+     * 否则会误判成没出声、再整段朗读一遍——同一段话放两遍。
+     */
+    @Volatile
+    var onFirstSound: (() -> Unit)? = null
+
     init {
         // 合成器：句子一到就合成，不等播放（合成约 1.5s/句，播放 4~6s/句，队列会稳定领先）
         scope.launch(Dispatchers.IO) {
@@ -1425,12 +1433,12 @@ class LiveTtsSession(context: Context) {
                 if (!head.isNullOrBlank() && TtsPlayer.isActive(gen)) {
                     val streamed = TtsPlayer.playStreamedPiece(head, gen)
                     if (streamed) {
-                        spoke = true
+                        markSpoke()
                     } else if (TtsPlayer.isActive(gen)) {
                         // 流式一帧都没出（连不上/协议失败）：这一句退回文件链，别把首句丢了
                         val f = TtsPlayer.synthesizeOnly(head, dir)
                         if (f != null) {
-                            if (TtsPlayer.playPrepared(f, gen)) spoke = true
+                            if (TtsPlayer.playPrepared(f, gen)) markSpoke()
                             runCatching { f.delete() }
                         }
                     }
@@ -1440,7 +1448,7 @@ class LiveTtsSession(context: Context) {
                         runCatching { f.delete() }
                         break
                     }
-                    if (TtsPlayer.playPrepared(f, gen)) spoke = true
+                    if (TtsPlayer.playPrepared(f, gen)) markSpoke()
                     runCatching { f.delete() }
                 }
                 // 文件都写进音轨不等于播完了，等播放头追上写入量再收尾
@@ -1503,6 +1511,12 @@ class LiveTtsSession(context: Context) {
         job.cancel()
         pieces.close()
         runCatching { dir.listFiles()?.forEach { it.delete() } }
+    }
+
+    private fun markSpoke() {
+        if (spoke) return
+        spoke = true
+        runCatching { onFirstSound?.invoke() }
     }
 
     private fun emit(piece: String) {

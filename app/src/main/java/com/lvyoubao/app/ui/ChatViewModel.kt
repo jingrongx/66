@@ -673,7 +673,12 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     _stream.update { cur -> val s = cur ?: StreamState(); s.copy(answer = s.answer + d) }
                     // 要出声的话：这一段刚吐出来的字顺带喂给播报流水线，凑够一句就先开口
                     if (liveSpeakEnabled && d.isNotBlank()) {
-                        val live = liveTts ?: LiveTtsSession(appContext).also { liveTts = it }
+                        val live = liveTts ?: LiveTtsSession(appContext).also {
+                            // 第一声真的出来时立刻置位：极短回答可能在 AI 结束时还没起播，
+                            // 界面那边靠这个标记判断「已接手」，别整段再读一遍
+                            it.onFirstSound = { _streamSpoke.value = true }
+                            liveTts = it
+                        }
                         live.feed(d)
                     }
                 },

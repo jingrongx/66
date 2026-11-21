@@ -113,6 +113,7 @@ import com.lvyoubao.app.ui.update.UpdateReadyDialog
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -300,11 +301,18 @@ fun AskScreen(
             return@LaunchedEffect
         }
         if (settings.autoSpeak && msg.ts != spokenTs && fresh) {
+            spokenTs = msg.ts
+            // 流式播报可能还在接第一句（极短回答尤其明显）：给它 1.2 秒，
+            // 期间一旦出声就不再整段读，否则同一段话放两遍
+            delay(1_200)
+            if (vm.streamSpoke.value) {
+                com.lvyoubao.app.data.LogStore.log("autospeak", "流式播报已接手，跳过整段朗读")
+                return@LaunchedEffect
+            }
             com.lvyoubao.app.data.LogStore.log(
                 "autospeak",
                 "整段兜底播报：回答 ts=${msg.ts} 长度=${ChatViewModel.speakableText(msg).length} 字",
             )
-            spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         } else {
             com.lvyoubao.app.data.LogStore.log(

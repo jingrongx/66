@@ -342,6 +342,10 @@ fun LargeTextScreen(
         }
         if (!duplexCall && (showCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
+            // 流式播报可能还在接第一句（极短回答尤其明显）：给它 1.2 秒，
+            // 这期间一旦出声就把标记置位，这里就不再整段读——否则会话说两遍
+            delay(1_200)
+            if (vm.streamSpoke.value) return@LaunchedEffect
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
         }
     }
