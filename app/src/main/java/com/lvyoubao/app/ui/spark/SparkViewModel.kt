@@ -1141,7 +1141,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             // 实测 RTT 250ms、丢包 33%，之前 10s/30s 的超时等于「问天气先站十几秒」。
             // 查不到也不挡路：位置照常给模型，让它按常识和季节回答，比干等强。
             val weatherLine = if (wantsWeather && place != null) {
-                WeatherClient.currentQuick(place.lon, place.lat, timeoutMs = 1_500)
+                // 高德 Key 已在设置里（路线/POI 用的同一个）：国内接口 100ms 级，
+                // Open-Meteo 只在没 Key / 高德失败时兜底
+                WeatherClient.currentQuick(
+                    place.lon,
+                    place.lat,
+                    timeoutMs = 1_500,
+                    amapKey = curSettings.amapKey,
+                    cityHint = place.description,
+                )
             } else {
                 null
             }
@@ -1822,7 +1830,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 val p = LocationContext.current(appContext)
                     ?: LocationContext.fresh(appContext, timeoutMs = 2_500)
                 if (p != null) {
-                    WeatherClient.prewarm(p.lon, p.lat)
+                    WeatherClient.prewarm(
+                        p.lon,
+                        p.lat,
+                        amapKey = settings.value.amapKey,
+                        cityHint = p.description,
+                    )
                     LogStore.log("weather", "天气缓存预热：${p.description} ${p.lon},${p.lat}")
                 }
             }

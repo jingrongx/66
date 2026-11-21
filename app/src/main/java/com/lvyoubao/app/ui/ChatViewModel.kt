@@ -608,7 +608,14 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                         ?: LocationContext.fresh(context, timeoutMs = 1_200)
                     if (here != null) {
                         val fc = withContext(Dispatchers.IO) {
-                            runCatching { WeatherClient.forecast(here.lon, here.lat) }.getOrNull()
+                            runCatching {
+                                WeatherClient.forecast(
+                                    here.lon,
+                                    here.lat,
+                                    amapKey = settingsValue.amapKey,
+                                    cityHint = here.description,
+                                )
+                            }.getOrNull()
                         }.orEmpty()
                         if (fc.isNotBlank()) {
                             weatherBlock = buildString {

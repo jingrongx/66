@@ -85,7 +85,12 @@ object AppTools {
 
                 WEATHER -> {
                     val p = place ?: throw ApiException("没有位置信息")
-                    WeatherClient.current(p.lon, p.lat)
+                    WeatherClient.current(
+                        p.lon,
+                        p.lat,
+                        amapKey = settings.amapKey,
+                        cityHint = p.description,
+                    )
                 }
 
                 ROUTE -> {
