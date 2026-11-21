@@ -771,11 +771,11 @@ fun LargeTextScreen(
                 is DoubaoDuplexClient.Event.TurnDone -> {
                     duplexAnswer = ev.answer
                     if (ev.answer.isNotBlank()) {
-                        val key = ev.answer.filterNot { it.isWhitespace() }
+                        val key = ev.asr.filterNot { it.isWhitespace() } + "|" + ev.answer.filterNot { it.isWhitespace() }
                         if (key != lastDuplexTurnKey) {
                             lastDuplexTurnKey = key
                             val paths = duplexPhotos.mapNotNull { it.localPath }
-                            vm.appendDuplexTurn(duplexAsr, ev.answer, paths)
+                            vm.appendDuplexTurn(ev.asr, ev.answer, paths)
                             duplexPhotos = emptyList()
                         }
                     }

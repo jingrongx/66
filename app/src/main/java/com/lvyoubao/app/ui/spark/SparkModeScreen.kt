@@ -220,12 +220,12 @@ fun SparkModeScreen(
                     if (ev.answer.isNotBlank()) {
                         // 本轮若已被本机能力接走（并已 cancelResponse），模型这条是残留的下发：
                         // 只在通话界面显示，不再往会话里落第二张卡片。
-                        val handledLocally = duplexAsr.isNotBlank() &&
-                            duplexAsr == localHandledAsr &&
+                        val handledLocally = ev.asr.isNotBlank() &&
+                            ev.asr == localHandledAsr &&
                             System.currentTimeMillis() - localHandledAt < 15_000L
                         if (!handledLocally) {
                             // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
-                            SparkChatStore.appendDuplexTurn(duplexAsr, ev.answer)
+                            SparkChatStore.appendDuplexTurn(ev.asr, ev.answer)
                         }
                     }
                     duplexMapCards.lastOrNull()?.let { SparkChatStore.attachMapCard(it) }

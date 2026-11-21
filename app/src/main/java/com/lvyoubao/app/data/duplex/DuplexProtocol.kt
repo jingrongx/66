@@ -230,7 +230,9 @@ internal object DuplexProtocol {
             "conversation.item.input_audio_transcription.started" -> Downstream.AsrStarted(s("item_id"))
             "conversation.item.input_audio_transcription.delta" -> Downstream.AsrDelta(s("item_id"), s("delta"))
             "conversation.item.input_audio_transcription.completed" ->
-                Downstream.AsrCompleted(s("item_id"), s("transcript"))
+                // 真机抓包（2026-11 v3 duplex 实测）：文档写 transcript，服务端实际下发的字段是 text，
+                // 只读 transcript 会拿到空串——通话里本机命令（机器人等）全靠这个 final 文本触发。
+                Downstream.AsrCompleted(s("item_id"), s("transcript").ifBlank { s("text") })
             "conversation.item.input_audio_transcription.failed" -> Downstream.AsrFailed(frame)
             "response.output_text.delta" -> Downstream.TextDelta(s("response_id"), s("delta"))
             "response.output_text.done" -> Downstream.TextDone(s("response_id"), s("text"))

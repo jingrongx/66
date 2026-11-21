@@ -58,8 +58,11 @@ class DoubaoDuplexClient(private val context: Context) {
         /**
          * 一轮回答收口（response.done / 被打断时的残句）。落会话历史以这个为准：
          * TextDone 不一定到（纯音频段、被打断），answer 是本轮已生成的全文/残文。
+         * asr 是本轮回答对应的用户识别稿——response 开始时冻结的快照。全双工下
+         * 用户会抢话，界面的活状态（duplexAsr）随时可能被下一轮 AsrStarted 清空，
+         * 落库必须用冻结值，否则 user 行丢失。
          */
-        data class TurnDone(val answer: String, val interrupted: Boolean) : Event
+        data class TurnDone(val asr: String, val answer: String, val interrupted: Boolean) : Event
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -84,6 +87,10 @@ class DoubaoDuplexClient(private val context: Context) {
     private val turnText = StringBuilder()
     /** 本地 speech_text（打招呼/干预回复）触发的 response 周期数：不是模型回答，不外发 TurnDone */
     private var localSpeechCycles = 0
+    /** 当前话头的识别稿（delta 累计快照，completed 到达后被 final 文本覆盖） */
+    private var pendingAsr = ""
+    /** 本轮 response 开始时冻结的识别稿：TurnDone 随事件带给上层落库 */
+    private var turnAsr = ""
     @Volatile private var muted = false
     @Volatile private var userSpeaking = false
 
@@ -124,6 +131,7 @@ class DoubaoDuplexClient(private val context: Context) {
                 }
                 is DuplexProtocol.Downstream.AsrStarted -> {
                     userSpeaking = true
+                    pendingAsr = ""
                     _events.tryEmit(Event.AsrStarted)
                     // ASR 只做本地停播（插话手感），不切 SPEAKING/LISTENING：
                     // 官方明确播放状态机与 ASR 解耦，状态只由 response.created/done/canceled 驱动。
@@ -132,9 +140,14 @@ class DoubaoDuplexClient(private val context: Context) {
                     // 不清零的话下一个真实回答会被误吞一次。
                     localSpeechCycles = 0
                 }
-                is DuplexProtocol.Downstream.AsrDelta ->
+                is DuplexProtocol.Downstream.AsrDelta -> {
+                    // delta 是本轮识别的累计快照（真机抓包确认），直接覆盖
+                    pendingAsr = ev.delta
                     _events.tryEmit(Event.Asr(ev.delta, isFinal = false))
+                }
                 is DuplexProtocol.Downstream.AsrCompleted -> {
+                    Log.d(TAG, "ASR final：${ev.transcript.take(40)}")
+                    pendingAsr = ev.transcript
                     _events.tryEmit(Event.Asr(ev.transcript, isFinal = true))
                     userSpeaking = false
                 }
@@ -154,9 +167,15 @@ class DoubaoDuplexClient(private val context: Context) {
                 // 两者都纳入，谁先到谁触发，避免跨模型切换时状态机失灵。
                 is DuplexProtocol.Downstream.ResponseCreated -> {
                     turnText.setLength(0)
+                    freezeTurnAsr()
                     setState(State.SPEAKING)
                 }
-                is DuplexProtocol.Downstream.AudioStarted -> setState(State.SPEAKING)
+                is DuplexProtocol.Downstream.AudioStarted -> {
+                    // 真机抓包：这台服务不发 response.created，音频起点就是新 response 的起点，
+                    // 识别稿冻结挂这里才靠得住（只冻结不清 turnText：一轮可能多段音频）
+                    freezeTurnAsr()
+                    setState(State.SPEAKING)
+                }
                 is DuplexProtocol.Downstream.AudioDelta -> audio?.enqueuePlayback(ev.pcm)
                 is DuplexProtocol.Downstream.AudioDone -> {
                     // 仅一段音频合成完，一轮回答可能有多段；不在此切 LISTENING，
@@ -219,7 +238,12 @@ class DoubaoDuplexClient(private val context: Context) {
         }
     }
 
-    /** 一个 response 周期收口：把累积文本作为 TurnDone 交给上层落会话历史 */
+    /** 冻结本轮回答对应的识别稿：之后用户抢话、新一轮 AsrStarted 都只改 pendingAsr，不动冻结值 */
+    private fun freezeTurnAsr() {
+        if (pendingAsr.isNotBlank()) turnAsr = pendingAsr
+    }
+
+    /** 一个 response 周期收口：把累积文本 + 冻结识别稿作为 TurnDone 交给上层落会话历史 */
     private fun finishTurn(interrupted: Boolean) {
         val text = turnText.toString()
         turnText.setLength(0)
@@ -228,7 +252,10 @@ class DoubaoDuplexClient(private val context: Context) {
             localSpeechCycles--
             return
         }
-        if (text.isNotBlank()) _events.tryEmit(Event.TurnDone(text, interrupted))
+        // 正常路径在 response 起点已冻结；没经过起点（异常流）用当前识别稿兜底
+        val asr = turnAsr.ifBlank { pendingAsr }
+        turnAsr = ""
+        if (text.isNotBlank()) _events.tryEmit(Event.TurnDone(asr, text, interrupted))
     }
 
     private var instructions: String = "你是旅游宝，一个简洁、口语化、带数字的随身助手。回答尽量短，像朋友聊天。"
