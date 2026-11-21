@@ -73,7 +73,9 @@ object WeatherCn {
      */
     fun cityCandidates(hint: String): List<String> {
         if (hint.isBlank()) return emptyList()
-        val text = hint.substringBefore("（").substringBefore("(")
+        // 注意用 last：IP 定位的描述是「网络定位（IP）：上海市上海（城市级…）」，
+        // 按第一个「（」切会把城市名整段切掉，只剩「网络定位」。
+        val text = hint.substringBeforeLast("（").substringBeforeLast("(")
         val stripped = text.replace(
             Regex("^[\\u4e00-\\u9fa5]{2,7}(?:省|自治区|特别行政区)"),
             "",
