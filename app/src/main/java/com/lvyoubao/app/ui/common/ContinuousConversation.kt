@@ -81,7 +81,7 @@ class ContinuousConversation(
         /**
          * 语速自适应收段：老人说话常有 1~2 秒的思考停顿，固定静音判据会把一句话切成两半，
          * 后半句单独送去识别就是「还没说完就发出去了」。
-         * 打开后会记住本句内出现过的最长停顿，收段门槛 = max(silenceEndMs, 最长停顿×1.7，上限 2.6 秒）。
+         * 打开后会记住本句内出现过的最长停顿，收段门槛 = max(silenceEndMs, 最长停顿×1.7，上限 1.6 秒）。
          */
         val adaptiveSilence: Boolean = false,
         /**
@@ -489,8 +489,10 @@ class ContinuousConversation(
                 appendSegment(frame) // 静音帧也录，保留自然尾音
                 // 收段门槛跟着说话人自己的节奏走：本句里他停过 1.5 秒，就等他 2.4 秒再收，
                 // 而不是死守 1.15 秒把人家的后半句切成新的一句（"还没说完就发出去了"）。
+                // 上限从 2.6 秒收到 1.6 秒：按 ×1.7 推，句中停 1 秒就要多等 2.6 秒才收段，
+                // 用户体感是「我说完了它还在发呆」。1.6 秒已经能盖住正常换气停顿。
                 val needSilence = if (config.adaptiveSilence) {
-                    maxOf(config.silenceEndMs, minOf(longestPauseMs * 17 / 10, 2_600L))
+                    maxOf(config.silenceEndMs, minOf(longestPauseMs * 17 / 10, 1_600L))
                 } else {
                     config.silenceEndMs
                 }

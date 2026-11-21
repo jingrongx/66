@@ -17,8 +17,8 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 163
-        versionName = "0.9.40"
+        versionCode = 164
+        versionName = "0.9.41"
 
         // RNNoise 只编两个 ARM ABI：这台设备是 armeabi-v7a，arm64 兼顾其他机器。
         // x86 只跑模拟器，没必要进包。

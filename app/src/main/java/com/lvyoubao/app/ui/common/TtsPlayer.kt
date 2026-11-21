@@ -14,11 +14,13 @@ import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -667,11 +669,15 @@ object TtsPlayer {
         private var segMaxJump = 0
 
         /**
-         * 起播前要攒够的 PCM：450ms。
+         * 起播前要攒够的 PCM：300ms。
          * 老实现是「第一次写就 play」，而 MediaCodec 一次只吐 85ms 左右的 PCM——
          * 缓冲里只有几十毫秒就开始放，而 Edge 的 WSS 推流接近实时（实测 4 秒收 3 秒音频），
          * 网络稍抖立刻欠载，听感就是某个字突然「破」了（用户反馈的破音就是这么来的）。
-         * 450ms 是折中：足够盖住常见抖动，又不会让首句明显变慢。
+         *
+         * 0.9.38 取 450ms 是保守值；实测供给速度约 1.4 倍实时、音轨缓冲 4 秒，
+         * 300ms 已能盖住常见抖动，同时把首句出声再往前挪 150ms。
+         * 判断有没有退步就看日志这行：`共用音轨起播：预滚 Xms` 之后若出现
+         * `流式段统计` 里削波/跳变明显变多，就把它调回 450。
          */
         private val prerollBytes: Long get() = OUT_RATE * 2L * channels * PREROLL_MS / 1000
 
@@ -873,7 +879,7 @@ object TtsPlayer {
         companion object {
             /** 设备 native 输出采样率：AudioFlinger 混音线程固定 48kHz，喂它 48k 就不再重采样 */
             private const val OUT_RATE = 48_000
-            private const val PREROLL_MS = 450L
+            private const val PREROLL_MS = 300L
             /** 贴顶（≈-0.3dBFS）算削波 */
             private const val CLIP_LEVEL = 32_000
             /** 相邻样本差超过满量程 37% 算一次波形断裂 */
@@ -1357,5 +1363,168 @@ object TtsPlayer {
             /** 空数组哨兵 = 输入流结束（feed 保证不进空数组，不会与真实帧混淆） */
             private val EOS = ByteArray(0)
         }
+    }
+}
+
+/**
+ * 边生成边播的播报会话：普通模式（提问页）与大字模式共用。
+ *
+ * 为什么要有它：灵动模式一直是「AI 一吐字就按句切、首句走流式秒播」，
+ * 而普通/大字模式是「等整段回答落地 → 再整段朗读」——同一台机器上两套体验，
+ * 用户感受就是「灵动模式按住说完就出声，普通模式要干等好几秒」。
+ * 这里把灵动模式那条流水线抽出来复用：
+ *
+ *   1. [feed] 增量喂 AI 吐出来的文本，遇到句末标点就切一段送合成；
+ *   2. 首段走 `playStreamedPiece`（边收 WSS 音频帧边播，首声 ≈ 首帧耗时）；
+ *   3. 其余段在后台预取成文件，按顺序续写进同一条 AudioTrack，句间无缝。
+ *
+ * 失败自愈：首段流式一帧没出来就退回文件链；整条链一声没出（[spoke] 仍为 false），
+ * 调用方可以照旧走 [TtsPlayer.speak] 整段兜底。
+ */
+class LiveTtsSession(context: Context) {
+
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(job + Dispatchers.Main)
+    private val gen: Int = TtsPlayer.startStreamSession()
+
+    private val buffer = StringBuilder()
+    private var spokenUpTo = 0
+    private var finished = false
+
+    private val firstPiece = CompletableDeferred<String?>()
+    private val pieces = Channel<String>(Channel.UNLIMITED)
+    private val audio = Channel<File>(Channel.UNLIMITED)
+    private val dir = File(context.applicationContext.cacheDir, "tts_live").apply {
+        runCatching { mkdirs() }
+        // 上一轮被打断时没播到的文件会留在这里，每轮开播前清一次
+        runCatching { listFiles()?.forEach { it.delete() } }
+    }
+
+    /** 这一轮到底有没有真的出声（false = 调用方该走整段兜底） */
+    @Volatile
+    var spoke: Boolean = false
+        private set
+
+    init {
+        // 合成器：句子一到就合成，不等播放（合成约 1.5s/句，播放 4~6s/句，队列会稳定领先）
+        scope.launch(Dispatchers.IO) {
+            try {
+                for (piece in pieces) {
+                    if (!TtsPlayer.isActive(gen)) break
+                    val f = TtsPlayer.synthesizeOnly(piece, dir)
+                    if (f != null) audio.send(f)
+                }
+            } finally {
+                audio.close()
+            }
+        }
+        // 播放器：首句边收边播，之后严格按顺序播预取好的文件
+        scope.launch {
+            try {
+                val head = firstPiece.await()
+                if (!head.isNullOrBlank() && TtsPlayer.isActive(gen)) {
+                    val streamed = TtsPlayer.playStreamedPiece(head, gen)
+                    if (streamed) {
+                        spoke = true
+                    } else if (TtsPlayer.isActive(gen)) {
+                        // 流式一帧都没出（连不上/协议失败）：这一句退回文件链，别把首句丢了
+                        val f = TtsPlayer.synthesizeOnly(head, dir)
+                        if (f != null) {
+                            if (TtsPlayer.playPrepared(f, gen)) spoke = true
+                            runCatching { f.delete() }
+                        }
+                    }
+                }
+                for (f in audio) {
+                    if (!TtsPlayer.isActive(gen)) {
+                        runCatching { f.delete() }
+                        break
+                    }
+                    if (TtsPlayer.playPrepared(f, gen)) spoke = true
+                    runCatching { f.delete() }
+                }
+                // 文件都写进音轨不等于播完了，等播放头追上写入量再收尾
+                TtsPlayer.awaitPlaybackDone(gen)
+            } catch (_: CancellationException) {
+                TtsPlayer.stop()
+            } finally {
+                TtsPlayer.endStreamSession(gen)
+            }
+        }
+    }
+
+    /** 喂一段新吐出来的文本（可在任意线程调用） */
+    @Synchronized
+    fun feed(chunk: String) {
+        if (chunk.isEmpty() || finished) return
+        buffer.append(chunk)
+        var cut = findCut(spokenUpTo, !firstPiece.isCompleted)
+        while (cut >= 0) {
+            val isFirst = !firstPiece.isCompleted
+            val len = cut + 1 - spokenUpTo
+            val minLen = if (isFirst) MIN_FIRST_PIECE else MIN_PIECE
+            if (len < minLen) {
+                // 太碎的片段不单独成段（「好。」「是的。」各自起播听感像结巴）：
+                // 注意这里**不能动 spokenUpTo**，只是跳过这个切点，让它并进下一句
+                cut = findCut(cut + 1, false)
+                continue
+            }
+            val piece = buffer.substring(spokenUpTo, cut + 1).trim()
+            spokenUpTo = cut + 1
+            emit(piece)
+            cut = findCut(spokenUpTo, !firstPiece.isCompleted)
+        }
+        // 长句兜底：一口气说到上限还没标点，先播出去，别让人干等
+        val limit = if (!firstPiece.isCompleted) FIRST_TTS_CHARS else 48
+        if (buffer.length - spokenUpTo >= limit) {
+            val piece = buffer.substring(spokenUpTo).trim()
+            spokenUpTo = buffer.length
+            emit(piece)
+        }
+    }
+
+    /** 回答结束：把最后没标点的余量播掉并收尾 */
+    @Synchronized
+    fun finish() {
+        if (finished) return
+        finished = true
+        val tail = buffer.substring(spokenUpTo).trim()
+        spokenUpTo = buffer.length
+        if (tail.isNotEmpty()) emit(tail)
+        // 全文没有可播内容时也要放行首句通道，否则播放器永远等在第一句上
+        if (!firstPiece.isCompleted) firstPiece.complete(null)
+        pieces.close()
+    }
+
+    /** 打断（用户又问了 / 离开页面）：立刻静音并释放 */
+    fun cancel() {
+        finished = true
+        TtsPlayer.stop()
+        job.cancel()
+        pieces.close()
+        runCatching { dir.listFiles()?.forEach { it.delete() } }
+    }
+
+    private fun emit(piece: String) {
+        if (piece.isBlank()) return
+        if (!firstPiece.complete(piece)) pieces.trySend(piece)
+    }
+
+    /** 从 [from] 起找句末标点；首句允许在逗号处切（10 字起），后续要求 40 字起 */
+    private fun findCut(from: Int, isFirst: Boolean): Int {
+        val pauseMin = if (isFirst) 10 else 40
+        for (i in from until buffer.length) {
+            val c = buffer[i]
+            if ((c in "。！？!?；;…" || c.code == 10) && i - from + 1 >= 3) return i
+            val isPause = c == '，' || c == ',' || c == '、' || c == '：' || c == ':'
+            if (isPause && i - from + 1 >= pauseMin) return i
+        }
+        return -1
+    }
+
+    private companion object {
+        const val MIN_FIRST_PIECE = 4
+        const val MIN_PIECE = 10
+        const val FIRST_TTS_CHARS = 18
     }
 }

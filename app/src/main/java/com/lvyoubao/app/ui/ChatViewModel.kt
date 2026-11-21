@@ -28,6 +28,7 @@ import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.WeatherClient
+import com.lvyoubao.app.ui.common.LiveTtsSession
 import com.lvyoubao.app.data.presetById
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -423,6 +424,23 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     /** 顶部「自动播报」开关：打开后每条新回答自动朗读 */
     fun setAutoSpeak(value: Boolean) = updateSettings { it.copy(autoSpeak = value) }
 
+    // ---------- 边生成边播（普通模式 / 大字模式）----------
+    // 与灵动模式同一条流水线：AI 一开始吐字就按句切、首句流式秒播。
+    // 开关（自动朗读 / 通话中）由界面告知，这里只管「什么时候开始出声」。
+    private var liveTts: LiveTtsSession? = null
+    private val _streamSpoke = MutableStateFlow(false)
+
+    /** 本次回答是否已被流式播报接手：true 时界面不要再整段朗读一遍 */
+    val streamSpoke: StateFlow<Boolean> = _streamSpoke.asStateFlow()
+
+    @Volatile
+    private var liveSpeakEnabled = false
+
+    /** 界面告诉 VM：这次回答要不要出声（自动朗读开着，或正在通话） */
+    fun setLiveSpeakEnabled(on: Boolean) {
+        liveSpeakEnabled = on
+    }
+
     private fun updateSettings(transform: (AiSettings) -> AiSettings) {
         viewModelScope.launch { repo.save(transform(settings.value)) }
     }
@@ -580,15 +598,18 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 }
                 ?: emptyList()
 
-            // 天气类问题强制走专业数据源（Open-Meteo 数值预报），AI 只负责总结，不再依赖联网搜索
+            // 天气类问题强制走专业数据源（Open-Meteo 数值预报），AI 只负责总结，不再依赖联网搜索。
+            // 位置：先吃缓存（0ms），没有再定位 ≤1.2 秒；没授权定位也能走 IP 反查，别把天气整条堵死。
+            // 预报本身在 WeatherClient 里有 10 分钟缓存——Open-Meteo 在境外，跨境查一次要一两秒。
             var weatherBlock: String? = null
-            if (WEATHER_INTENT.containsMatchIn(question) && LocationContext.hasPermission(context)) {
+            if (WEATHER_INTENT.containsMatchIn(question)) {
                 runCatching {
-                    val here = LocationContext.fresh(context)
+                    val here = LocationContext.current(context)
+                        ?: LocationContext.fresh(context, timeoutMs = 1_200)
                     if (here != null) {
                         val fc = withContext(Dispatchers.IO) {
-                            WeatherClient.forecast(here.lon, here.lat)
-                        }
+                            runCatching { WeatherClient.forecast(here.lon, here.lat) }.getOrNull()
+                        }.orEmpty()
                         if (fc.isNotBlank()) {
                             weatherBlock = buildString {
                                 appendLine("【气象数据 · Open-Meteo 数值预报（更新于 " +
@@ -635,6 +656,12 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             val mapCards = java.util.Collections.synchronizedList(mutableListOf<MapCardData>())
 
             _stream.value = StreamState()
+            // 边生成边播：回答要不要出声由界面决定（自动朗读开关 / 通话中），
+            // 但**什么时候开始出声**归这里管——老链路是「整段回答落地才开始整段合成」，
+            // 普通模式和大字模式因此比灵动模式慢好几秒，同一个应用两套手感。
+            liveTts?.cancel()
+            liveTts = null
+            _streamSpoke.value = false
             AiClient(settingsValue).chat(
                 messages = payload,
                 thinking = settingsValue.thinking,
@@ -642,10 +669,22 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 toolExecutor = { name, args ->
                     AppTools.execute(context, settingsValue, name, args) { card -> mapCards.add(card) }
                 },
-                onAnswer = { d -> _stream.update { cur -> val s = cur ?: StreamState(); s.copy(answer = s.answer + d) } },
+                onAnswer = { d ->
+                    _stream.update { cur -> val s = cur ?: StreamState(); s.copy(answer = s.answer + d) }
+                    // 要出声的话：这一段刚吐出来的字顺带喂给播报流水线，凑够一句就先开口
+                    if (liveSpeakEnabled && d.isNotBlank()) {
+                        val live = liveTts ?: LiveTtsSession(appContext).also { liveTts = it }
+                        live.feed(d)
+                    }
+                },
                 onReasoning = { d -> _stream.update { cur -> val s = cur ?: StreamState(); s.copy(reasoning = s.reasoning + d) } },
                 // 退化输出自动重试时复位流式卡：重试的内容从头累积，不和上一轮的垃圾拼在一起
-                onRetry = { _stream.value = StreamState() },
+                onRetry = {
+                    _stream.value = StreamState()
+                    liveTts?.cancel()
+                    liveTts = null
+                    _streamSpoke.value = false
+                },
                 onTitle = { title ->
                     viewModelScope.launch {
                         sessions.updateTitle(sessionId, title)
@@ -672,10 +711,19 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     )
                     _stream.value = null
                     _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+                    // 播报收尾：把最后半句也播掉，并告诉界面这次已经边生成边播过了，
+                    // 别再整段朗读一遍（两套都放就是「话说两遍」）
+                    val live = liveTts
+                    live?.finish()
+                    liveTts = null
+                    _streamSpoke.value = live?.spoke == true
                     maybeSummarizeSession(sessionId, settingsValue)
                     refreshSessionSummary(sessionId, settingsValue)
                 },
                 onFailure = { e ->
+                    liveTts?.cancel()
+                    liveTts = null
+                    _streamSpoke.value = false
                     _stream.value = null
                     _ui.update { it.copy(sending = false, error = e.message ?: "请求失败") }
                 },
@@ -962,6 +1010,13 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             .trim()
         kw = kw.removePrefix("去").removePrefix("到").removePrefix("前往").removePrefix("回")
         return kw.takeIf { it.length in 2..20 }
+    }
+
+    override fun onCleared() {
+        // 页面销毁（退出模式/换页）时别把播报留在后台继续念
+        liveTts?.cancel()
+        liveTts = null
+        super.onCleared()
     }
 
     companion object {

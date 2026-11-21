@@ -95,7 +95,7 @@ object LocalKws {
                 q.clear() // 加载期间攒的帧是旧音频，丢掉
                 LogStore.log(
                     "kws",
-                    "本地唤醒就绪：zipformer-3M int8（160ms 帧），加载 ${SystemClock.elapsedRealtime() - t0}ms，词表「小源小源」",
+                    "本地唤醒就绪：zipformer-3M int8（160ms 帧），加载 ${SystemClock.elapsedRealtime() - t0}ms，词表「小源小源 / 嗨小源」",
                 )
             } catch (e: Throwable) {
                 failed = true

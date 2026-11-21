@@ -49,11 +49,20 @@ object ScreenAwake {
     /** 当前窗口是否挂着「保持亮屏」 */
     private var keepOnApplied = false
 
+    /**
+     * 「必须在场」的钉住层数（全双工通话这类长场景）。
+     * >0 时 [idle] 不设倒计时、[sleepRunnable] 直接作废——通话中熄屏不只是黑一下，
+     * 这台设备的 WiFi 会跟着睡，豆包的实时音频流直接断，听感就是「黑屏之后没声音了」。
+     */
+    private var pins = 0
+
     /** 秒表：最近一次「有人在场」的时刻，用于诊断息屏时机 */
     @Volatile
     private var lastBusyAt = System.currentTimeMillis()
 
     private val sleepRunnable = Runnable {
+        // 钉住期间到点也不熄：通话/播报没结束，屏幕必须留着
+        if (pins > 0) return@Runnable
         applyKeepOn(false)
         LogStore.log(TAG, "空闲息屏：待机 ${idleTimeoutMs / 1000} 秒，请求熄屏")
         sleepNow()
@@ -152,8 +161,14 @@ object ScreenAwake {
     /**
      * 进入待机：屏幕再亮 [idleTimeoutMs] 后交给系统熄灭。
      * 交互结束时（播报完毕、回到萌眼、松开按键）调用；0 时常亮，等同于 [keepOn]。
+     *
+     * 有场景正在 [pin]（通话等）时不算倒计时——否则一摸屏幕就把通话界面熄掉。
      */
     fun idle() {
+        if (pins > 0) {
+            keepOn()
+            return
+        }
         if (!enabled) return
         if (idleTimeoutMs <= 0) {
             keepOn()
@@ -163,6 +178,26 @@ object ScreenAwake {
         applyKeepOn(true)
         main.removeCallbacks(sleepRunnable)
         main.postDelayed(sleepRunnable, idleTimeoutMs)
+    }
+
+    /**
+     * 钉住屏幕：长场景（全双工通话）期间不许熄屏，也不许被触摸/播报结束的倒计时熄掉。
+     * 不依赖 [enabled]——普通模式下通话同样不该黑屏。
+     */
+    fun pin(reason: String) {
+        pins++
+        main.removeCallbacks(sleepRunnable)
+        applyKeepOn(true)
+        LogStore.log(TAG, "屏幕钉住：$reason（共 $pins 层）")
+    }
+
+    /** 解除钉住；全部解除后按当前设置重新开始空闲倒计时 */
+    fun unpin(reason: String) {
+        if (pins > 0) pins--
+        LogStore.log(TAG, "解除钉住：$reason（剩 $pins 层）")
+        if (pins == 0) {
+            if (enabled) idle() else applyKeepOn(false)
+        }
     }
 
     /**

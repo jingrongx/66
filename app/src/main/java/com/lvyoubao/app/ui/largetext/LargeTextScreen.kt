@@ -320,6 +320,13 @@ fun LargeTextScreen(
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
     var spokenTs by remember { mutableStateOf(0L) }
     val ttsState by TtsPlayer.state.collectAsState()
+    val streamSpoke by vm.streamSpoke.collectAsState()
+    // 先把「这次要不要出声」告诉 VM：它会在 AI 一开始吐字就按句开播，
+    // 而不是等整段回答落地再整段合成——那正是普通/大字模式比灵动模式慢几秒的根因。
+    LaunchedEffect(settings.autoSpeak, showCall, settings.callEngine) {
+        val duplexCall = showCall && settings.callEngine == "doubao"
+        vm.setLiveSpeakEnabled(!duplexCall && (showCall || settings.autoSpeak))
+    }
     LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showCall, showSettings, showUpdate, settings.callEngine) {
         val msg = lastAssistant ?: return@LaunchedEffect
         // 只读 20 秒内的新回答：切历史/重进不再把旧消息复读一遍；停在设置/更新页时也先别出声
@@ -328,6 +335,11 @@ fun LargeTextScreen(
         // 豆包全双工自己走 WebSocket 出声（音频在 DuplexAudioEngine 里播放），
         // 绝不能再让 TtsPlayer 读同一段回答，否则两套音频抢 AudioTrack 双重发声。
         val duplexCall = showCall && settings.callEngine == "doubao"
+        // 已经边生成边播过就别再整段读一遍，否则同一段话放两遍
+        if (streamSpoke) {
+            spokenTs = msg.ts
+            return@LaunchedEffect
+        }
         if (!duplexCall && (showCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))

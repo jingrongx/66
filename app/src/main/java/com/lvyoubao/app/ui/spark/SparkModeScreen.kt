@@ -217,6 +217,11 @@ fun SparkModeScreen(
     DisposableEffect(showDuplexCall) {
         if (showDuplexCall) {
             vm.setDuplexAudioActive(true)
+            // 通话期间不许熄屏，并且压住 WiFi 省电：
+            // 这台设备息屏后 WiFi 会睡，豆包实时流一断就「黑屏之后没声音」。
+            // 钉住是按「通话会话」算的，界面收起（callUiVisible=false）不解钉，挂断才解。
+            com.lvyoubao.app.ui.common.ScreenAwake.pin("全双工通话")
+            com.lvyoubao.app.ui.common.NetKeep.acquire(context, "duplex-call")
             callStartedAt = System.currentTimeMillis()
             duplexAsr = ""
             duplexAnswer = ""
@@ -232,6 +237,8 @@ fun SparkModeScreen(
         onDispose {
             duplexClient.close()
             vm.setDuplexAudioActive(false)
+            com.lvyoubao.app.ui.common.NetKeep.release("duplex-call")
+            com.lvyoubao.app.ui.common.ScreenAwake.unpin("全双工通话")
         }
     }
     // 彻底退出应用时释放 OkHttp 线程池（与大字模式同口径）
@@ -553,7 +560,7 @@ fun SparkModeScreen(
                                 text = when {
                                     showDuplexCall -> "通话中 · 直接说话就行"
                                     isRecording -> "松手发送"
-                                    else -> "说「小源小源」，或按住下面说话"
+                                    else -> "说「小源小源」/「嗨小源」，或按住下面说话"
                                 },
                                 color = SparkColors.sub,
                                 fontSize = (9 * scale).sp,

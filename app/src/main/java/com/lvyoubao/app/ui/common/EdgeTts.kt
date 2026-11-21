@@ -153,6 +153,10 @@ object EdgeTts {
      * 唤醒命中那一刻调用：用户还在说问题，握手已经在后台跑完；等首句文本出来时
      * WSS 握手直接复用连接池里的现成连接（实测首帧慢 0.6~0.9 秒主要就慢在这次握手）。
      * 失败无所谓，正式合成时照旧新建连接。
+     *
+     * **body 必须读完**：OkHttp 只有在响应体被完整读取后才把连接还回池子；
+     * 老实现 `execute().close()` 没读就关，连接直接被丢弃——等于只预热了 DNS，
+     * 日志里「EdgeTts 流式已连接」每次仍要 800~900ms 就是它。
      */
     fun prewarm() {
         thread(isDaemon = true, name = "tts-prewarm") {
@@ -167,7 +171,11 @@ object EdgeTts {
                     )
                     .get()
                     .build()
-                client.newCall(req).execute().close()
+                // 读完（不是 close）：这个 GET 正常回 404/400 + 一小段 body，读完连接才会回池
+                client.newCall(req).execute().use { resp ->
+                    runCatching { resp.body?.bytes() }
+                    ttsLog("TTS 连接预热完成：HTTP ${resp.code}（连接已回池，等待复用）")
+                }
             }
         }
     }

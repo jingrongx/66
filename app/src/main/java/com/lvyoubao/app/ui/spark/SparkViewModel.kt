@@ -181,12 +181,17 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private var wakeDrainJob: Job? = null
 
     // 待机空转惩罚：直播/旁人聊天能过电平门槛，云端却转写为空（实测 30 秒 13 次）。
-    // 连续两次空转就把待机档的起振门槛抬 6dB，静音 90 秒；真有人对机器说话立刻恢复。
+    // 连续两次空转就进入惩罚期：直接丢弃待机语音段（只抬门槛没用，实测照样过线）。
+    // 惩罚期本来 90 秒，等于「一分半钟叫不醒」——用户反馈「经常唤不醒」大多撞在这上面，
+    // 收紧到 25 秒，并且最多连丢 6 段就放一段上去复核（见 onUtterance）。
     private var emptyWakeStreak = 0
     private var wakeOnsetBoostDb = 0f
     private var wakeOnsetBoostUntil = 0L
-    // 惩罚期一共丢了多少段（日志节流用，否则 90 秒能刷几十行）
+    // 惩罚期一共丢了多少段（日志节流用，否则能刷几十行）
     private var wakeSkipCount = 0
+
+    // 天气缓存预热节流（唤醒时顺手查一次，3 分钟内不重复）
+    private var lastWeatherWarmAt = 0L
 
     // 主动提醒（电量低/充满）：键控一次（同档位只提醒一次），空闲才说，静默安睡不说
     private var lastLowKey: String? = null
@@ -1131,8 +1136,12 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 } else {
                     null
                 }
+            // 天气：**先吃缓存**。缓存里已经有这个坐标的天气（唤醒时预热写入的，或 10 分钟内问过），
+            // 就是 0ms；只有真的没有才联网，而且最多等 1.6 秒——Open-Meteo 在境外，
+            // 实测 RTT 250ms、丢包 33%，之前 10s/30s 的超时等于「问天气先站十几秒」。
+            // 查不到也不挡路：位置照常给模型，让它按常识和季节回答，比干等强。
             val weatherLine = if (wantsWeather && place != null) {
-                runCatching { WeatherClient.current(place.lon, place.lat) }.getOrNull()
+                WeatherClient.currentQuick(place.lon, place.lat, timeoutMs = 1_500)
             } else {
                 null
             }
@@ -1512,16 +1521,23 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                         // 空转惩罚期：整段丢弃，连云端转写都不跑。
                         // 只抬 6dB 门槛对直播人声根本没用——实测那段峰值 -8dBFS，门槛从 -46 抬到 -40
                         // 照样过线；只有「干脆不送」才真能省电、省配额、少占采集通道。
-                        // 这段时间唤醒仍由端侧 KWS 兜着，不受影响。
+                        // 这段时间唤醒仍由端侧 KWS 兜着；但为了不让 KWS 漏命中变成「彻底聋」，
+                        // 连跳 6 段就放一段上去复核——真有人在说话，这一下就把惩罚卸掉了。
                         if (wakeOnsetBoostUntil > SystemClock.elapsedRealtime()) {
-                            wav.delete()
-                            if (wakeSkipCount++ % 5 == 0) {
-                                LogStore.log(
-                                    "wake",
-                                    "空转惩罚中：跳过待机语音（已跳 $wakeSkipCount 段，端侧唤醒照常）",
-                                )
+                            if (wakeSkipCount >= 6) {
+                                wakeSkipCount = 0
+                                LogStore.log("wake", "空转惩罚：连跳 6 段，放一段去云端复核")
+                            } else {
+                                wakeSkipCount++
+                                wav.delete()
+                                if (wakeSkipCount % 5 == 0) {
+                                    LogStore.log(
+                                        "wake",
+                                        "空转惩罚中：跳过待机语音（已跳 $wakeSkipCount 段，端侧唤醒照常）",
+                                    )
+                                }
+                                return
                             }
-                            return
                         }
                         handleWakeUtterance(wav, snrDb)
                     }
@@ -1608,17 +1624,22 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     }
 
     /**
-     * 待机空转：连续两次「转写为空/单字」就把待机起振门槛抬 6dB，静音 90 秒。
+     * 待机空转：连续两次「转写为空/单字」就进入惩罚期，直接丢弃待机语音，静音 25 秒。
      * 直播里的人在说话时电平能到 -10dBFS、信噪比 20dB，靠能量判据根本挡不住；
      * 只有「云端认不出字」这个信号最诚实——它不是对机器说话。
+     *
+     * 时长从 90 秒收到 25 秒：90 秒意味着这段时间里**叫天天不应**（云端那条被掐了，
+     * 只剩端侧 KWS 兜底），用户感受就是「经常唤不醒」。25 秒足够挡住一波直播爆音，
+     * 又不至于把人晾在那儿。
      */
     private fun registerEmptyWake() {
         emptyWakeStreak++
         if (emptyWakeStreak < 2) return
         emptyWakeStreak = 0
         wakeOnsetBoostDb = 6f
-        val dur = 90_000L
+        val dur = 25_000L
         wakeOnsetBoostUntil = SystemClock.elapsedRealtime() + dur
+        wakeSkipCount = 0
         wakeSession?.boostOnset(wakeOnsetBoostDb, dur)
     }
 
@@ -1757,6 +1778,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         // 都在后台跑完，等答案出来直接复用连接——这段以前是纯等待，占总延迟 1 秒以上
         runCatching { AiClient.prewarm(settings.value) }
         runCatching { EdgeTts.prewarm() }
+        // 天气链路也一起预热：Open-Meteo 在境外（实测 RTT 250ms、丢包 33%），
+        // 等用户问「今天天气怎么样」才去查，光握手就一两秒。趁他还在说话的这几秒先查好写进缓存。
+        runCatching { warmWeatherCache() }
         _eyeState.value = SparkEyeState.LISTENING
         if (remainder.length >= 2) {
             // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
@@ -1776,6 +1800,32 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         if (LocalKws.isReady()) return
         LocalKws.start(appContext) { keyword ->
             viewModelScope.launch { onLocalWakeHit(keyword) }
+        }
+    }
+
+    /**
+     * 后台把「定位 + 实时天气」查好塞进缓存，唤醒时调用。
+     *
+     * 为什么要提前查：Open-Meteo 在境外，设备侧实测 RTT 200~300ms、丢包 33%，
+     * 一次冷查询 TLS 握手 + 请求要 0.8~2 秒；而用户问「今天天气怎么样」时，
+     * 这条查询串在 AI 请求前面跑，等于整轮问答白等这么久。
+     * 唤醒那一刻用户还在说问题（2~5 秒），正好把这活干完。
+     *
+     * 3 分钟内只做一次：连着喊几次唤醒不必反复查同一个城市。
+     */
+    private fun warmWeatherCache() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastWeatherWarmAt < 3 * 60 * 1000L) return
+        lastWeatherWarmAt = now
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val p = LocationContext.current(appContext)
+                    ?: LocationContext.fresh(appContext, timeoutMs = 2_500)
+                if (p != null) {
+                    WeatherClient.prewarm(p.lon, p.lat)
+                    LogStore.log("weather", "天气缓存预热：${p.description} ${p.lon},${p.lat}")
+                }
+            }
         }
     }
 

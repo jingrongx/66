@@ -285,17 +285,24 @@ fun AskScreen(
         }
     }
 
-    // 自动播报：开关打开时，新回答一落地就读
+    // 自动播报：开关打开时，**AI 一开始吐字就按句开播**（与灵动模式同一条流水线）
     var spokenTs by remember { mutableStateOf(0L) }
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
+    val streamSpoke by vm.streamSpoke.collectAsState()
+    LaunchedEffect(settings.autoSpeak) { vm.setLiveSpeakEnabled(settings.autoSpeak) }
     LaunchedEffect(lastAssistant?.ts, settings.autoSpeak) {
         val msg = lastAssistant ?: return@LaunchedEffect
         // 只读 20 秒内的新回答：切页面/切会话/重进 App 不再把旧消息读一遍
         val fresh = System.currentTimeMillis() - msg.ts < 20_000
+        // 已经边生成边播过了就别再整段读一遍，否则同一段话放两遍
+        if (streamSpoke) {
+            spokenTs = msg.ts
+            return@LaunchedEffect
+        }
         if (settings.autoSpeak && msg.ts != spokenTs && fresh) {
             com.lvyoubao.app.data.LogStore.log(
                 "autospeak",
-                "触发自动播报：回答 ts=${msg.ts} 长度=${ChatViewModel.speakableText(msg).length} 字",
+                "整段兜底播报：回答 ts=${msg.ts} 长度=${ChatViewModel.speakableText(msg).length} 字",
             )
             spokenTs = msg.ts
             TtsPlayer.speak(context, ChatViewModel.speakableText(msg))

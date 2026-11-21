@@ -331,7 +331,7 @@ fun SettingsScreen(
                             onClick = { sparkFontDialog = true },
                         )
                         PillRow(
-                            label = "空闲息屏",
+                            label = "空闲熄屏时间",
                             value = screenOffLabel(state.draft.sparkScreenOffSec),
                             onClick = { screenOffDialog = true },
                         )
@@ -533,8 +533,21 @@ fun SettingsScreen(
                         CardDivider()
                         NavRow(
                             title = "设为默认桌面（开机即进）",
+                            subtitle = if (isDefaultHome) {
+                                "已是默认桌面 · 点这里去系统设置改回其他桌面"
+                            } else {
+                                "开机直接进小源，不用先找应用图标"
+                            },
                             value = if (isDefaultHome) "已是默认" else "去设置",
-                            onClick = { if (!isDefaultHome) requestDefaultHome(context, homeRoleLauncher) },
+                            // 已经是默认桌面时**不能什么都不做**：用户想换回系统桌面，
+                            // 只能从这里进系统设置；老实现 `if (!isDefaultHome)` 把这条路堵死了。
+                            onClick = {
+                                if (isDefaultHome) {
+                                    openHomeSettings(context)
+                                } else {
+                                    requestDefaultHome(context, homeRoleLauncher)
+                                }
+                            },
                             valueColor = p.accent,
                         )
                     }
@@ -881,6 +894,8 @@ fun SettingsScreen(
                     Triple("30", "30 秒", "待机 30 秒熄屏（推荐）"),
                     Triple("60", "1 分钟", "待机 1 分钟熄屏"),
                     Triple("120", "2 分钟", "待机 2 分钟熄屏"),
+                    Triple("300", "5 分钟", "待机 5 分钟熄屏，适合长时间看屏幕"),
+                    Triple("600", "10 分钟", "待机 10 分钟熄屏，几乎等于常亮但更省电"),
                 ),
                 selected = state.draft.sparkScreenOffSec.toString(),
                 onPick = { value ->
@@ -944,7 +959,7 @@ fun SettingsScreen(
                     Column(Modifier.fillMaxWidth()) {
                         ToggleRow(
                             title = "待机唤醒词监听",
-                            subtitle = "灵动模式待机时喊「小源小源」直接进连续对话",
+                            subtitle = "灵动模式待机时喊「小源小源」或「嗨小源」直接进连续对话",
                             checked = state.draft.wakeWordEnabled,
                             onCheckedChange = { checked -> vm.updateDraft { it.copy(wakeWordEnabled = checked) } },
                         )
@@ -1151,6 +1166,35 @@ internal fun requestDefaultHome(
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }
+}
+
+/**
+ * 打开系统的「默认桌面」设置页（已经是我们自己当桌面时用）。
+ *
+ * 坑在这里：应用本身是 HOME，`Intent(ACTION_MAIN, CATEGORY_HOME)` 会被解析回自己，
+ * 点「设置」又回到小源，看着就是「点了没反应 / 进不去」。所以这里固定指向 Settings 的
+ * HOME_SETTINGS 页，并逐个校验解析结果不是本应用；精简 ROM 没有这一页时依次退到
+ * 默认应用页、应用详情页、系统设置首页。
+ */
+internal fun openHomeSettings(context: Context): Boolean {
+    val candidates = listOf(
+        Intent("android.settings.HOME_SETTINGS"),
+        Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
+        Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData(android.net.Uri.parse("package:${context.packageName}")),
+        Intent(android.provider.Settings.ACTION_SETTINGS),
+    )
+    for (raw in candidates) {
+        val intent = Intent(raw).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val resolved = runCatching {
+            context.packageManager
+                .resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                ?.activityInfo?.packageName
+        }.getOrNull()
+        if (resolved != null && resolved == context.packageName) continue
+        if (runCatching { context.startActivity(intent) }.isSuccess) return true
+    }
+    return false
 }
 
 /** 字号系数显示名（未知自定义值兜底显示百分比） */
