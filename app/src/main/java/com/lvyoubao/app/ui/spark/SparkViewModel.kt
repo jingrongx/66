@@ -1158,6 +1158,16 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 if (!cal.isNullOrBlank()) appendLine(cal)
                 place?.description?.let { appendLine("位置：$it") }
                 if (weatherLine != null) appendLine("【实时天气】$weatherLine")
+                // 长期记忆：普通/大字模式一直注入 MemoryStore 的画像，灵动模式此前没接，
+                // 同一个用户换个模式就「失忆」——同一个 App 里两种人格，很割裂。
+                runCatching {
+                    val store = (appContext as? TravelApp)?.memoryStore
+                    val facts = store?.profileFacts().orEmpty()
+                    if (facts.isNotEmpty()) {
+                        appendLine("【关于用户】")
+                        facts.take(10).forEach { appendLine("- $it") }
+                    }
+                }
             }
 
             val systemPrompt = """

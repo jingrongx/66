@@ -16,6 +16,7 @@ import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
+import com.lvyoubao.app.data.QuickAnswers
 import com.lvyoubao.app.data.RichBlocks
 import com.lvyoubao.app.data.observation.FatigueEngine
 import com.lvyoubao.app.data.MapCardData
@@ -29,6 +30,7 @@ import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.WeatherClient
 import com.lvyoubao.app.ui.common.LiveTtsSession
+import com.lvyoubao.app.ui.common.TtsPlayer
 import com.lvyoubao.app.data.presetById
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -524,6 +526,20 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                     ts = now,
                 ),
             )
+
+            // 本地快答：时间/日期/电量这种问题不该走模型。
+            // 灵动模式一直有这条快路（说完就有声），普通/大字模式却要带近 2800 字 prompt
+            // 走一趟模型，同一个问题白白慢 1~2 秒——这就是「那两个模式反应慢」的主因之一。
+            QuickAnswers.answer(context, question)?.let { quick ->
+                com.lvyoubao.app.data.LogStore.log("quick", "本地快答命中：$quick")
+                sessions.appendMessage(
+                    sessionId,
+                    SessionMessage(role = "assistant", text = quick, ts = System.currentTimeMillis()),
+                )
+                _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+                if (settingsValue.autoSpeak) TtsPlayer.speak(context, quick)
+                return@launch
+            }
 
             // 组装上下文：位置 + 本地记忆（个人飞轮）
             val contextBlock = buildString {
