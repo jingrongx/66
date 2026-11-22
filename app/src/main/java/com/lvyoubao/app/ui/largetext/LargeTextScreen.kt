@@ -898,15 +898,20 @@ fun LargeTextScreen(
     // ---------- 唤醒词（端侧 KWS 零配额；唤醒后按设置进通话或单次语音） ----------
     var wakeListening by remember { mutableStateOf(false) }
     fun dispatchWake() {
+        com.lvyoubao.app.ui.spark.SparkAck.play(context) // 回应声（与灵动模式同款：会话同音色合成的「我在」）
         if (settings.wakeAction == "call" && settings.callEngine == "doubao" &&
             settings.duplexApiKey.isNotBlank() && SpeechInput.hasRecordPermission(context)
         ) {
             showCall = true // 上面的 DisposableEffect 会自动起豆包通话
         } else {
             wakeListening = true
-            WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
-                wakeListening = false
-                if (!text.isNullOrBlank()) vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+            scope.launch {
+                // 等回应声播完再开麦，别把「我在」录进问题里
+                delay(com.lvyoubao.app.ui.spark.SparkAck.DURATION_MS)
+                WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
+                    wakeListening = false
+                    if (!text.isNullOrBlank()) vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+                }
             }
         }
     }
@@ -917,7 +922,12 @@ fun LargeTextScreen(
         val inCall = showCall && settings.callEngine == "doubao"
         val can = settings.wakeWordEnabled && !inCall && recording == null && !listening && !wakeListening &&
             SpeechInput.hasRecordPermission(context)
-        if (can) WakeHub.startStandby(context) { dispatchWake() } else WakeHub.stopStandby()
+        if (can) {
+            com.lvyoubao.app.ui.spark.SparkAck.preload(context) // 合成要时间，待机时就备好
+            WakeHub.startStandby(context) { dispatchWake() }
+        } else {
+            WakeHub.stopStandby()
+        }
     }
     DisposableEffect(Unit) {
         onDispose {
