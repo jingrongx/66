@@ -1524,8 +1524,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
-    /** 通话落库后触发：通话也是会话，攒够新 user 消息就总结进长期画像（与文本聊天同口径） */
-    fun summarizeCallTurns() {
+    /** 唤醒后动作=直接通话：VM 不碰 UI，发这个事件由界面层拉起通话覆盖层 */
+    val wakeCallRequest = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** 通话落库后触发：通话也是会话，攒够新 user 消息就总结进长期画像（与文本聊天同口径） */    fun summarizeCallTurns() {
         val settingsNow = settings.value
         if (settingsNow.apiKey.isBlank()) return
         viewModelScope.launch {
@@ -1868,6 +1870,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         // 等用户问「今天天气怎么样」才去查，光握手就一两秒。趁他还在说话的这几秒先查好写进缓存。
         runCatching { warmWeatherCache() }
         _eyeState.value = SparkEyeState.LISTENING
+        // 唤醒后动作=直接通话（设置：唤醒后）：不进单次语音，拉起豆包全双工
+        if (settings.value.wakeAction == "call" && settings.value.duplexApiKey.isNotBlank() && !duplexAudioActive) {
+            wakeCallRequest.tryEmit(Unit)
+            return
+        }
         if (remainder.length >= 2) {
             // 「小源小源，今天天气怎么样」：唤醒词后面已经带问题，直接答，不用再喊一次
             answerVoiceQuestion(remainder)

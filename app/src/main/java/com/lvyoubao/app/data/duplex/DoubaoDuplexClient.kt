@@ -88,6 +88,10 @@ class DoubaoDuplexClient(private val context: Context) {
     private var resumeNext = false
     /** 断线自愈次数：每次 start 重置，最多一次，避免弱网下无限重连 */
     private var retries = 0
+    /** 静默断开（服务端 ~10 分钟无交互释放）自动重连次数：通话当陪伴挂着，断几次都续 */
+    private var idleReconnects = 0
+    /** 用户主动挂断标记：挂断引发的关闭绝不能自动重连 */
+    @Volatile private var userClosed = false
     /** 本轮回答文本累积：TurnDone 的权威来源（TextDone 可能不来，如被打断/纯音频段） */
     private val turnText = StringBuilder()
     /** 本地 speech_text（打招呼/干预回复）触发的 response 周期数：不是模型回答，不外发 TurnDone */
@@ -215,8 +219,10 @@ class DoubaoDuplexClient(private val context: Context) {
                 is DuplexProtocol.Downstream.FunctionCalls ->
                     ev.calls.forEach { _events.tryEmit(Event.ToolCall(it.callId, it.name, it.arguments)) }
                 is DuplexProtocol.Downstream.SessionClosed -> {
-                    Log.d(TAG, "session.closed，可以安全断连")
-                    finishClose()
+                    Log.d(TAG, "session.closed")
+                    // 用户没挂断却收到关闭 = 服务端静默释放（官方 45000003：约 10 分钟无对话交互）
+                    // → 自动重连续上通话：老 dialog 大概率已释放，改走全新会话 + 重注入历史上下文
+                    maybeIdleReconnect() ?: finishClose()
                 }
                 is DuplexProtocol.Downstream.Error -> {
                     Log.e(TAG, "服务端 error code=${ev.code} msg=${ev.message}")
@@ -247,8 +253,41 @@ class DoubaoDuplexClient(private val context: Context) {
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "WS 已关闭 code=$code reason=$reason")
-            if (_state.value != State.CLOSED) finishClose()
+            if (_state.value != State.CLOSED) {
+                maybeIdleReconnect() ?: finishClose()
+            }
         }
+    }
+
+    /**
+     * 静默断开后的自动重连（用户没挂断、连接却被关/断）：
+     * 官方策略是「约 10 分钟没有对话交互，服务端释放连接」——把通话当陪伴挂着的用户
+     * 会被这个打断。这里最多连续续 5 次，每次带全量历史上下文（dialogContext 重注入），
+     * 模型的记忆不断；用户挂断（close()）绝不触发。
+     */
+    private fun maybeIdleReconnect(): Boolean {
+        if (userClosed) return false
+        if (_state.value !in listOf(State.LISTENING, State.SPEAKING, State.CONNECTED)) return false
+        if (idleReconnects >= 5) return false
+        idleReconnects++
+        Log.w(TAG, "通话被服务端静默释放，1 秒后重连续接（第 $idleReconnects 次）")
+        scope.launch {
+            delay(1_000)
+            if (userClosed) return@launch
+            if (_state.value in listOf(State.CLOSING, State.CLOSED, State.IDLE)) return@launch
+            reconnectIdle()
+        }
+        return true
+    }
+
+    private fun reconnectIdle() {
+        webSocket?.cancel()
+        webSocket = null
+        audio?.stop()
+        audio = null
+        resumeNext = false // 老 dialog 已被服务端释放：全新会话 + 重注入历史上下文
+        setState(State.CONNECTING)
+        connect()
     }
 
     /** 冻结本轮回答对应的识别稿：之后用户抢话、新一轮 AsrStarted 都只改 pendingAsr，不动冻结值 */
@@ -314,6 +353,8 @@ class DoubaoDuplexClient(private val context: Context) {
         this.dialect = dialect
         this.music = music
         retries = 0
+        idleReconnects = 0
+        userClosed = false
         resumeNext = false
         setState(State.CONNECTING)
         connect()
@@ -409,6 +450,7 @@ class DoubaoDuplexClient(private val context: Context) {
     /** 优雅关闭：先停采集，再发 session.close，等服务端 session.closed 后再断连 */
     fun close() {
         if (_state.value in listOf(State.IDLE, State.CLOSED, State.CLOSING)) return
+        userClosed = true // 用户挂断：之后的一切关闭都不触发静默重连
         setState(State.CLOSING)
         audio?.stop()
         audio = null

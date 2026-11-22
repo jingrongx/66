@@ -35,7 +35,8 @@ data class AiSettings(
     val screenOrientation: String = DeviceProfile.defaultOrientation,
     // 语音播报复用长连接：首句更快出声；万一某台设备出现没声音，关掉就退回每句重连
     val ttsReuseSocket: Boolean = true,
-    val wakeWordEnabled: Boolean = true, // 唤醒词监听：灵动模式待机时喊「小源小源」直接进连续对话（云识别关键词，限流防杂音）
+    val wakeWordEnabled: Boolean = true, // 唤醒词监听：三种模式待机时喊「小源小源」直接唤醒（灵动=云端词表+端侧KWS双通道，普通/大字=端侧KWS零配额）
+    val wakeAction: String = "chat",    // 唤醒后的动作：chat=单次语音（说完自动发） / call=直接进豆包全双工通话
     val savedProviders: Map<String, ProviderCredentials> = emptyMap(), // 每个供应商各自记住的接口配置，切换时恢复自己的，互不带Key
     val duplexApiKey: String = "",     // 豆包端到端实时语音（Seeduplex 全双工）专用 Key：火山「实时语音」产品，走 X-Api-Key，非文本大模型 Key
     val duplexVoice: String = "zh_female_vv_jupiter_bigtts", // 全双工通话音色 ID（默认 Vivi 2.0）

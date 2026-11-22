@@ -992,9 +992,28 @@ fun SettingsScreen(
                     ) {
                         ToggleRow(
                             title = "待机唤醒词监听",
-                            subtitle = "灵动模式待机时喊「小源小源」或「嗨小源」直接进连续对话",
+                            subtitle = "三种模式待机时喊「小源小源」或「嗨小源」直接唤醒（普通/大字走端侧识别，零配额）",
                             checked = state.draft.wakeWordEnabled,
                             onCheckedChange = { checked -> vm.updateDraft { it.copy(wakeWordEnabled = checked) } },
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        CsLabel("唤醒后")
+                        Spacer(Modifier.height(6.dp))
+                        PillGroup(
+                            options = listOf("chat", "call"),
+                            selected = state.draft.wakeAction,
+                            label = { if (it == "call") "直接通话" else "单次语音" },
+                            onSelect = { v -> vm.updateDraft { it.copy(wakeAction = v) } },
+                            itemPaddingH = 12,
+                            itemPaddingV = 5,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            if (state.draft.wakeAction == "call")
+                                "唤醒后直接进入豆包全双工通话（免按键自由聊，需已配置豆包语音 Key）"
+                            else "唤醒后听一句话，说完自动发出去提问",
+                            fontSize = 11.sp,
+                            color = p.muted,
                         )
                         Spacer(Modifier.height(14.dp))
                         CsLabel("语音打断灵敏度（连续对话）")

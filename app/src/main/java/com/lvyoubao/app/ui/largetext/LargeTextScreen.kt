@@ -95,6 +95,7 @@ import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.SentImageThumbnails
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.WakeHub
 import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.common.CardShareDialog
 import com.lvyoubao.app.ui.common.CardShareTipDialog
@@ -892,6 +893,37 @@ fun LargeTextScreen(
     // 彻底退出应用时释放 OkHttp 线程池（不可复用，仅 exit 时调用）
     DisposableEffect(Unit) {
         onDispose { duplexClient.destroy() }
+    }
+
+    // ---------- 唤醒词（端侧 KWS 零配额；唤醒后按设置进通话或单次语音） ----------
+    var wakeListening by remember { mutableStateOf(false) }
+    fun dispatchWake() {
+        if (settings.wakeAction == "call" && settings.callEngine == "doubao" &&
+            settings.duplexApiKey.isNotBlank() && SpeechInput.hasRecordPermission(context)
+        ) {
+            showCall = true // 上面的 DisposableEffect 会自动起豆包通话
+        } else {
+            wakeListening = true
+            WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
+                wakeListening = false
+                if (!text.isNullOrBlank()) vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+            }
+        }
+    }
+    LaunchedEffect(
+        settings.wakeWordEnabled, settings.wakeAction, settings.callEngine, settings.duplexApiKey,
+        recording, listening, wakeListening, showCall,
+    ) {
+        val inCall = showCall && settings.callEngine == "doubao"
+        val can = settings.wakeWordEnabled && !inCall && recording == null && !listening && !wakeListening &&
+            SpeechInput.hasRecordPermission(context)
+        if (can) WakeHub.startStandby(context) { dispatchWake() } else WakeHub.stopStandby()
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            WakeHub.stopStandby()
+            WakeHub.cancelOneShot()
+        }
     }
 
     if (showCall) {

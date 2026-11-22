@@ -58,6 +58,7 @@ class SettingsRepository(private val context: Context) {
         val duplexVoice = stringPreferencesKey("duplex_voice")
         val duplexDialect = stringPreferencesKey("duplex_dialect")
         val duplexMusic = booleanPreferencesKey("duplex_music")
+        val wakeAction = stringPreferencesKey("wake_action")
         val reasoningEffort = stringPreferencesKey("reasoning_effort")
         val savedAddresses = stringPreferencesKey("saved_addresses")
         val voiceAsrModel = stringPreferencesKey("voice_asr_model")
@@ -112,6 +113,7 @@ class SettingsRepository(private val context: Context) {
             duplexVoice = p[Keys.duplexVoice] ?: defaults.duplexVoice,
             duplexDialect = p[Keys.duplexDialect] ?: defaults.duplexDialect,
             duplexMusic = p[Keys.duplexMusic] ?: defaults.duplexMusic,
+            wakeAction = p[Keys.wakeAction] ?: defaults.wakeAction,
             reasoningEffort = p[Keys.reasoningEffort] ?: "high",
             // 地址列表：新格式优先；旧版只有一个 homeAddress 时迁移成「家」一条，不丢老用户数据
             savedAddresses = p[Keys.savedAddresses]?.let { s ->
@@ -167,6 +169,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.duplexVoice] = settings.duplexVoice
             p[Keys.duplexDialect] = settings.duplexDialect
             p[Keys.duplexMusic] = settings.duplexMusic
+            p[Keys.wakeAction] = settings.wakeAction
             p[Keys.reasoningEffort] = settings.reasoningEffort
             p[Keys.savedAddresses] = providerJson.encodeToString(settings.savedAddresses)
             // 兼容旧字段：把列表里「家」的地址同步回 homeAddress，老代码（AppTools/ChatViewModel）仍可读

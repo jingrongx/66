@@ -378,6 +378,10 @@ fun SparkModeScreen(
         lastVoiceAt = System.currentTimeMillis() // 手动展开后重新起算静默，别刚展开就被收走
         vm.setShowEyes(false)
     }
+    // 唤醒后动作=直接通话（设置）：VM 发事件，界面拉起通话
+    LaunchedEffect(Unit) {
+        vm.wakeCallRequest.collect { enterCall() }
+    }
     // 通话中（界面已收起）电话键单独一个状态：底色深一档 + 右上角呼吸点，
     // 不用在右边「按住说话」上写字，一眼就知道通话还没断
     val callPulse by rememberInfiniteTransition(label = "callPulse").animateFloat(

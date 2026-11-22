@@ -208,6 +208,38 @@ fun AskScreen(
     var listening by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf<SpeechInput.Recording?>(null) }
 
+    // ---------- 唤醒词（端侧 KWS 零配额；唤醒后按设置进通话或单次语音） ----------
+    var wakeListening by remember { mutableStateOf(false) }
+    var showWakeCall by remember { mutableStateOf(false) }
+    fun dispatchWake() {
+        if (settings.wakeAction == "call" && settings.callEngine == "doubao" &&
+            settings.duplexApiKey.isNotBlank() && SpeechInput.hasRecordPermission(context)
+        ) {
+            showWakeCall = true
+        } else {
+            wakeListening = true
+            com.lvyoubao.app.ui.common.WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
+                wakeListening = false
+                if (!text.isNullOrBlank()) vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+            }
+        }
+    }
+    LaunchedEffect(
+        settings.wakeWordEnabled, settings.wakeAction, settings.duplexApiKey,
+        recording, listening, wakeListening, showWakeCall,
+    ) {
+        val can = settings.wakeWordEnabled && !showWakeCall && recording == null && !listening && !wakeListening &&
+            SpeechInput.hasRecordPermission(context)
+        if (can) com.lvyoubao.app.ui.common.WakeHub.startStandby(context) { dispatchWake() }
+        else com.lvyoubao.app.ui.common.WakeHub.stopStandby()
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
+            com.lvyoubao.app.ui.common.WakeHub.cancelOneShot()
+        }
+    }
+
     fun beginCloudRecord() {
         SpeechInput.startRecording(context)
             .onSuccess { recording = it }
@@ -813,6 +845,11 @@ fun AskScreen(
                 }
             }
         }
+    }
+
+    // 唤醒词拉起的豆包全双工通话（唤醒后=直接通话）
+    if (showWakeCall) {
+        AskDuplexCall(vm, settings, currentSessionId) { showWakeCall = false }
     }
 }
 
