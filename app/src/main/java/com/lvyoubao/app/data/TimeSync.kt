@@ -69,9 +69,12 @@ object TimeSync {
         true
     }
 
-    /** 依次尝试 NTP 服务器，返回第一个应答的服务器时间（ms）；全挂返回 null */
+    /** 依次尝试 NTP 服务器，返回第一个应答的服务器时间（ms）；全挂返回 null。
+     *  IP 直连排在域名前：这台机器人实测 DNS 解析 NTP 域名会长时间阻塞
+     *  （getByName 不受 soTimeout 保护，一卡几分钟整个校时白等），
+     *  203.107.6.88 是阿里云 NTP 的任播 IP，多年稳定；IP 失效会 1.5s 超时落到域名兜底。 */
     private fun firstReachable(): Long? {
-        val hosts = listOf("ntp.aliyun.com", "cn.ntp.org.cn", "time.android.com")
+        val hosts = listOf("203.107.6.88", "ntp.aliyun.com", "cn.ntp.org.cn")
         for (h in hosts) {
             sntpQuery(h, timeoutMs = 1_500)?.let { return it }
         }
