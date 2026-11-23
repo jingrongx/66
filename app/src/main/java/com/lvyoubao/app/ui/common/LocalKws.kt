@@ -144,7 +144,9 @@ object LocalKws {
                 stream = null
             }
         }, "kws-decoder").apply {
-            priority = Thread.NORM_PRIORITY - 1
+            // 不能低于普通优先级：待机解码已占实时 63%，播报时 MediaCodec/AudioTrack
+            // 再一抢，低优先级线程掉帧断流，「播报中喊唤醒词打断」就永远打不断
+            priority = Thread.NORM_PRIORITY
             start()
         }
     }
@@ -153,12 +155,19 @@ object LocalKws {
      * 喂一帧 16k/16bit 单声道（80ms）。必须在采集线程里足够便宜：
      * 这里只做一次装箱入队，模型前向在 kws-decoder 线程跑。
      */
+    private var droppedFrames = 0
+
     fun feed(frame: ShortArray) {
         if (spotter == null) return
         val q = queue ?: return
         if (!q.offer(frame)) {
             q.poll() // 落后了：丢最旧的，保证模型跟得上当下
             q.offer(frame)
+            // 丢帧对流式解码器是断续音频（唤醒词跨丢帧边界就认不出）——低频记一笔，
+            // 「播报中打断不灵」先看这里：解码线程被 TTS/MediaCodec 压住就掉帧
+            if (++droppedFrames % 25 == 1) {
+                LogStore.log("kws", "解码跟不上，丢帧（累计 $droppedFrames 帧断续）")
+            }
         }
     }
 

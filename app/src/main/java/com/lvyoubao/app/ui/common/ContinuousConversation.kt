@@ -345,7 +345,13 @@ class ContinuousConversation(
             ttsStartedAt = SystemClock.elapsedRealtime()
             bargeInFired = false
         }
-        ttsActive = active
+        if (ttsActive != active) {
+            ttsActive = active
+            LogStore.log(
+                "wake",
+                "采集会话#${hashCode()} 播报状态=$active" + if (active) "（回声风险=$ttsEchoRisk → KWS${if (ttsEchoRisk) "停喂" else "照喂可打断"}）" else "（KWS 恢复常喂）",
+            )
+        }
     }
 
     /**
@@ -353,7 +359,10 @@ class ContinuousConversation(
      * 防自己触发自己；不含时照喂——播报中喊「小源小源」就能打断答非所问的回答。
      */
     fun setTtsEchoRisk(risk: Boolean) {
-        ttsEchoRisk = risk
+        if (ttsEchoRisk != risk) {
+            ttsEchoRisk = risk
+            if (ttsActive) LogStore.log("wake", "采集会话#${hashCode()} 播报中回声风险=$risk → KWS${if (risk) "停喂" else "照喂可打断"}")
+        }
     }
 
     /** 调用方正忙着处理（转写/AI/编排）：暂停空闲计时 */

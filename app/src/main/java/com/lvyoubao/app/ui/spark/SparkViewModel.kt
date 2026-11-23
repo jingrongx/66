@@ -1967,8 +1967,18 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 与云端词表同时在线，谁先到谁生效，另一个被 [lastWakeHitAt] 挡掉。
      */
     private suspend fun onLocalWakeHit(keyword: String) {
-        if (duplexAudioActive || activeRecording != null || _isRecording.value) return
-        if (wakeOnceSession != null) return // 已经在听问题，别把「我在听」再打断一次
+        if (duplexAudioActive || activeRecording != null || _isRecording.value) {
+            // 播报打断排查：这三个守卫以前静默吞掉命中，日志什么都看不到
+            LogStore.log(
+                "kws",
+                "本地命中「$keyword」但被状态拦下（通话=$duplexAudioActive 录音=${activeRecording != null} 按住=${_isRecording.value}）",
+            )
+            return
+        }
+        if (wakeOnceSession != null) {
+            LogStore.log("kws", "本地命中「$keyword」但单次聆听进行中，忽略")
+            return // 已经在听问题，别把「我在听」再打断一次
+        }
         val now = SystemClock.elapsedRealtime()
         if (now - lastWakeHitAt < 1_500) {
             LogStore.log("kws", "本地命中「$keyword」但 1.5 秒内已唤醒过，忽略")

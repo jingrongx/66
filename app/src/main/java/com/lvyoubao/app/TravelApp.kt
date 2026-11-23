@@ -10,6 +10,9 @@ import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.SettingsRepository
 import com.lvyoubao.app.data.TrackStore
 import com.lvyoubao.app.data.observation.ObservationStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class TravelApp : Application() {
     val settingsRepository: SettingsRepository by lazy { SettingsRepository(this) }
@@ -32,5 +35,10 @@ class TravelApp : Application() {
         LogStore.log("app", "应用启动 $ver 系统=Android${android.os.Build.VERSION.RELEASE} 设备=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
         // 自动更新流水线：启动即查 + 每 30 分钟静默复查，发现新版自动后台下载，下好弹「安装」
         AutoUpdater.start(this)
+        // 网络时间校准：老固件断电后系统钟会漂，问「现在几点」必须先对表
+        // （偏差大有 root 直接修系统钟；没 root 就记偏移，报时间时补偿）
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { com.lvyoubao.app.data.TimeSync.sync() }
+        }
     }
 }

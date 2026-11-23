@@ -37,7 +37,10 @@ object WakeHub {
         val ctx = context.applicationContext
         LocalKws.start(ctx) {
             val now = SystemClock.elapsedRealtime()
-            if (now - lastWakeAt < 1_500L) return@start
+            if (now - lastWakeAt < 1_500L) {
+                LogStore.log("kws", "本地命中但 1.5 秒内已唤醒过，忽略")
+                return@start
+            }
             lastWakeAt = now
             scope.launch { this@WakeHub.onWake?.invoke() }
         }

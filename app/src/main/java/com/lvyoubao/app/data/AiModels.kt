@@ -39,8 +39,13 @@ data class ResponseFormat(val type: String)
 @Serializable
 data class ThinkingMode(val type: String)
 
+/**
+ * detail=high：视觉走高清分块。low 档 API 端把图压成 ~512px 缩略图——实拍「这是什么」
+ * 时标签上的字全糊（红棕色碘伏瓶被认成「一瓶饮料」，明明标签写着大字），high 档才看得清
+ * 产品名/小字。代价是每图多 ~1k token，识别准确率优先。
+ */
 @Serializable
-data class ImageUrlPart(val url: String, val detail: String = "low")
+data class ImageUrlPart(val url: String, val detail: String = "high")
 
 @Serializable
 data class ContentPart(val type: String, val text: String? = null, val image_url: ImageUrlPart? = null)

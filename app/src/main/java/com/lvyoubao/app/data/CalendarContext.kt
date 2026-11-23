@@ -16,7 +16,8 @@ import java.util.TimeZone
  */
 object CalendarContext {
 
-    fun block(now: Date = Date()): String? = runCatching {
+    /** 默认走 [TimeSync] 校准后的时间：老固件断电后系统钟会漂，AI 报时间必须以网络校准为准 */
+    fun block(now: Date = TimeSync.nowDate()): String? = runCatching {
         val bjCal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai")).apply { time = now }
         // 农历/节气/时辰按北京时间的钟面字段构造（传统历法基准）
         val solar = Solar(
