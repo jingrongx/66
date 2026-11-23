@@ -269,6 +269,14 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 }
             }
         }
+        // 回声风险跟播报句子走（句级）：念到「小源」的句子停喂 KWS，其余句子照喂可打断
+        viewModelScope.launch {
+            TtsPlayer.echoRisk.collect { risk ->
+                continuous?.setTtsEchoRisk(risk)
+                wakeSession?.setTtsEchoRisk(risk)
+                wakeOnceSession?.setTtsEchoRisk(risk)
+            }
+        }
         // 电量广播：注册即收到粘性广播一次（初始状态），此后每次电量/充电状态变化触发——主动提醒的数据源
         runCatching {
             appContext.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -645,7 +653,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
 
         // LOOK 单发：设备相机就行，不依赖机器人中枢
         if (chain.size == 1 && chain[0] == RobotIntent.Command.Look) {
-            executeLook(context)
+            executeLook(context, text)
             return true
         }
 
@@ -664,7 +672,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             for (cmd in cmds) {
                 if (cmd == RobotIntent.Command.Look) {
                     if (executed.isNotEmpty()) announceChain(context, executed)
-                    executeLook(context)
+                    executeLook(context, text)
                     return true
                 }
                 val ok = executeRobot(robot, cmd).fold(
@@ -746,8 +754,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     /**
      * LOOK「看看前面有什么」类：设备相机静默抓一帧（CameraSnapshotHelper 即拍即走，零待机占用）
      * → 走现有视觉解析管线（照片轮入会话 + 流式回答 + 自动朗读）。
+     * [userAsk] 是触发 LOOK 的那句原话：AI 此前只收到写死的「说说前面有什么」，用户问
+     * 「这是什么产品」也只会得到画面描述——原话必须拼进提示词，问什么答什么。
      */
-    private suspend fun executeLook(context: Context) {
+    private suspend fun executeLook(context: Context, userAsk: String? = null) {
         if (!CameraSnapshotHelper.hasCameraPermission(context)) {
             appendMessage(SparkMessage("assistant", "需要相机权限才能帮你看，请点一下底部相机按钮授权一次。"))
             _statusHint.value = "需要相机权限"
@@ -762,11 +772,17 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             speakHint(context, "没拍下来，请再说一次")
             return
         }
+        val ask = userAsk?.trim()?.takeIf { it.isNotBlank() }
         sendImageQuestion(
             context = context,
             photos = listOf(PendingPhoto(snap.bitmap, snap.dataUrl)),
-            userLabel = "👀 看看前面",
-            prompt = "这是小源眼前刚拍到的画面，请用通俗易懂的自然口语说说前面有什么：最主要的东西是什么、有没有人，一两句话即可。",
+            userLabel = ask ?: "👀 看看前面",
+            prompt = if (ask != null) {
+                "这是小源眼前刚拍到的画面，用户的问题是：「$ask」。请结合画面回答用户的问题，" +
+                    "直接给答案，别只描述画面；画面里找不到答案就直说没看到，用通俗易懂的自然口语。"
+            } else {
+                "这是小源眼前刚拍到的画面，请用通俗易懂的自然口语说说前面有什么：最主要的东西是什么、有没有人，一两句话即可。"
+            },
         )
     }
 
@@ -1244,7 +1260,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             // 不走「整句合成到文件再播」——那一步每句要白等 1.5~3 秒，正是首句慢的主因。
             val firstPiece = CompletableDeferred<String?>()
             val speechChannel = Channel<String>(Channel.UNLIMITED)
-            val audioChannel = Channel<java.io.File>(Channel.UNLIMITED)
+            // 文件和句文本一起排队：播放侧靠文本标记回声风险（这句含不含「小源」）
+            val audioChannel = Channel<Pair<java.io.File, String>>(Channel.UNLIMITED)
             val ttsDir = java.io.File(context.cacheDir, "tts_stream").apply {
                 runCatching { mkdirs() }
                 // 上一轮被中途打断时，队列里还没播到的 mp3 会留在这里。每轮开播前清一次，
@@ -1278,7 +1295,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     for (piece in speechChannel) {
                         if (piece.isBlank()) continue
                         val f = TtsPlayer.synthesizeOnly(piece, ttsDir)
-                        if (f != null) audioChannel.send(f)
+                        if (f != null) audioChannel.send(f to piece)
                     }
                 } finally {
                     audioChannel.close()
@@ -1296,15 +1313,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                             // 流式一帧都没出（连不上/协议失败）：这一句退回文件链，别把首句丢了
                             val f = TtsPlayer.synthesizeOnly(first, ttsDir)
                             if (f != null) {
-                                TtsPlayer.playPrepared(f, playGen)
+                                TtsPlayer.playPrepared(f, playGen, first)
                                 runCatching { f.delete() }
                             }
                         }
                     }
-                    for (f in audioChannel) {
+                    for ((f, piece) in audioChannel) {
                         if (!TtsPlayer.isActive(playGen)) break
                         markFirstPlay()
-                        val ok = TtsPlayer.playPrepared(f, playGen)
+                        val ok = TtsPlayer.playPrepared(f, playGen, piece)
                         runCatching { f.delete() }
                         // 只有被新播报接管才收工。单句起播失败不该连坐后面的话——
                         // 老实现是 `if (!ok) break`，一次 start 抖动就把剩下半篇全吞了。
@@ -1643,6 +1660,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 },
             )
             session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
+            session.setTtsEchoRisk(TtsPlayer.echoRisk.value)
             session.start() // 后台重试；最终失败由 onError 清理并提示
             wakeSession = session
             // 空转惩罚还在一半时重建了会话（切前后台/灵敏度改动），把门槛接着抬，别白罚
@@ -1823,6 +1841,23 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             if (wasAlarming && listOf("退出", "关闭", "关掉", "停止", "别说了").any { text.contains(it) }) {
                 _statusHint.value = "好的，闹钟停了"
                 return false
+            }
+            // 端侧 KWS 已经先命中过这一句（8 秒内）：这是云端慢转写的迟到副本。
+            // 以前只靠 onWakeConfirmed 里 1.2 秒窗口兜底，弱网转写一超就播两遍「我在」，
+            // 还把已经开始的单次聆听重启——用户正说的话开头被吞。
+            if (SystemClock.elapsedRealtime() - lastWakeHitAt < 8_000) {
+                if (ask.length >= 2) {
+                    // 「小源小源，今天天气怎么样」整句：KWS 那次没拿到问题只开了聆听，
+                    // 迟到的整句转写正好补上——停掉聆听直接答，不用让用户再说一遍
+                    LogStore.log("wake", "云端迟到整句（问题「$ask」）：停单次聆听直接答")
+                    wakeOnceSession?.stop()
+                    wakeOnceSession = null
+                    lastWakeHitAt = SystemClock.elapsedRealtime()
+                    answerVoiceQuestion(ask)
+                } else {
+                    LogStore.log("wake", "云端迟到命中（KWS 已回过「我在」），忽略")
+                }
+                return true
             }
             lastWakeHitAt = SystemClock.elapsedRealtime()
             onWakeConfirmed(ask)
@@ -2124,6 +2159,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             },
         )
         session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
+        session.setTtsEchoRisk(TtsPlayer.echoRisk.value)
         session.start()
         wakeOnceSession = session
         // 同一时刻只允许一个采集会话：待机监听先让路

@@ -113,6 +113,7 @@ class ContinuousConversation(
     @Volatile private var running = false
     @Volatile private var stopRequested = false
     @Volatile private var ttsActive = false
+    @Volatile private var ttsEchoRisk = false
     @Volatile private var ttsStartedAt = 0L
     @Volatile private var busy = false
     @Volatile private var bargeInFired = false
@@ -347,6 +348,14 @@ class ContinuousConversation(
         ttsActive = active
     }
 
+    /**
+     * TTS 正在播的这句含不含唤醒词（回声风险）。含（喇叭在念「小源」）时播报期间停喂 KWS，
+     * 防自己触发自己；不含时照喂——播报中喊「小源小源」就能打断答非所问的回答。
+     */
+    fun setTtsEchoRisk(risk: Boolean) {
+        ttsEchoRisk = risk
+    }
+
     /** 调用方正忙着处理（转写/AI/编排）：暂停空闲计时 */
     fun setBusy(value: Boolean) {
         busy = value
@@ -428,9 +437,11 @@ class ContinuousConversation(
         val now = SystemClock.elapsedRealtime()
         highPass(buf, n)
         val frame = buf.copyOf(n)
-        // 端侧唤醒词：待机（不在播报）时把这一帧喂给 KWS。播报中没必要喂（人已经在对话里），
-        // 喂了反而可能被自己的声音触发。feed() 只是入队，模型前向在 kws-decoder 线程。
-        if (!ttsActive) LocalKws.feed(frame)
+        // 端侧唤醒词：待机时把这一帧喂给 KWS。播报中**只有念到「小源」的句子**（回声风险）停喂，
+        // 其余句子照喂——半双工收音虽丢弃，但 KWS 一直活着，答非所问的回答播到一半，
+        // 喊「小源小源」就能打断重听（打断后收音在唤醒流程里重新开）。feed() 只是入队，
+        // 模型前向在 kws-decoder 线程。
+        if (!ttsActive || !ttsEchoRisk) LocalKws.feed(frame)
         val db = (20.0 * log10(rmsOf(frame) / 32768.0 + 1e-6)).toFloat()
 
         // 空闲帧缓慢跟踪噪声底（只在非语音帧更新，说话时不许把底噪拉高）

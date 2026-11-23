@@ -52,6 +52,34 @@ object TtsPlayer {
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    /**
+     * 正在播的这句文本里含「小源」时为 true：喇叭念到唤醒词会把端侧 KWS 自己触发（回声）。
+     * 采集侧据此决定播报期间还喂不喂 KWS——有风险的句子停喂，其余句子照喂，
+     * 让用户在答非所问的回答播到一半时，喊「小源小源」就能打断重来。句级粒度：
+     * 一句含唤醒词只关那一句的喂帧，不会把整轮回答的可打断性都关掉。
+     */
+    private val _echoRisk = MutableStateFlow(false)
+    val echoRisk: StateFlow<Boolean> = _echoRisk.asStateFlow()
+
+    /**
+     * 轮内保守标志：本轮播报里**出现过**「小源」就保持风险到轮结束。流式链是
+     * 「合成快、播放慢」，播放侧按句切换标记会超前播放头——上一句「我是小源」
+     * 还在喇叭里响、标记已经切到下一句，KWS 就被自己的声音触发。宁可整轮不可打断，
+     * 也不让回声把自己叫醒。新一轮（speak/startStreamSession 都先走 stop）自动复位。
+     */
+    @Volatile
+    private var sessionEchoRisk = false
+
+    private fun markEchoRisk(text: String?) {
+        if (text != null && text.contains("小源")) sessionEchoRisk = true
+        _echoRisk.value = sessionEchoRisk || (text?.contains("小源") == true)
+    }
+
+    private fun clearEchoRisk() {
+        sessionEchoRisk = false
+        _echoRisk.value = false
+    }
+
     private var job: Job? = null
     private var player: MediaPlayer? = null
     private var streamPlayer: Mp3StreamPlayer? = null
@@ -172,6 +200,7 @@ object TtsPlayer {
         stop()
         val myGen = ++generation
         currentText = body
+        markEchoRisk(body)
         _state.value = State.Loading
         job = scope.launch {
             ttsLog("speak 启动（${body.length} 字，流式段 ${STREAM_SEGMENT_CHARS}/文件段 ${SEGMENT_CHARS}）")
@@ -220,6 +249,7 @@ object TtsPlayer {
             ) {
                 _state.value = State.Idle
                 currentText = null
+                clearEchoRisk()
             }
         }
     }
@@ -259,8 +289,9 @@ object TtsPlayer {
      * 与上一句无缝相接（旧实现每句新建 MediaPlayer，句间固定空出 0.5~1 秒）。
      * 没有流水线会话时（普通 speak() 链路）仍走单文件播放。
      */
-    suspend fun playPrepared(file: File, gen: Int): Boolean {
+    suspend fun playPrepared(file: File, gen: Int, text: String? = null): Boolean {
         if (gen != generation) return false
+        markEchoRisk(text)
         val s = sink ?: return playFileAwait(file, gen)
         // 解码和阻塞写入都不能占主线程（AudioTrack 缓冲满时 write 会等）
         return withContext(Dispatchers.IO) {
@@ -312,6 +343,7 @@ object TtsPlayer {
      */
     suspend fun playStreamedPiece(text: String, gen: Int): Boolean {
         if (gen != generation) return false
+        markEchoRisk(text)
         return playStreamed(text, gen)
     }
 
@@ -327,6 +359,7 @@ object TtsPlayer {
                 _state.value = State.Idle
             }
             currentText = null
+            clearEchoRisk()
         }
     }
 
@@ -344,6 +377,7 @@ object TtsPlayer {
         player = null
         runCatching { systemTts?.stop() }
         currentText = null
+        clearEchoRisk()
         if (_state.value !is State.Idle) _state.value = State.Idle
     }
 
@@ -551,6 +585,7 @@ object TtsPlayer {
             runCatching { engine.stop() }
             return
         }
+        markEchoRisk(text)
         var speakFailed = false
         withContext(Dispatchers.Main) {
             try {
@@ -564,6 +599,7 @@ object TtsPlayer {
                             if (gen == generation) {
                                 if (_state.value is State.Speaking) _state.value = State.Idle
                                 currentText = null
+                                clearEchoRisk()
                             }
                             if (cont.isActive) cont.resume(Unit)
                         }
@@ -573,6 +609,7 @@ object TtsPlayer {
                             if (gen == generation) {
                                 if (_state.value is State.Speaking) _state.value = State.Idle
                                 currentText = null
+                                clearEchoRisk()
                             }
                             if (cont.isActive) cont.resume(Unit)
                         }
@@ -1393,7 +1430,7 @@ class LiveTtsSession(context: Context) {
 
     private val firstPiece = CompletableDeferred<String?>()
     private val pieces = Channel<String>(Channel.UNLIMITED)
-    private val audio = Channel<File>(Channel.UNLIMITED)
+    private val audio = Channel<Pair<File, String>>(Channel.UNLIMITED)
     private val dir = File(context.applicationContext.cacheDir, "tts_live").apply {
         runCatching { mkdirs() }
         // 上一轮被打断时没播到的文件会留在这里，每轮开播前清一次
@@ -1434,13 +1471,14 @@ class LiveTtsSession(context: Context) {
                 if (st is TtsPlayer.State.Speaking && TtsPlayer.isActive(gen)) markSpoke()
             }
         }
-        // 合成器：句子一到就合成，不等播放（合成约 1.5s/句，播放 4~6s/句，队列会稳定领先）
+        // 合成器：句子一到就合成，不等播放（合成约 1.5s/句，播放 4~6s/句，队列会稳定领先）。
+        // 文件和句文本一起入队：播放侧要靠文本标记「这一句含不含唤醒词」（回声风险）。
         scope.launch(Dispatchers.IO) {
             try {
                 for (piece in pieces) {
                     if (!TtsPlayer.isActive(gen)) break
                     val f = TtsPlayer.synthesizeOnly(piece, dir)
-                    if (f != null) audio.send(f)
+                    if (f != null) audio.send(f to piece)
                 }
             } finally {
                 audio.close()
@@ -1458,7 +1496,7 @@ class LiveTtsSession(context: Context) {
                         // 流式一帧都没出（连不上/协议失败）：这一句退回文件链，别把首句丢了
                         val f = TtsPlayer.synthesizeOnly(head, dir)
                         if (f != null) {
-                            if (TtsPlayer.playPrepared(f, gen)) markSpoke()
+                            if (TtsPlayer.playPrepared(f, gen, head)) markSpoke()
                             runCatching { f.delete() }
                         }
                     }
@@ -1466,12 +1504,12 @@ class LiveTtsSession(context: Context) {
                 // 首句这一轮已经定生死了：还没出声就赶紧告诉上层，让它整段兜底，
                 // 别一直等着后面那些还没合成的句子
                 if (!spoke) decision.complete(false)
-                for (f in audio) {
+                for ((f, piece) in audio) {
                     if (!TtsPlayer.isActive(gen)) {
                         runCatching { f.delete() }
                         break
                     }
-                    if (TtsPlayer.playPrepared(f, gen)) markSpoke()
+                    if (TtsPlayer.playPrepared(f, gen, piece)) markSpoke()
                     runCatching { f.delete() }
                 }
                 // 文件都写进音轨不等于播完了，等播放头追上写入量再收尾

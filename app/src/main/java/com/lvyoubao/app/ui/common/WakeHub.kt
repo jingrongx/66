@@ -24,6 +24,7 @@ object WakeHub {
     private var oneShot: ContinuousConversation? = null
     private var onWake: (() -> Unit)? = null
     private var ttsJob: Job? = null
+    private var echoJob: Job? = null
     private var lastWakeAt = 0L
 
     fun standbyActive(): Boolean = standby != null
@@ -65,10 +66,14 @@ object WakeHub {
                 }
             },
         )
-        // 朗读时停喂 KWS（防把自己的播报当唤醒词）；跟 TtsPlayer 状态走
+        // 朗读时停喂 KWS 的例外：正在播的句子不含「小源」时照喂，让用户能喊唤醒词打断播报
         ttsJob?.cancel()
         ttsJob = scope.launch {
             TtsPlayer.state.collect { st -> s.setTtsActive(st is TtsPlayer.State.Speaking) }
+        }
+        echoJob?.cancel()
+        echoJob = scope.launch {
+            TtsPlayer.echoRisk.collect { s.setTtsEchoRisk(it) }
         }
         s.start()
         standby = s
@@ -78,6 +83,8 @@ object WakeHub {
     fun stopStandby() {
         ttsJob?.cancel()
         ttsJob = null
+        echoJob?.cancel()
+        echoJob = null
         standby?.stop()
         standby = null
         onWake = null

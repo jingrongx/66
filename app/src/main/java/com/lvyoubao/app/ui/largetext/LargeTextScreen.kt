@@ -898,6 +898,8 @@ fun LargeTextScreen(
     // ---------- 唤醒词（端侧 KWS 零配额；唤醒后按设置进通话或单次语音） ----------
     var wakeListening by remember { mutableStateOf(false) }
     fun dispatchWake() {
+        // 播报中喊唤醒词 = 打断答非所问的回答：先停播再出「我在」，别叠音
+        TtsPlayer.stop()
         com.lvyoubao.app.ui.spark.SparkAck.play(context) // 回应声（与灵动模式同款：会话同音色合成的「我在」）
         if (settings.wakeAction == "call" && settings.callEngine == "doubao" &&
             settings.duplexApiKey.isNotBlank() && SpeechInput.hasRecordPermission(context)
