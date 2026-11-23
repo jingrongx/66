@@ -35,6 +35,13 @@ object CameraSnapshotHelper {
 
     private const val TAG = "SparkCamera"
 
+    /**
+     * 这些机型的相机**物理装反了**（倒装 180°）：实拍照片文字上下颠倒，大模型读标签
+     * 全废（碘伏瓶认成饮料的另一半根因）。按 sensorOrientation 旋转是 Camera2 通用
+     * 做法，这里再给倒装机型补 180°。Visbot = 小方头机器人（MT8167S，aiv8167sm3_bsp）。
+     */
+    private val FLIPPED_MODELS = setOf("visbot")
+
     data class SnapshotResult(
         val dataUrl: String,
         val bitmap: Bitmap,
@@ -42,19 +49,22 @@ object CameraSnapshotHelper {
 
     fun hasCameraPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
+        PackageManager.PERMISSION_GRANTED
 
     suspend fun takeSnapshot(context: Context): SnapshotResult? = withTimeoutOrNull(7_000) {
-        val rawBytes = captureSingleFrame(context) ?: return@withTimeoutOrNull null
+        val captured = captureSingleFrame(context) ?: return@withTimeoutOrNull null
         withContext(Dispatchers.IO) {
-            processSnapshot(rawBytes)
+            processSnapshot(captured)
         }
     }
 
     suspend fun takeSnapshotDataUrl(context: Context): String? = takeSnapshot(context)?.dataUrl
 
+    /** 抓到的一帧：JPEG 字节 + 传感器方向角（照片要正着看还需顺时针转多少度） */
+    private class CapturedFrame(val bytes: ByteArray, val rotateDegrees: Int)
+
     @SuppressLint("MissingPermission")
-    private suspend fun captureSingleFrame(context: Context): ByteArray? = suspendCancellableCoroutine { cont ->
+    private suspend fun captureSingleFrame(context: Context): CapturedFrame? = suspendCancellableCoroutine { cont ->
         if (!hasCameraPermission(context)) {
             cont.resume(null)
             return@suspendCancellableCoroutine
@@ -71,6 +81,7 @@ object CameraSnapshotHelper {
 
         var cameraId: String? = null
         var chosenSize = Size(1024, 768)
+        var rotateDegrees = 0
 
         try {
             val ids = cameraManager.cameraIdList
@@ -89,6 +100,11 @@ object CameraSnapshotHelper {
                     .minByOrNull { kotlin.math.abs(it.width - 1280) }
                     ?: sizes.firstOrNull()
                     ?: Size(1024, 768)
+                // 通用旋转：Camera2 的 JPEG 帧是传感器原始方向，要正着看必须转 sensorOrientation
+                val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+                val flipped = android.os.Build.MODEL?.lowercase() in FLIPPED_MODELS
+                rotateDegrees = (sensorOrientation + if (flipped) 180 else 0) % 360
+                if (flipped) Log.i(TAG, "机型 ${android.os.Build.MODEL} 相机倒装，已补 180° 旋转")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to query camera characteristics", e)
@@ -126,7 +142,7 @@ object CameraSnapshotHelper {
                     if (!isResumed) {
                         isResumed = true
                         cleanup()
-                        if (cont.isActive) cont.resume(bytes)
+                        if (cont.isActive) cont.resume(CapturedFrame(bytes, rotateDegrees))
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Read image buffer failed", e)
@@ -220,10 +236,10 @@ object CameraSnapshotHelper {
         }
     }
 
-    /** 降采样并压缩为高质量紧凑的 JPEG Base64 Data URL 以及用于界面预览的 Bitmap */
-    private fun processSnapshot(rawBytes: ByteArray): SnapshotResult? = runCatching {
+    /** 降采样 → 摆正方向 → 压缩为高质量紧凑的 JPEG Base64 Data URL 以及用于界面预览的 Bitmap */
+    private fun processSnapshot(captured: CapturedFrame): SnapshotResult? = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+        BitmapFactory.decodeByteArray(captured.bytes, 0, captured.bytes.size, bounds)
 
         var sample = 1
         while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) {
@@ -231,15 +247,25 @@ object CameraSnapshotHelper {
         }
 
         val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sample }
-        val bitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOptions) ?: return null
+        val raw = BitmapFactory.decodeByteArray(captured.bytes, 0, captured.bytes.size, decodeOptions) ?: return null
+
+        // 摆正：没转过的照片文字是歪的/倒的，人和大模型都读不了（碘伏认成饮料的另一半根因）
+        val upright = if (captured.rotateDegrees != 0) {
+            val m = android.graphics.Matrix().apply { postRotate(captured.rotateDegrees.toFloat()) }
+            Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true).also {
+                if (it != raw) raw.recycle()
+            }
+        } else {
+            raw
+        }
 
         val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 75, out)
+        upright.compress(Bitmap.CompressFormat.JPEG, 75, out)
 
         val compressedBytes = out.toByteArray()
         val base64 = Base64.encodeToString(compressedBytes, Base64.NO_WRAP)
         val dataUrl = "data:image/jpeg;base64,$base64"
 
-        SnapshotResult(dataUrl = dataUrl, bitmap = bitmap)
+        SnapshotResult(dataUrl = dataUrl, bitmap = upright)
     }.getOrNull()
 }
