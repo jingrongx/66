@@ -30,14 +30,21 @@ object CalendarContext {
         )
         val lunar = solar.lunar
         val localTz = TimeZone.getDefault()
-        val timeLine = if (localTz.getOffset(now.time) == TimeZone.getTimeZone("Asia/Shanghai").getOffset(now.time)) {
-            "北京时间：${solar.year}年${solar.month}月${solar.day}日 星期${solar.weekInChinese} " +
-                String.format(Locale.CHINA, "%02d:%02d", solar.hour, solar.minute) + "（即当地时间）"
-        } else {
-            val localFmt = SimpleDateFormat("HH:mm", Locale.CHINA).apply { timeZone = localTz }
-            "北京时间：${solar.year}年${solar.month}月${solar.day}日 星期${solar.weekInChinese} " +
-                String.format(Locale.CHINA, "%02d:%02d", solar.hour, solar.minute) +
-                "；当地时间（设备时区 ${localTz.id}）：${localFmt.format(now)}"
+        // 农历/节气/时辰固定按北京时间推算（民俗基准）；「现在几点」的时区展示服从设置项，
+        // 与 QuickAnswers/TimeAnswer 同一口径——三种模式不会一个报北京一个报当地。
+        val bjClock = "${solar.year}年${solar.month}月${solar.day}日 星期${solar.weekInChinese} " +
+            String.format(Locale.CHINA, "%02d:%02d", solar.hour, solar.minute)
+        val localFmt = SimpleDateFormat("HH:mm", Locale.CHINA).apply { timeZone = localTz }
+        val localClock = "${localFmt.format(now)}（设备时区 ${localTz.id}）"
+        val timeLine = when (TimeSync.zoneMode()) {
+            "local" -> "当地时间：$localClock"
+            "both" -> "北京时间：$bjClock；当地时间：$localClock"
+            "auto" -> if (localTz.getOffset(now.time) == TimeZone.getTimeZone("Asia/Shanghai").getOffset(now.time)) {
+                "北京时间：$bjClock（即当地时间）"
+            } else {
+                "北京时间：$bjClock；当地时间：$localClock"
+            }
+            else -> "北京时间：$bjClock（即当地时间）" // beijing 及未知值：只报北京
         }
         buildString {
             appendLine("【历法 · 本地精确推算】农历/节气/节日/时辰类问题必须以下面为准，绝不自行推算：")

@@ -58,6 +58,10 @@ data class SyncableConfig(
     val callTtsModel: String = "",
     val robotEnabled: Boolean? = null, // 机器人控制：语音指挥开关
     val robotHost: String = "",        // 机器人中枢地址（局域网 IP / 127.0.0.1）
+    // 时间与时区（可空：旧二维码没有则保留接收端原值）
+    val timeAutoSync: Boolean? = null,
+    val timeZoneMode: String = "",
+    val timeSyncIntervalMin: Int? = null,
 )
 
 object ConfigSyncCodec {
@@ -108,6 +112,9 @@ object ConfigSyncCodec {
         callTtsModel = s.callTtsModel,
         robotEnabled = s.robotEnabled,
         robotHost = s.robotHost,
+        timeAutoSync = s.timeAutoSync,
+        timeZoneMode = s.timeZoneMode,
+        timeSyncIntervalMin = s.timeSyncIntervalMin,
     )
 
     /** 把配置合并回 AiSettings（只覆盖载荷里非空的字段） */
@@ -158,6 +165,9 @@ object ConfigSyncCodec {
         callTtsModel = c.callTtsModel,
         robotEnabled = c.robotEnabled ?: s.robotEnabled,
         robotHost = c.robotHost.ifEmpty { s.robotHost },
+        timeAutoSync = c.timeAutoSync ?: s.timeAutoSync,
+        timeZoneMode = c.timeZoneMode.ifEmpty { s.timeZoneMode },
+        timeSyncIntervalMin = c.timeSyncIntervalMin ?: s.timeSyncIntervalMin,
     )
 
     fun encodeJson(c: SyncableConfig): String = json.encodeToString(c)

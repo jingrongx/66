@@ -69,6 +69,9 @@ class SettingsRepository(private val context: Context) {
         val callAsrModel = stringPreferencesKey("call_asr_model")
         val callLlmModel = stringPreferencesKey("call_llm_model")
         val callTtsModel = stringPreferencesKey("call_tts_model")
+        val timeAutoSync = booleanPreferencesKey("time_auto_sync")
+        val timeZoneMode = stringPreferencesKey("time_zone_mode")
+        val timeSyncIntervalMin = intPreferencesKey("time_sync_interval_min")
     }
 
     val settings: Flow<AiSettings> = context.dataStore.data.map { p ->
@@ -128,6 +131,9 @@ class SettingsRepository(private val context: Context) {
             callAsrModel = p[Keys.callAsrModel] ?: "",
             callLlmModel = p[Keys.callLlmModel] ?: "",
             callTtsModel = p[Keys.callTtsModel] ?: "",
+            timeAutoSync = p[Keys.timeAutoSync] ?: defaults.timeAutoSync,
+            timeZoneMode = p[Keys.timeZoneMode] ?: defaults.timeZoneMode,
+            timeSyncIntervalMin = p[Keys.timeSyncIntervalMin] ?: defaults.timeSyncIntervalMin,
         )
     }
 
@@ -183,7 +189,12 @@ class SettingsRepository(private val context: Context) {
             p[Keys.callAsrModel] = settings.callAsrModel
             p[Keys.callLlmModel] = settings.callLlmModel
             p[Keys.callTtsModel] = settings.callTtsModel
+            p[Keys.timeAutoSync] = settings.timeAutoSync
+            p[Keys.timeZoneMode] = settings.timeZoneMode
+            p[Keys.timeSyncIntervalMin] = settings.timeSyncIntervalMin
         }
+        // 时间配置即时生效：不要让校时/报时等下一轮读取设置
+        TimeSync.applySettings(settings)
     }
 
     // 会话相关偏好挂在同一个仓库门面下，避免多个 DataStore 实例

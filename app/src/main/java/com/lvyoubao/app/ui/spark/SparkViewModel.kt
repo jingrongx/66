@@ -2085,6 +2085,15 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             answerVolume(appContext, action)
             return
         }
+        // 时间/日期/电量本地快答：与另外两种模式共用 QuickAnswers，
+        // 时区口径读同一份设置、校时走同一个 TimeSync，三种模式答案一致且零延迟。
+        com.lvyoubao.app.data.QuickAnswers.answer(appContext, clean)?.let { quick ->
+            appendMessage(SparkMessage("assistant", quick))
+            _statusHint.value = null
+            _eyeState.value = SparkEyeState.IDLE
+            speakHint(appContext, quick)
+            return
+        }
         if (!handleAssistantIntent(appContext, clean)) {
             sendAiRequest(appContext, clean, photos.map { it.dataUrl })
         }

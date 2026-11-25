@@ -89,9 +89,9 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 设置页——严格按 .workbuddy/tmp/settings-design.html 的 10 个区块重排：
+ * 设置页——按 .workbuddy/tmp/settings-design.html 的区块重排，现为 11 个：
  * ① 模式与系统 ② 扫码同步 ③ 8 家凭证中心 ④ 核心能力与模型调度（文本 + 语音两块并存）
- * ⑤ 常用地址 ⑥ 桌面与后台 ⑦ 诊断与日志 ⑧ 机器人控制 ⑨ 数据管理与飞轮 ⑩ 关于
+ * ⑤ 常用地址 ⑥ 桌面与后台 ⑦ 时间与时区 ⑧ 诊断与日志 ⑨ 机器人控制 ⑩ 数据管理与飞轮 ⑪ 关于
  *
  * 配色/间距/字号/控件形状逐项对齐设计稿；日间模式用同一套版式的浅色令牌。
  * 设计稿顶部与底部的「保存全部」按钮按要求不做——改动即自动保存，标题旁只留轻量反馈。
@@ -119,6 +119,9 @@ fun SettingsScreen(
     var sparkFontDialog by remember { mutableStateOf(false) }
     var screenOffDialog by remember { mutableStateOf(false) }
     var screenOrientDialog by remember { mutableStateOf(false) }
+    // 时间与时区
+    var timeZoneDialog by remember { mutableStateOf(false) }
+    var timeIntervalDialog by remember { mutableStateOf(false) }
     // 授权「修改系统设置」回来后补一次：否则改完超时值要重启才生效
     val writeSettingsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -562,7 +565,73 @@ fun SettingsScreen(
                         )
                     }
 
-                    // ==================== 7. 诊断与日志 ====================
+                    // ==================== 7. 时间与时区 ====================
+                    SettingsSectionTitle("时间与时区", SectionAccent.Teal)
+                    SettingsCard {
+                        Text(
+                            "三种模式统一口径。校时走网络对表，机器人有 root 会自动修正系统钟；手机无 root 则用偏移补偿。",
+                            color = p.muted,
+                            fontSize = 11.sp,
+                            lineHeight = 18.sp,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        ToggleRowWide(
+                            title = "自动网络校时",
+                            subtitle = "开机、回前台、问时间时自动对表；关掉则只用设备系统钟",
+                            checked = state.draft.timeAutoSync,
+                            onCheckedChange = { checked ->
+                                vm.updateDraft { it.copy(timeAutoSync = checked) }
+                            },
+                        )
+                        CardDivider()
+                        Spacer(Modifier.height(4.dp))
+                        PillRow(
+                            label = "报时区制",
+                            value = when (state.draft.timeZoneMode) {
+                                "beijing" -> "只报北京"
+                                "local" -> "只报当地"
+                                "both" -> "北京 + 当地"
+                                else -> "自动"
+                            },
+                            onClick = { timeZoneDialog = true },
+                        )
+                        PillRow(
+                            label = "校时间隔",
+                            value = "每 ${state.draft.timeSyncIntervalMin} 分钟",
+                            onClick = { timeIntervalDialog = true },
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        var syncingTime by remember { mutableStateOf(false) }
+                        var syncMsg by remember { mutableStateOf<String?>(null) }
+                        SecondaryButton(
+                            text = if (syncingTime) "正在对表…" else "🕐  立即校时并查看结果",
+                            onClick = {
+                                if (syncingTime) return@SecondaryButton
+                                syncingTime = true
+                                syncMsg = null
+                                scope.launch {
+                                    val ok = withContext(Dispatchers.IO) {
+                                        com.lvyoubao.app.data.TimeSync.sync(minIntervalMs = 0L)
+                                    }
+                                    syncMsg = if (ok) {
+                                        "校时完成：${com.lvyoubao.app.data.TimeSync.status()}，" +
+                                            "现在 ${com.lvyoubao.app.data.TimeAnswer.time(state.draft.timeZoneMode)}"
+                                    } else {
+                                        "网络对表失败，当前 ${com.lvyoubao.app.data.TimeSync.status()}，沿用设备时间"
+                                    }
+                                    syncingTime = false
+                                }
+                            },
+                            enabled = !syncingTime,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        syncMsg?.let {
+                            Spacer(Modifier.height(8.dp))
+                            Text(it, color = p.accent, fontSize = 11.sp, lineHeight = 17.sp)
+                        }
+                    }
+
+                    // ==================== 8. 诊断与日志 ====================
                     SettingsSectionTitle(
                         "诊断与日志",
                         SectionAccent.Orange,
@@ -642,7 +711,7 @@ fun SettingsScreen(
                         }
                     }
 
-                    // ==================== 8. 机器人控制 ====================
+                    // ==================== 9. 机器人控制 ====================
                     SettingsSectionTitle("机器人控制", SectionAccent.Fuchsia)
                     SettingsCard {
                         ToggleRow(
@@ -720,7 +789,7 @@ fun SettingsScreen(
                         )
                     }
 
-                    // ==================== 9. 数据管理与飞轮 ====================
+                    // ==================== 10. 数据管理与飞轮 ====================
                     SettingsSectionTitle("数据管理与飞轮", SectionAccent.Rose)
                     SettingsCard {
                         NavRow(
@@ -751,7 +820,7 @@ fun SettingsScreen(
                         }
                     }
 
-                    // ==================== 10. 关于（设计稿此处无彩色竖条） ====================
+                    // ==================== 11. 关于（设计稿此处无彩色竖条） ====================
                     SettingsSectionTitle("关于")
                     SettingsCard {
                         NavRow(
@@ -1045,6 +1114,42 @@ fun SettingsScreen(
                 confirmButton = {
                     TextButton(onClick = { vm.save(onSaved = {}); prefsDialog = false }) { Text("完成") }
                 },
+            )
+        }
+
+        if (timeZoneDialog) {
+            ChoiceDialog(
+                title = "报时区制",
+                options = listOf(
+                    Triple("auto", "自动", "与北京同钟面只报一个；在境外同时报北京和当地"),
+                    Triple("beijing", "只报北京", "无论在哪都报北京时间"),
+                    Triple("local", "只报当地", "按设备时区报当地时间"),
+                    Triple("both", "北京 + 当地", "始终两个都报"),
+                ),
+                selected = state.draft.timeZoneMode,
+                onPick = { v ->
+                    vm.updateDraft { it.copy(timeZoneMode = v) }
+                    timeZoneDialog = false
+                },
+                onDismiss = { timeZoneDialog = false },
+            )
+        }
+
+        if (timeIntervalDialog) {
+            ChoiceDialog(
+                title = "校时间隔",
+                options = listOf(
+                    Triple("3", "每 3 分钟", "走时漂移大的老设备选这个，更准但更费网络"),
+                    Triple("10", "每 10 分钟", "默认，平衡精度与耗电"),
+                    Triple("30", "每 30 分钟", "省电，适合系统钟本身很准的手机"),
+                    Triple("120", "每 2 小时", "最省，几乎不主动对表"),
+                ),
+                selected = state.draft.timeSyncIntervalMin.toString(),
+                onPick = { v ->
+                    vm.updateDraft { it.copy(timeSyncIntervalMin = v.toIntOrNull() ?: 10) }
+                    timeIntervalDialog = false
+                },
+                onDismiss = { timeIntervalDialog = false },
             )
         }
     }

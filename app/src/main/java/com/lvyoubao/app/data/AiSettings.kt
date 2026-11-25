@@ -57,4 +57,10 @@ data class AiSettings(
     val callAsrModel: String = "",
     val callLlmModel: String = "",
     val callTtsModel: String = "",
+
+    // ===== 时间与时区（三种模式统一口径）=====
+    val timeAutoSync: Boolean = true, // 自动网络校时：开机/回前台/问时按需补校；关掉则只用系统钟
+    // 报时区制：auto=与北京同钟面只报一个，不同则北京+当地都报；beijing=只报北京；local=只报设备当地；both=永远两个都报
+    val timeZoneMode: String = "auto",
+    val timeSyncIntervalMin: Int = 10, // 校时空闲间隔（分钟）：问时间时距上次校时超过就异步补校
 )

@@ -572,7 +572,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
             // 灵动模式一直有这条快路（说完就有声），普通/大字模式却要带近 2800 字 prompt
             // 走一趟模型，同一个问题白白慢 1~2 秒——这就是「那两个模式反应慢」的主因之一。
             QuickAnswers.answer(context, question)?.let { quick ->
-                com.lvyoubao.app.data.LogStore.log("quick", "本地快答命中：$quick")
+                // 命中详情（含校时偏差）由 QuickAnswers 内部统一记 "quick" 日志
                 sessions.appendMessage(
                     sessionId,
                     SessionMessage(role = "assistant", text = quick, ts = System.currentTimeMillis()),
