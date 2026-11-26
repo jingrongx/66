@@ -2073,6 +2073,20 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      * 顺序：本地快路（电量 / 音量）→ 本机意图（机器人、计时、记事、记忆查找）→ 聊天。
      */
     private suspend fun answerVoiceQuestion(clean: String, photos: List<PendingPhoto> = emptyList()) {
+        // 结束词本地快路：以前 matchByeFast 被 `_isContinuous`（v0.9.16 起恒为 false）门控
+        // 成了死代码，robotHints 闸门也不含结束词，导致说「再见/退出」被当普通问题回答朗读。
+        // 放在所有本地快路之前：停播报、退聆听、回待机，不发 AI 请求也不落库。
+        if (matchByeFast(clean) || com.lvyoubao.app.data.RobotIntent.matchEndFast(clean)) {
+            TtsPlayer.stop()
+            wakeOnceSession?.stop()
+            wakeOnceSession = null
+            _eyeState.value = SparkEyeState.IDLE
+            _showEyes.value = true
+            _statusHint.value = null
+            ScreenAwake.idle()
+            syncWakeEngine()
+            return
+        }
         ScreenAwake.keepOn() // 一轮问答期间屏幕全程亮着，播完再重新计时
         appendMessage(SparkMessage(role = "user", text = clean, photos = photos.map { it.bitmap }))
         _showEyes.value = false // 提问完成，自动切到会话流展示

@@ -145,6 +145,9 @@ internal object DuplexProtocol {
     /** 识别流里的即时急停判定：交给 RobotIntent 的急停词表（停/别动/站住…，含否定句排除） */
     fun instantStopHit(text: String): Boolean = RobotIntent.matchStopFast(text)
 
+    /** 识别流里的结束/道别判定（退出/结束/再见/拜拜…）：命中即挂断，不等 AI 往返 */
+    fun instantEndHit(text: String): Boolean = RobotIntent.matchEndFast(text)
+
     /** FC 结果回传：response.function_call_arguments.done 之后，本地执行完把结果交给模型继续说 */
     fun toolResult(callId: String, result: String): String = buildJsonObject {
         put("type", "conversation.item.create")

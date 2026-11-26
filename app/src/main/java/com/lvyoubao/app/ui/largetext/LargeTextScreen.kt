@@ -816,6 +816,11 @@ fun LargeTextScreen(
                 is DoubaoDuplexClient.Event.StopRequested -> {
                     scope.launch { DeviceTools.stopRobot(context, settings) }
                 }
+                // 结束词：关界面触发 duplexClient.close()（见下面 DisposableEffect），回到待机
+                is DoubaoDuplexClient.Event.HangupRequested -> {
+                    TtsPlayer.stop()
+                    showCall = false
+                }
                 // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
                 // FC 一轮可能多段收口，ChatViewModel 里会就地并进同一张卡。
                 is DoubaoDuplexClient.Event.TurnDone -> {
@@ -917,7 +922,12 @@ fun LargeTextScreen(
                 delay(com.lvyoubao.app.ui.spark.SparkAck.DURATION_MS)
                 WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
                     wakeListening = false
-                    if (!text.isNullOrBlank()) vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+                    if (!text.isNullOrBlank()) {
+                        // 结束词：停播报、不送 AI，直接回待机
+                        if (com.lvyoubao.app.data.RobotIntent.matchEndFast(text)) {
+                            TtsPlayer.stop()
+                        } else vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+                    }
                 }
             }
         }

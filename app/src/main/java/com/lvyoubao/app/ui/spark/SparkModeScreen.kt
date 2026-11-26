@@ -253,6 +253,14 @@ fun SparkModeScreen(
                         duplexClient.speak("好的，已停下")
                     }
                 }
+                // 识别流里出现结束词：挂断通话回到待机（不等 AI 决定，也不回话）
+                is DoubaoDuplexClient.Event.HangupRequested -> {
+                    duplexClient.close()
+                    showDuplexCall = false
+                    callUiVisible = false
+                    vm.setShowEyes(true)
+                    com.lvyoubao.app.ui.common.TtsPlayer.stop()
+                }
                 // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
                 is DoubaoDuplexClient.Event.TurnDone -> {
                     lastVoiceAt = System.currentTimeMillis()

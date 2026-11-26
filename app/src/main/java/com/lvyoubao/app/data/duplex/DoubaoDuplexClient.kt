@@ -61,6 +61,11 @@ class DoubaoDuplexClient(private val context: Context) {
          */
         data object StopRequested : Event
         /**
+         * 识别流里出现结束/道别词（退出/结束/再见/拜拜…）：客户端已停播 + response.cancel，
+         * 上层据此挂断通话并回到待机。用 final 文本判定，避免「再见怎么写」被中途误挂。
+         */
+        data object HangupRequested : Event
+        /**
          * 一轮回答收口（response.done / 被打断时的残句）。落会话历史以这个为准：
          * TextDone 不一定到（纯音频段、被打断），answer 是本轮已生成的全文/残文。
          * asr 是本轮回答对应的用户识别稿——response 开始时冻结的快照。全双工下
@@ -102,6 +107,8 @@ class DoubaoDuplexClient(private val context: Context) {
     private var turnAsr = ""
     /** 本话头是否还允许触发即时急停（一个话头只触发一次，防重复 cancel） */
     private var stopArmed = true
+    /** 本话头是否还允许触发结束词挂断（独立于 stopArmed：先说「停」再说「再见」仍能挂断） */
+    private var endArmed = true
     /** 方言（explicit_dialect，空=关）与唱歌开关 */
     private var dialect: String = ""
     private var music: Boolean = false
@@ -149,6 +156,7 @@ class DoubaoDuplexClient(private val context: Context) {
                     userSpeaking = true
                     pendingAsr = ""
                     stopArmed = true
+                    endArmed = true
                     _events.tryEmit(Event.AsrStarted)
                     // ASR 只做本地停播（插话手感），不切 SPEAKING/LISTENING：
                     // 官方明确播放状态机与 ASR 解耦，状态只由 response.created/done/canceled 驱动。
@@ -175,6 +183,15 @@ class DoubaoDuplexClient(private val context: Context) {
                     pendingAsr = ev.transcript
                     _events.tryEmit(Event.Asr(ev.transcript, isFinal = true))
                     userSpeaking = false
+                    // 结束词：用 final 文本判定（不是 delta），避免用户说「再见怎么写」
+                    // 时中途出现「再见」被误挂断。命中即停播+取消服务端回答，再让 UI 挂断。
+                    if (endArmed && DuplexProtocol.instantEndHit(ev.transcript)) {
+                        endArmed = false
+                        Log.w(TAG, "识别流命中结束词：「${ev.transcript}」，停播并挂断通话")
+                        audio?.flushPlayback()
+                        ws.send(DuplexProtocol.simple("response.cancel"))
+                        _events.tryEmit(Event.HangupRequested)
+                    }
                 }
                 is DuplexProtocol.Downstream.TextDelta -> {
                     turnText.append(ev.delta)

@@ -2,6 +2,7 @@ package com.lvyoubao.app
 
 import com.lvyoubao.app.data.RobotIntent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -124,5 +125,19 @@ class RobotIntentParseTest {
         assertEquals(false, RobotIntent.matchStopFast("不要停下来"))
         // 长句交给 AI，不走快路
         assertEquals(false, RobotIntent.matchStopFast("停下的时候提醒我吃药"))
+    }
+
+    @Test
+    fun `结束词表`() {
+        // 用户明确说到的结束词/句子都要命中
+        listOf("退出", "结束", "再见", "拜拜", "不聊了", "我走了", "挂断",
+            "结束通话", "退出对话", "再见。", "拜拜！", "退出对话吧").forEach {
+            assertTrue("应命中结束词：$it", RobotIntent.matchEndFast(it))
+        }
+        // 讨论句/否定句不是道别，绝不能误挂断
+        listOf("别退出", "不结束", "再见怎么写", "退出键在哪", "为什么结束",
+            "拜拜是什么意思", "停一下", "停下的时候提醒我").forEach {
+            assertFalse("不应命中结束词：$it", RobotIntent.matchEndFast(it))
+        }
     }
 }

@@ -227,7 +227,12 @@ fun AskScreen(
                 kotlinx.coroutines.delay(com.lvyoubao.app.ui.spark.SparkAck.DURATION_MS)
                 com.lvyoubao.app.ui.common.WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
                     wakeListening = false
-                    if (!text.isNullOrBlank()) vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+                    if (!text.isNullOrBlank()) {
+                        // 结束词：停播报、不送 AI、不落输入框，直接回待机（见 WakeHub 待机监听）
+                        if (com.lvyoubao.app.data.RobotIntent.matchEndFast(text)) {
+                            com.lvyoubao.app.ui.common.TtsPlayer.stop()
+                        } else vm.appendVoiceTranscript(text) // 自带「自动发送」调度
+                    }
                 }
             }
         }

@@ -115,6 +115,38 @@ object RobotIntent {
         return stopPhrases.any { t == it || t.startsWith(it) }
     }
 
+    /**
+     * 结束/道别词表：短句本地快路，命中即挂断通话/退出聆听，不等 AI 往返。
+     * 只收「整句就是结束」的说法，讨论句（「再见怎么写」「退出键在哪」）不误伤——
+     * 靠 [matchEndFast] 的整句/前缀匹配 + 长度上限挡住长句。
+     */
+    private val endPhrases = listOf(
+        "退出", "结束", "再见", "拜拜", "byebye", "bye", "不聊了", "不想聊了", "先这样",
+        "就这样", "告辞", "撤了", "走了", "我走了", "先走了", "挂断", "挂了",
+        "结束通话", "结束对话", "退出通话", "退出对话", "别聊了", "不用了",
+    )
+    /** 这几个是口语尾巴常见的结束句，允许 startsWith（「退出对话吧」「结束吧」） */
+    private val endPrefixPhrases = listOf("结束通", "结束对", "退出通", "退出对", "不聊了", "不想聊")
+
+    /**
+     * 本地结束词快路：短句整词命中 / 少量结束句允许前缀。
+     * 讨论句（「再见怎么写」「退出键在哪」）用整词表不命中，且被否定/疑问前缀挡住；
+     * 只有明确以结束动作开头的口语尾巴（「退出对话吧」）才靠 [endPrefixPhrases] 命中。
+     */
+    fun matchEndFast(text: String): Boolean {
+        val t = text.trim().trimEnd('。', '！', '!', '.', '，', ',', '~', '～', ' ', '\u3000', '吧', '呀', '啦', '呢')
+        if (t.isEmpty() || t.length > 6) return false
+        // 「不聊了/不想聊了/不用了」本身就是道别，不能当成否定句排除掉
+        if (listOf("不聊了", "不想聊", "不用了").any { t == it || t.startsWith(it) }) {
+            return true
+        }
+        if (t.startsWith("别") || t.startsWith("不要") || t.startsWith("不") ||
+            t.startsWith("没") || t.startsWith("为啥") || t.startsWith("为什么") ||
+            t.startsWith("怎么") || t.startsWith("什么叫") || t.startsWith("啥")
+        ) return false
+        return endPhrases.any { t == it } || endPrefixPhrases.any { t.startsWith(it) }
+    }
+
     /** 头部动作词表：平视回正（HEAD 0）/ 抬头（15）/ 低头（-10），短句直接命中 */
     private val headLevelPhrases = listOf("平视", "正视", "回正", "头回正", "摆正", "头摆正", "平视一点", "头平一点")
     private val headUpPhrases = listOf("抬头", "头抬起来", "抬一下头", "抬头一点")

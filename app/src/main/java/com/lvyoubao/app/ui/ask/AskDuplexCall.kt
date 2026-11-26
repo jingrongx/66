@@ -100,6 +100,11 @@ fun AskDuplexCall(vm: ChatViewModel, settings: AiSettings, sid: String?, onHangU
                 is DoubaoDuplexClient.Event.StopRequested -> {
                     scope.launch { DeviceTools.stopRobot(context, settings) }
                 }
+                // 结束词：挂断（onHangUp 会关界面，DisposableEffect 里再 close+destroy）
+                is DoubaoDuplexClient.Event.HangupRequested -> {
+                    com.lvyoubao.app.ui.common.TtsPlayer.stop()
+                    onHangUp()
+                }
                 is DoubaoDuplexClient.Event.TurnDone -> {
                     duplexUpdateAssistant(ev.answer, done = true)
                     if (ev.answer.isNotBlank()) {
