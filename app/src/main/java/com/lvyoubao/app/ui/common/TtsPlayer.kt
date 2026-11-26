@@ -112,6 +112,45 @@ object TtsPlayer {
         cloudKey = key?.takeIf { it.isNotBlank() }
     }
 
+    // ── 引擎选择（v0.9.66：设置页选的 TTS 模型真正生效） ─────────────────────────
+    // 以前 voiceTtsModel/callTtsModel 只写进设置、播放链从不读，四个选项都是一个晓晓声。
+    // 现在首选引擎排到链首；它失败时仍按原有顺序降级（Edge → CosyVoice → 系统），
+    // 不会把"选了收费引擎但没 Key"变成彻底没声音。
+
+    /** 普通播报首选引擎 id：edge / cosy / deepseek_tts / system_tts */
+    @Volatile
+    private var preferredEngine: String = "edge"
+
+    /** 通话场景首选引擎（callTtsModel），空则用普通首选 */
+    @Volatile
+    private var callEngine: String = ""
+
+    /** 当前是否处于通话播报场景（由通话 UI 切换） */
+    @Volatile
+    private var callMode = false
+
+    /** DeepSeek TTS 用的主对话 Key（复用 apiKey；与硅基流动 cloudKey 分开存） */
+    @Volatile
+    private var deepSeekKey: String? = null
+
+    /** 设置变化时由界面层注入，立即生效（无需重启） */
+    fun setEngineConfig(voice: String?, call: String?, deepSeekApiKey: String?) {
+        preferredEngine = voice?.takeIf { it.isNotBlank() } ?: "edge"
+        callEngine = call?.takeIf { it.isNotBlank() } ?: ""
+        deepSeekKey = deepSeekApiKey?.takeIf { it.isNotBlank() }
+        ttsLog("引擎配置：普通=$preferredEngine 通话=${callEngine.ifBlank { "跟随普通" }} DeepSeekKey=${deepSeekKey != null}")
+    }
+
+    /** 通话场景切换：进入时优先用 callTtsModel，退出恢复 voiceTtsModel */
+    fun setCallMode(active: Boolean) {
+        if (callMode == active) return
+        callMode = active
+        ttsLog("通话播报模式：${if (active) "开" else "关"}")
+    }
+
+    /** 当前实际生效的首选引擎 */
+    private fun activeEngine(): String = if (callMode && callEngine.isNotBlank()) callEngine else preferredEngine
+
     /** 每段的目标长度（字）：常见回答 ≤800 字 = 整篇一段、一次合成一次播完；两家云端引擎单段上限都在此之内 */
     private const val SEGMENT_CHARS = 800
     /** 流式会话单段上限（字）：一段一条 WSS 连接，段越少边界间隙越少；2000 字稳在微软 SSML 8KB 限制内 */
@@ -139,6 +178,7 @@ object TtsPlayer {
      */
     suspend fun diagnose(context: Context, cloudKey: String?): String = withContext(Dispatchers.IO) {
         val lines = mutableListOf<String>()
+        val preferred = activeEngine()
         val testText = "你好，这是旅游宝朗读链路诊断测试。"
         val dir = File(context.cacheDir, "tts")
 
@@ -148,10 +188,11 @@ object TtsPlayer {
         val streamOk = runCatching {
             EdgeTts.streamSynthesize(testText) { streamBytes += it.size }
         }.getOrDefault(false)
+        val prefNote = "［首选 $preferred］"
         lines += if (streamOk) {
-            "① 微软流式（秒播）：✅ 正常（收 $streamBytes 字节，耗时 ${System.currentTimeMillis() - t0} 毫秒）"
+            "$prefNote ① 微软流式（秒播）：✅ 正常（收 $streamBytes 字节，耗时 ${System.currentTimeMillis() - t0} 毫秒）"
         } else {
-            "① 微软流式（秒播）：❌ ${EdgeTts.lastFailure ?: "失败"}"
+            "$prefNote ① 微软流式（秒播）：❌ ${EdgeTts.lastFailure ?: "失败"}"
         }
 
         // ② 微软整段文件（兜底第一级）
@@ -212,9 +253,14 @@ object TtsPlayer {
                 return@launch
             }
             val dir = File(context.cacheDir, "tts")
+            // 只有选 Edge（默认）才走"边收边播"流式秒播；选了 CosyVoice/DeepSeek/系统 TTS
+            // 时不能先试 Edge 流式——那样前面全部引擎都被 Edge 抢先，设置等于没生效。
+            val engine = activeEngine()
+            val useStreaming = engine == "edge"
+            ttsLog("speak 首选引擎=$engine（${if (useStreaming) "流式" else "文件链"}）")
             for (i in parts.indices) {
                 // 秒播主链路：流式合成 + 边收边播（首声 ≈ 微软首帧耗时）
-                val played = playStreamed(parts[i], myGen)
+                val played = if (useStreaming) playStreamed(parts[i], myGen) else false
                 // 不能把"被停止的取消信号"当成合成失败吞掉，否则旧流水线会走系统 TTS 兜底叠音
                 if (myGen != generation) return@launch
                 if (played) continue
@@ -223,14 +269,18 @@ object TtsPlayer {
                 val file = synthesizeWithRetry(parts[i], dir)
                 if (myGen != generation) return@launch
                 if (file == null || file.length() == 0L) {
-                    // 两级云端合成（Edge→CosyVoice2）都失败：剩余文本整体交给系统 TTS
-                    val reason = buildString {
-                        append(EdgeTts.lastFailure ?: "免费朗读未能连上微软服务")
-                        append("；")
-                        append(
-                            CloudTts.lastFailure
-                                ?: if (cloudKey == null) "未配置云端兜底（设置里填「语音识别 Key」可启用）" else "云端兜底也失败",
-                        )
+                    // 云端合成链全失败（或首选就是系统 TTS）：剩余文本交给系统 TTS 兜底
+                    val reason = if (engine == "system_tts") {
+                        "已按设置直接使用系统离线语音"
+                    } else {
+                        buildString {
+                            append(EdgeTts.lastFailure ?: "免费朗读未能连上微软服务")
+                            append("；")
+                            append(
+                                CloudTts.lastFailure
+                                    ?: if (cloudKey == null) "未配置云端兜底（设置里填「语音识别 Key」可启用）" else "云端兜底也失败",
+                            )
+                        }
                     }
                     ttsLog("全链失败原因：$reason")
                     speakWithSystem(context, parts.drop(i).joinToString(""), myGen, reason)
@@ -343,6 +393,12 @@ object TtsPlayer {
      */
     suspend fun playStreamedPiece(text: String, gen: Int): Boolean {
         if (gen != generation) return false
+        // 流式秒播是 Edge 专属能力；选了其它引擎时直接让位，上层退回文件链
+        // （synthesizeOnly 会按首选引擎合成），否则 Edge 会抢先把首句读掉。
+        if (activeEngine() != "edge") {
+            ttsLog("首选非 Edge，首句跳过流式直落文件链")
+            return false
+        }
         markEchoRisk(text)
         return playStreamed(text, gen)
     }
@@ -439,6 +495,28 @@ object TtsPlayer {
      * 每次尝试都记日志；全挂时 [EdgeTts.lastFailure]/[CloudTts.lastFailure] 里有具体原因供界面明示。
      */
     private suspend fun synthesizeWithRetry(text: String, dir: File): File? {
+        // 设置页选的引擎排到链首；它失败才按原顺序降级。这样"选了 CosyVoice"就真的
+        // 先调 CosyVoice，"选了 DeepSeek"就真的先调 DeepSeek，不再是四个选项一个声。
+        // system_tts 不走文件合成——直接返回 null 让上层 speakWithSystem 处理。
+        val preferred = activeEngine()
+        if (preferred == "system_tts") {
+            ttsLog("首选系统离线 TTS，跳过云端合成")
+            return null
+        }
+
+        // 首选是云端付费引擎时先试它，再落到免费的 Edge/Cosy
+        if (preferred == "cosy" && cloudKey != null) {
+            tryCloud("CosyVoice", 2) { CloudTts.synthesize(text, dir, cloudKey!!) }?.let { return it }
+        } else if (preferred == "deepseek_tts") {
+            val dsKey = deepSeekKey
+            if (dsKey != null) {
+                tryCloud("DeepSeek", 2) { DeepSeekTts.synthesize(text, dir, dsKey) }?.let { return it }
+            } else {
+                ttsLog("选了 DeepSeek TTS 但未配置主对话 API Key，落到下一级")
+            }
+        }
+
+        // Edge 免费链（原来的主力，也是其它选择失败后的兜底）
         repeat(SYNTH_ATTEMPTS) { attempt ->
             if (attempt > 0) kotlinx.coroutines.delay(500L * attempt)
             ttsLog("文件链 Edge 尝试 ${attempt + 1}/$SYNTH_ATTEMPTS（${text.length} 字）")
@@ -449,19 +527,29 @@ object TtsPlayer {
             }
             ttsLog("文件链 Edge 第${attempt + 1}次失败：${EdgeTts.lastFailure ?: "空产物"}")
         }
+
+        // CosyVoice 兜底（首选不是 cosy 时才到这里，避免重复调两次）
         val key = cloudKey
-        if (key != null) {
-            repeat(2) { attempt ->
-                if (attempt > 0) kotlinx.coroutines.delay(400L)
-                val file = runCatching { CloudTts.synthesize(text, dir, key) }.getOrNull()
-                if (file != null && file.length() > 0) {
-                    ttsLog("文件链 CosyVoice 成功 ${file.length()}B")
-                    return file
-                }
-                ttsLog("文件链 CosyVoice 第${attempt + 1}次失败：${CloudTts.lastFailure ?: "未知"}")
+        if (key != null && preferred != "cosy") {
+            tryCloud("CosyVoice", 2) { CloudTts.synthesize(text, dir, key) }?.let { return it }
+        }
+        return null
+    }
+
+    /** 某个云端引擎试 n 次，成功返回文件；失败记日志后返回 null 让调用方降级 */
+    private suspend fun tryCloud(
+        label: String,
+        attempts: Int,
+        synthesize: suspend () -> File?,
+    ): File? {
+        repeat(attempts) { attempt ->
+            if (attempt > 0) kotlinx.coroutines.delay(400L)
+            val file = runCatching { synthesize() }.getOrNull()
+            if (file != null && file.length() > 0) {
+                ttsLog("文件链 $label 成功 ${file.length()}B")
+                return file
             }
-        } else {
-            ttsLog("未配置语音识别 Key，跳过 CosyVoice 兜底")
+            ttsLog("文件链 $label 第${attempt + 1}次失败")
         }
         return null
     }
@@ -942,6 +1030,15 @@ object TtsPlayer {
         return try {
             val data = file.readBytes()
             if (data.isEmpty()) return null
+            // DeepSeek TTS 只返回 wav/pcm，不是 mp3：识别 RIFF/WAVE 头直接读 PCM，
+            // 不走下面的 mpeg 解码器（否则选 DeepSeek 后在灵动模式流水线里会静音）。
+            if (data.size >= 12 && data[0] == 'R'.code.toByte() && data[1] == 'I'.code.toByte() &&
+                data[2] == 'F'.code.toByte() && data[3] == 'F'.code.toByte() &&
+                data[8] == 'W'.code.toByte() && data[9] == 'A'.code.toByte() &&
+                data[10] == 'V'.code.toByte() && data[11] == 'E'.code.toByte()
+            ) {
+                return decodeWavPcm(data)
+            }
             val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_MPEG)
             codec = c
             c.configure(
@@ -1024,6 +1121,46 @@ object TtsPlayer {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
         }
+    }
+
+    /**
+     * 解析 wav（DeepSeek TTS 产物）的 data chunk 为 PCM16。只支持 16-bit PCM，
+     * 其它编码格式返回 null，上层会退回单文件 MediaPlayer 播放（它认识 wav）。
+     */
+    private fun decodeWavPcm(data: ByteArray): PcmClip? {
+        fun le16(i: Int) = (data[i].toInt() and 0xFF) or ((data[i + 1].toInt() and 0xFF) shl 8)
+        fun le32(i: Int) = (data[i].toInt() and 0xFF) or ((data[i + 1].toInt() and 0xFF) shl 8) or
+            ((data[i + 2].toInt() and 0xFF) shl 16) or ((data[i + 3].toInt() and 0xFF) shl 24)
+        var pcmStart = -1
+        var pcmLen = 0
+        var rate = 24_000
+        var ch = 1
+        var bits = 16
+        var pos = 12
+        while (pos + 8 <= data.size) {
+            val id = String(data, pos, 4, Charsets.US_ASCII)
+            val size = le32(pos + 4)
+            val body = pos + 8
+            when (id) {
+                "fmt " -> {
+                    if (body + 16 <= data.size) {
+                        ch = le16(body + 2)
+                        rate = le32(body + 4)
+                        bits = le16(body + 14)
+                    }
+                }
+                "data" -> {
+                    pcmStart = body
+                    pcmLen = minOf(size, data.size - body)
+                }
+            }
+            if (pcmStart >= 0 && rate > 0) break
+            pos = body + size + (size and 1) // chunk 按偶数对齐
+        }
+        if (pcmStart < 0 || pcmLen <= 0 || bits != 16) return null
+        val pcm = data.copyOfRange(pcmStart, pcmStart + pcmLen)
+        ttsLog("wav 解码成功（${rate}Hz/${ch}ch，${pcm.size}B）")
+        return PcmClip(pcm, rate, ch)
     }
 
     /** 跳过 ID3v2 头（Edge 产物没有，别处来的 mp3 可能带） */

@@ -81,6 +81,18 @@ class MainActivity : ComponentActivity() {
                     else "云端朗读兜底 Key：已配置（长度 ${appSettings.asrKey.length}）",
                 )
             }
+            // 设置页选的 TTS 引擎注入播放器：以前 voiceTtsModel/callTtsModel 只写不读，
+            // 四个选项都是一个晓晓声。现在切换后立即生效（DataStore Flow 推送）。
+            // DeepSeek TTS 用主对话 Key（官方 /v1/tools/tts 端点，与硅基流动的 cloudKey 分开）。
+            LaunchedEffect(appSettings.voiceTtsModel, appSettings.callTtsModel, appSettings.apiKey) {
+                // DeepSeek TTS 走官方固定端点，复用主对话 Key（不匹配时官方会 401，
+                // 引擎链自动降级到 Edge，不会没声音）；用户切服务商时这里也会更新。
+                com.lvyoubao.app.ui.common.TtsPlayer.setEngineConfig(
+                    voice = appSettings.voiceTtsModel,
+                    call = appSettings.callTtsModel,
+                    deepSeekApiKey = appSettings.apiKey,
+                )
+            }
             // 后台常驻开关应用：开着就拉起前台服务，关了就停（设置页开关切换时也会实时启停）
             LaunchedEffect(appSettings.keepAliveEnabled) {
                 if (appSettings.keepAliveEnabled) {
