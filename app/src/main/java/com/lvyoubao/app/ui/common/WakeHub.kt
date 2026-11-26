@@ -84,6 +84,7 @@ object WakeHub {
     }
 
     fun stopStandby() {
+        LogStore.log("wake", "stopStandby 请求让麦（standby=${standby != null}）")
         ttsJob?.cancel()
         ttsJob = null
         echoJob?.cancel()
@@ -91,6 +92,7 @@ object WakeHub {
         standby?.stop()
         standby = null
         onWake = null
+        LogStore.log("wake", "stopStandby 已返回")
     }
 
     /**

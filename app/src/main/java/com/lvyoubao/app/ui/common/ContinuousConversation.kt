@@ -324,7 +324,10 @@ class ContinuousConversation(
 
     fun stop() {
         stopRequested = true
-        if (!running) return
+        if (!running) {
+            LogStore.log("conv", "stop 跳过释放：running=false（可能仍在后台重试启动）")
+            return
+        }
         running = false
         audioThread?.let { t ->
             runCatching { t.join(800) }
@@ -337,6 +340,7 @@ class ContinuousConversation(
         runCatching { record?.stop() }
         runCatching { record?.release() }
         record = null
+        LogStore.log("conv", "stop 已释放 AudioRecord（mic 让出）")
     }
 
     /** TTS 开始/结束播报（播报中：半双工档丢弃收音，其余档用打断阈值监听） */

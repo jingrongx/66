@@ -181,10 +181,26 @@ object SpeechInput {
         // ASR 只吃 16k 单声道：以前 44.1k/96kbps 录出来的 m4a 是它的 6 倍大，
         // 上传、服务端解码都跟着变慢，说 10 秒能拖出上百 KB。
         // 个别机型不认 16k AAC 编码器，退回原来的参数，不能让录音直接失败。
-        val recorder = runCatching { buildRecorder(context, file, 16_000, 48_000) }
-            .recoverCatching { buildRecorder(context, file, 44_100, 96_000) }
-            .getOrThrow()
-        Recording(recorder, file, startedAt)
+        // 待机 KWS 刚让出 builtin mic 时，audio policy 的释放有交接延迟：紧跟着 start()
+        // 会连吃 -38（INVALID_OPERATION），连 44.1k 回退也在同一个窗口内同样失败。
+        // 交替两档采样率 + 递增退避重试，覆盖约 1 秒的交接期（与 ContinuousConversation
+        // 对 AudioRecord 做的 5 次重试同一个现象，那条路早有重试，MediaRecorder 以前没有）。
+        var lastError: Throwable? = null
+        var recorder: MediaRecorder? = null
+        for (attempt in 0 until 6) {
+            if (attempt > 0) {
+                Thread.sleep(120L * attempt) // 120/240/360/480/600ms，累计约 1.8s
+            }
+            val (rate, bitRate) = if (attempt % 2 == 0) 16_000 to 48_000 else 44_100 to 96_000
+            runCatching { buildRecorder(context, file, rate, bitRate) }
+                .fold(
+                    onSuccess = { recorder = it },
+                    onFailure = { lastError = it },
+                )
+            if (recorder != null) break
+        }
+        recorder?.let { Recording(it, file, startedAt) }
+            ?: throw (lastError ?: IllegalStateException("录音启动失败"))
     }
 
     private fun buildRecorder(context: Context, file: File, sampleRate: Int, bitRate: Int): MediaRecorder {
@@ -202,8 +218,15 @@ object SpeechInput {
         recorder.setAudioChannels(1)
         recorder.setMaxDuration(MAX_RECORD_MS)
         recorder.setOutputFile(file.absolutePath)
-        recorder.prepare()
-        recorder.start()
+        runCatching {
+            recorder.prepare()
+            recorder.start()
+        }.onFailure {
+            // start 失败（-38）必须释放对象，否则残留的 recorder 继续占 mic，
+            // 会让后面的退避重试全部落空。
+            runCatching { recorder.release() }
+            throw it
+        }
         return recorder
     }
 

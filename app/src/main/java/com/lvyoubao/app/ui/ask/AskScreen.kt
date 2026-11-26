@@ -251,6 +251,10 @@ fun AskScreen(
     }
 
     fun beginCloudRecord() {
+        // 按住说话用 MediaRecorder(MIC)，待机唤醒的 AudioRecord 还占着 builtin mic，
+        // 不停掉就直接 start() 会拿到 -38（录音被占用）。必须在开录前同步让出麦克风，
+        // 不能等下面 LaunchedEffect 观察 recording 变化——那时 MediaRecorder 已经 start 过了。
+        com.lvyoubao.app.ui.common.WakeHub.stopStandby()
         SpeechInput.startRecording(context)
             .onSuccess { recording = it }
             .onFailure { vm.setTransientError("录音启动失败，请再试一次") }
@@ -271,6 +275,8 @@ fun AskScreen(
             if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
             else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         } else if (SpeechInput.isAvailable(context)) {
+            // 系统识别同样要开麦：先停待机唤醒，避免与常驻 AudioRecord 抢 mic
+            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
             listening = true
             scope.launch {
                 HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)

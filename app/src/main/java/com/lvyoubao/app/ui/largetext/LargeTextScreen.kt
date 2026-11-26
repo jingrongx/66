@@ -192,6 +192,9 @@ fun LargeTextScreen(
     fun beginCloudRecord() {
         // 开录前先闭嘴：别让朗读声混进麦克风
         TtsPlayer.stop()
+        // 与灵动模式一致：按住说话前先停待机唤醒的 AudioRecord，让出 builtin mic。
+        // 否则 MediaRecorder(MIC) start() 会因麦克风已被占用返回 -38，提示录音失败。
+        com.lvyoubao.app.ui.common.WakeHub.stopStandby()
         SpeechInput.startRecording(context)
             .onSuccess {
                 recording = it
@@ -217,6 +220,8 @@ fun LargeTextScreen(
             else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         } else if (SpeechInput.isAvailable(context)) {
             // 没配 Key：系统识别兜底（它自己管理断句，已把停顿阈值放宽到静音 8 秒）
+            // 系统识别也要开麦：先停待机唤醒，避免与常驻 AudioRecord 抢 mic
+            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
             listening = true
             scope.launch {
                 TtsPlayer.stop()
