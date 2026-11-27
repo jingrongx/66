@@ -8,11 +8,14 @@ import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -81,6 +84,135 @@ object SpeechInput {
         val startedAt: Long = System.currentTimeMillis(),
     )
 
+    /** 受控的系统语音识别会话：支持按下开听、实时音量回调、松手触发收敛、上滑即时取消 */
+    class SystemSession internal constructor(
+        private val recognizer: SpeechRecognizer,
+        private val mainHandler: Handler,
+        private val finished: AtomicBoolean,
+        private val onResultCallback: (Result<String>) -> Unit,
+    ) {
+        private var stopTimeoutRunnable: Runnable? = null
+
+        /** 手指松开时调用：通知系统识别停止采集并收敛输出识别稿 */
+        fun stop() {
+            mainHandler.post {
+                if (finished.get()) return@post
+                runCatching { recognizer.stopListening() }
+                // 若部分 ROM 的识别服务迟迟不回 onResults，4.5s 后兜底收敛释放，防止 UI 卡死
+                val timeout = Runnable {
+                    if (finished.compareAndSet(false, true)) {
+                        runCatching { recognizer.destroy() }
+                        onResultCallback(Result.failure(SpeechException(SpeechFailure.NOT_HEARD, message = "没听清楚，请再试一次")))
+                    }
+                }
+                stopTimeoutRunnable = timeout
+                mainHandler.postDelayed(timeout, 4_500L)
+            }
+        }
+
+        /** 上滑取消或页面销毁时调用：立即中断并静音销毁，不再触发回调 */
+        fun cancel() {
+            val isFirst = finished.compareAndSet(false, true)
+            mainHandler.post {
+                stopTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+                stopTimeoutRunnable = null
+                if (isFirst || true) {
+                    runCatching { recognizer.cancel() }
+                    runCatching { recognizer.destroy() }
+                }
+            }
+        }
+
+        internal fun clearStopTimeout() {
+            stopTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+            stopTimeoutRunnable = null
+        }
+    }
+
+    /** 启动按住可控的系统语音识别会话（保证主线程操作与真实 Rms 声波回传） */
+    fun startSystemListening(
+        context: Context,
+        prompt: String,
+        onRmsDb: (Float) -> Unit,
+        onResult: (Result<String>) -> Unit,
+    ): SystemSession? {
+        if (!isAvailable(context)) {
+            onResult(Result.failure(SpeechException(SpeechFailure.OTHER, message = "这台手机没有系统语音识别，请改用其他方式")))
+            return null
+        }
+        val mainHandler = Handler(Looper.getMainLooper())
+        val finished = AtomicBoolean(false)
+        val recognizer = if (Looper.myLooper() == Looper.getMainLooper()) {
+            runCatching { SpeechRecognizer.createSpeechRecognizer(context.applicationContext) }.getOrNull()
+        } else {
+            null
+        }
+        if (recognizer == null) {
+            // 若在非主线程调用则切换到主线程构建并返回 null 的情况由上层确保主线程或用 Dispatchers.Main
+            mainHandler.post {
+                val rec = runCatching { SpeechRecognizer.createSpeechRecognizer(context.applicationContext) }.getOrNull()
+                if (rec == null) {
+                    if (finished.compareAndSet(false, true)) {
+                        onResult(Result.failure(SpeechException(SpeechFailure.OTHER, message = "语音识别启动失败，请改用打字提问")))
+                    }
+                }
+            }
+            return null
+        }
+
+        val session = SystemSession(recognizer, mainHandler, finished, onResult)
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, prompt)
+            putExtra("android.speech.extras.SPEECH_INPUT_COMPLETELY_SILENCE_LENGTH_MILLIS", PAUSE_HINT_MS)
+            putExtra("android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", MIN_SPEECH_MS)
+        }
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {
+                if (!finished.get()) onRmsDb(rmsdB)
+            }
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) {
+                session.clearStopTimeout()
+                runCatching { recognizer.destroy() }
+                if (finished.compareAndSet(false, true)) {
+                    onResult(Result.failure(RecognizeError(error, friendlyError(context, error))))
+                }
+            }
+
+            override fun onResults(results: Bundle?) {
+                session.clearStopTimeout()
+                runCatching { recognizer.destroy() }
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (finished.compareAndSet(false, true)) {
+                    onResult(
+                        if (text.isNullOrBlank()) {
+                            Result.failure(RecognizeError(SpeechRecognizer.ERROR_NO_MATCH, "没听清楚，请再试一次"))
+                        } else {
+                            Result.success(text)
+                        },
+                    )
+                }
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        runCatching { recognizer.startListening(intent) }.onFailure { err ->
+            session.clearStopTimeout()
+            runCatching { recognizer.destroy() }
+            if (finished.compareAndSet(false, true)) {
+                onResult(Result.failure(SpeechException(SpeechFailure.OTHER, message = err.message ?: "语音识别启动失败")))
+            }
+        }
+        return session
+    }
+
     fun isAvailable(context: Context): Boolean =
         runCatching { SpeechRecognizer.isRecognitionAvailable(context) }.getOrDefault(false)
 
@@ -147,7 +279,7 @@ object SpeechInput {
                 override fun onEndOfSpeech() {}
                 override fun onError(error: Int) {
                     recognizer.destroy()
-                    if (cont.isActive) cont.resume(Result.failure(RecognizeError(error, friendlyError(error))))
+                    if (cont.isActive) cont.resume(Result.failure(RecognizeError(error, friendlyError(context, error))))
                 }
 
                 override fun onResults(results: Bundle?) {
@@ -362,10 +494,16 @@ object SpeechInput {
     @Serializable
     private data class TranscribeResponse(val text: String = "")
 
-    private fun friendlyError(error: Int): String = when (error) {
+    private fun friendlyError(context: Context, error: Int): String = when (error) {
         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听清楚，请再试一次"
         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT, SpeechRecognizer.ERROR_SERVER -> "网络服务有问题，请稍后再试"
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "语音识别权限被拒绝，请检查系统设置"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+            if (hasRecordPermission(context)) {
+                "系统语音识别组件未获授权，请在设置填写免费的「语音识别 Key」"
+            } else {
+                "需要麦克风权限，请在系统设置中允许录音"
+            }
+        }
         SpeechRecognizer.ERROR_AUDIO -> "录音出错，请再试一次"
         SpeechRecognizer.ERROR_CLIENT, SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音识别忙，稍等一下再试"
         else -> "没听清楚，请再试一次"

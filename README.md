@@ -99,6 +99,8 @@ app/src/main/java/com/lvyoubao/app/
 │   ├── SessionStore.kt        # 多会话存储（新建/删除/搜索）
 │   ├── MemoryStore.kt         # 记忆画像：会话自动总结 + 相关性注入 + 热词语料
 │   ├── NoteStore.kt           # 随手记存储（JSONL）
+│   ├── CallTimer.kt           # 全局共享倒计时与到点告警（三模式及通话共用）
+│   ├── LocalCommandRouter.kt  # 本地意图快路与本机动作统一路由器（计时/记事/音量/电量/机器人/看一眼）
 │   ├── TrackStore.kt          # 感知轨迹点存储（JSONL，供地图叠加）
 │   ├── GpxUtils.kt            # 标准 GPX 1.1 路书解析与足迹导出（户外轨迹循迹）
 │   ├── LocationContext.kt     # 位置上下文（脱敏坐标 + Geocoder 反解城市）
@@ -108,19 +110,20 @@ app/src/main/java/com/lvyoubao/app/
 │   ├── FullDiagnostics.kt     # 全链路综合诊断：网络/权限/语音唤醒冲突/API/ASR/地图/全双工/TTS 一键体检
 │   ├── DeviceEnvTools.kt      # 设备兼容与调试：Google 语音唤醒占麦检查/禁麦引导 + 网络 ADB（Root 一键开关 / 无 Root 引导） + 公共 IP 获取
 │   ├── VoiceModelOptions.kt   # 语音三段（ASR/LLM/TTS）模型选项注册表 + 常用地址结构
-│   ├── duplex/                # 豆包 Seeduplex 端到端全双工：WebSocket Realtime 事件协议
+│   ├── duplex/                # 豆包 Seeduplex 端到端全双工：WebSocket Realtime 事件协议 + 统一 DuplexCallController
 │   │   ├── DuplexProtocol.kt      # 事件模型：session.create / audio.append / ASR/text/audio delta
 │   │   ├── DuplexAudioEngine.kt   # AudioRecord 16k 采集 + AudioTrack 24k 边收边播 + 插话停播
-│   │   └── DoubaoDuplexClient.kt  # OkHttp WebSocket 客户端：状态机 / 保活 / 优雅关闭
+│   │   ├── DoubaoDuplexClient.kt  # OkHttp WebSocket 客户端：状态机 / 保活 / 优雅关闭
+│   │   └── DuplexCallController.kt # 全应用统一豆包全双工通话状态机（三模式共用）
 │   ├── RobotClient.kt         # xrobotctl 机器人控制中枢客户端：ping/move/turn/head/stop（HTTP 8899）
 │   ├── RobotIntent.kt         # 语音控制机器人：本地急停快路 + AI 意图解析（单行协议，解析不出回落聊天）
 │   └── observation/           # 疲劳积分观测（引擎 + JSONL 存储 + CSV 导出）
 ├── sensing/
 │   └── FatigueSensingService.kt   # 被动感知前台服务（硬件计步 + LocationManager + 轨迹落点）
 ├── ui/
-│   ├── ask/                   # 对话主界面：消息流 + 合并输入卡（按住说话）+ 快捷开关 + 抽屉
-│   ├── common/                # EdgeTts（云端朗读）+ TtsPlayer + SpeechInput（系统识别/大模型转文字，方言口音模型）
-│   ├── largetext/             # 大字模式：会话流 + 底部常驻操作区 + 按住说话 + 拍照提问 + 对话历史 + 语音通话 + 设置/更新入口
+│   ├── ask/                   # 对话主界面：消息流 + 合并输入卡（按住说话）+ 快捷开关 + 抽屉 + 电话入口
+│   ├── common/                # 统一语音引擎与共享组件：WakeHub + HoldTalkController + HoldTalkOverlay + VoiceCallOverlays + EdgeTts + TtsPlayer + SpeechInput
+│   ├── largetext/             # 大字模式：现代适老化双层操作台 + 2×2 场景卡 + 会话流 + 全屏声波语音录入 + 防误删历史 + 全双工/经典通话
 │   ├── map/                   # 离线地图：mapsforge 查看器 + 中文省区 + 路线/足迹叠加
 │   ├── notes/                 # 随手记 + 自动游记
 │   ├── observation/           # 感知日志：积分、指标、真实感受标记、回测分析
@@ -142,6 +145,8 @@ app/src/main/java/com/lvyoubao/app/
 - ⬜ 交通时刻表类硬信息的专项数据源接入
 
 ## 📜 更新日志
+
+**v0.9.70** · 三模式语音底层统一重构 + 现代适老化大字版界面 + 全屏按住说话动效与上滑取消——①**统一三模式语音核心架构**：普通模式（`AskScreen`）、大字模式（`LargeTextScreen`）与灵动模式（`SparkModeScreen`）彻底共用同一套语音底层，界面层仅保留各自的 UI 呈现——统一待机唤醒/单次聆听调度器 `WakeHub`（端侧 KWS + 云端词表双通道、`voiceBargeIn` 灵敏度、空转惩罚、系统识别兜底）、统一按住说话控制器 `HoldTalkController`、统一豆包全双工 `DuplexCallController`、共用全双工与经典通话浮层 `VoiceCallOverlays`（普通模式顶栏补齐 📞 通话入口，灵动模式补齐经典串行通话支持）、统一 `CallTimer` 全局倒计时/闹钟单例与 `LocalCommandRouter` 本地快路。②**大字模式适老化现代视觉升级**：重构双层顶部操作台（品牌徽标 + 待机呼吸指示 + 明确「设置/退出」+ 高频「新对话/历史/通话」三宫格 + 倒计时/闹钟强提醒横幅）、时段问候与 2×2 场景快问卡片、高对比带圆标序号回答卡与突出的朗读/收藏/分享三钮、全线性矢量图标（告别杂乱 emoji）、防误触二次确认历史删除、精确区分系统识别未授权 vs 本应用麦克风权限提示。③**全应用统一专业按住说话体验**：文案统一为「按住说话」（系统识别同步改为可随时松手收敛与取消的受控长按会话 `SystemSession`），接入全新全屏动态真声波 HUD（`HoldTalkFullScreenOverlay` 15 柱实时麦克风声压波形 + 秒表）与上滑 88dp 震动切换「松手取消」手势（`rememberHoldTalkGestureModifier`）。
 
 **v0.9.69** · 根治「录音被长期占用导致本应用及系统录音均失败」并新增「设备兼容与网络 ADB」设置区——①**定位与修复麦克风泄漏和前后台让麦**：收紧 `ContinuousConversation` 的 `start()`/`tryStartOnce()`/`stop()` 为全锁串行并先 `stop()` 再 `join()`，消除冷启动并发与释放竞态遗留的孤儿 `AudioRecord`；`WakeHub` 加锁并同步前后台允许态 `standbyAllowed`；`MainActivity` 修复 `settings` 初始态挂载即双份抢麦，并在亮屏切到后台 350ms 后主动让出待机监听（息屏留在前台时保留）；`AskScreen`/`LargeTextScreen`/`SparkViewModel`/`DuplexAudioEngine` 补全通话与待机让麦互斥与失败兜底。②**防 Google 语音唤醒抢麦（设置页 → 设备兼容与网络 ADB）**：真机排查发现 `com.google.android.googlequicksearchbox:interactor` 会在亮屏及后台每 5 秒抢麦并在释放后 0.5 秒立即独占接口；新增环境探测与说明卡片，有 Root 时一键禁麦并停进程，无 Root 受安卓安全沙箱限制时清楚说明原因并提供直达「Google 麦克风权限页」「系统默认语音助手设置」及复制无 Root ADB 命令入口。③**网络 ADB 支持**：同卡实时展示本机局域网 IP、USB 调试状态与 `adb connect` 指令，有 Root 设备一键开关 `5555` 端口，无 Root 设备提供说明、直达开发者选项及复制首次激活命令。
 

@@ -5,18 +5,23 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -24,120 +29,244 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.material3.AssistChip
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.lvyoubao.app.R
 import com.lvyoubao.app.TravelApp
-import com.lvyoubao.app.data.AppTools
+import com.lvyoubao.app.data.CallTimer
 import com.lvyoubao.app.data.ChatSession
-import com.lvyoubao.app.data.DeviceTools
-import com.lvyoubao.app.data.HotwordCorrector
-import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.SessionMessage
-import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
-import com.lvyoubao.app.data.duplex.DuplexCallSetup
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.SentImageThumbnails
-import com.lvyoubao.app.ui.common.SpeechInput
-import com.lvyoubao.app.ui.common.TtsPlayer
-import com.lvyoubao.app.ui.common.WakeHub
-import com.lvyoubao.app.ui.common.rememberDraftValue
 import com.lvyoubao.app.ui.common.CardShareDialog
 import com.lvyoubao.app.ui.common.CardShareTipDialog
+import com.lvyoubao.app.ui.common.DoubaoCallOverlay
+import com.lvyoubao.app.ui.common.HoldTalkFullScreenOverlay
+import com.lvyoubao.app.ui.common.RichContent
+import com.lvyoubao.app.ui.common.SpeechInput
+import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.VoiceCallOverlay
+import com.lvyoubao.app.ui.common.WakeHub
 import com.lvyoubao.app.ui.common.rememberCardShareState
+import com.lvyoubao.app.ui.common.rememberDraftValue
+import com.lvyoubao.app.ui.common.rememberHoldTalkGestureModifier
 import com.lvyoubao.app.ui.map.RouteMapCard
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import com.lvyoubao.app.ui.update.UpdateReadyDialog
 import com.lvyoubao.app.ui.update.UpdateScreen
 import com.lvyoubao.app.ui.update.UpdateViewModel
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
-/** 大字模式的大字号常用问法 */
-private val LargeTextSuggestions = listOf(
-    "附近有啥好吃的？",
-    "今天天气怎么样？",
-    "附近哪能坐下歇会？",
-    "回家的路怎么走？",
+private data class QuickPromptCard(
+    val title: String,
+    val subtitle: String,
+    val question: String,
+    val accentBgLight: Color,
+    val accentBgDark: Color,
+    val accentFgLight: Color,
+    val accentFgDark: Color,
 )
 
+/** 大字模式首页 2×2 快捷情境问法（直白好用，零学习成本） */
+private val LargeTextQuickCards = listOf(
+    QuickPromptCard(
+        title = "附近美食",
+        subtitle = "口碑好店与特色菜",
+        question = "附近有啥好吃的？",
+        accentBgLight = Color(0xFFFFEFE0),
+        accentBgDark = Color(0xFF3E2610),
+        accentFgLight = Color(0xFFB54708),
+        accentFgDark = Color(0xFFFFB878),
+    ),
+    QuickPromptCard(
+        title = "今日天气",
+        subtitle = "冷暖变化与穿衣提醒",
+        question = "今天天气怎么样？",
+        accentBgLight = Color(0xFFE0F2FE),
+        accentBgDark = Color(0xFF0E2F44),
+        accentFgLight = Color(0xFF0369A1),
+        accentFgDark = Color(0xFF7DD3FC),
+    ),
+    QuickPromptCard(
+        title = "找地歇脚",
+        subtitle = "公园长椅或安静茶座",
+        question = "附近哪能坐下歇会？",
+        accentBgLight = Color(0xFFDCFCE7),
+        accentBgDark = Color(0xFF0F3522),
+        accentFgLight = Color(0xFF15803D),
+        accentFgDark = Color(0xFF6EE7B7),
+    ),
+    QuickPromptCard(
+        title = "回家路线",
+        subtitle = "一步步看怎么坐车走",
+        question = "回家的路怎么走？",
+        accentBgLight = Color(0xFFEDE9FE),
+        accentBgDark = Color(0xFF281E46),
+        accentFgLight = Color(0xFF6D28D9),
+        accentFgDark = Color(0xFFC4B5FD),
+    ),
+)
+
+@Immutable
+private data class LargeTextPalette(
+    val isDark: Boolean,
+    val pageBg: Color,
+    val chromeBg: Color,
+    val cardBg: Color,
+    val softSlotBg: Color,
+    val cardBorder: Color,
+    val primary: Color,
+    val primarySoft: Color,
+    val primaryOnSoft: Color,
+    val warmSoft: Color,
+    val warmText: Color,
+    val dangerSoft: Color,
+    val danger: Color,
+    val wakeReady: Color,
+    val mutedText: Color,
+)
+
+@Composable
+private fun rememberLargeTextPalette(): LargeTextPalette {
+    val scheme = MaterialTheme.colorScheme
+    val dark = scheme.surface.luminance() < 0.5f
+    return remember(scheme, dark) {
+        if (dark) {
+            LargeTextPalette(
+                isDark = true,
+                pageBg = Color(0xFF0B161C),
+                chromeBg = Color(0xFF122129),
+                cardBg = Color(0xFF162730),
+                softSlotBg = Color(0xFF1D323D),
+                cardBorder = Color(0xFF2A4350),
+                primary = scheme.primary,
+                primarySoft = Color(0xFF0E3D4B),
+                primaryOnSoft = Color(0xFF8BE4F6),
+                warmSoft = Color(0xFF3A240E),
+                warmText = Color(0xFFFFB777),
+                dangerSoft = Color(0xFF3E1618),
+                danger = scheme.error,
+                wakeReady = Color(0xFF5CE0AD),
+                mutedText = scheme.onSurfaceVariant,
+            )
+        } else {
+            LargeTextPalette(
+                isDark = false,
+                pageBg = Color(0xFFF1F5F8),
+                chromeBg = Color(0xFFFFFFFF),
+                cardBg = Color(0xFFFFFFFF),
+                softSlotBg = Color(0xFFE9F0F4),
+                cardBorder = Color(0xFFD2E0E8),
+                primary = scheme.primary,
+                primarySoft = Color(0xFFE0F3F8),
+                primaryOnSoft = Color(0xFF065260),
+                warmSoft = Color(0xFFFFF2E5),
+                warmText = Color(0xFFB34400),
+                dangerSoft = Color(0xFFFDECEB),
+                danger = scheme.error,
+                wakeReady = Color(0xFF118453),
+                mutedText = scheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 /**
- * 大字模式（v0.8.0 会话流重构，v0.8.6 改名并接管启动默认模式）：
- * - 会话流：整段对话像微信一样从头到尾摆出来，不再只显示最后一张卡片；
- * - 底部操作区：固定在屏幕底部、永远可见，卡片/流式输出再长也遮不住按钮；
- * - 按住说话：按住录音、松手就记下来，可以连说好几段，说多少记多少，
- *   全部说完再点旁边的「发送」才发出去（充分的停顿时间由握住时长自己决定）；
- * - 拍照提问：拍照/相册的图挂在草稿上，跟语音一起发送；
- * - 语音通话：全屏通话界面，按住说话松手即问，回答自动朗读，像打电话一样聊；
- *   通话里也能拍照/选相册挂图，说完松手图文一起发，文字稿显示与朗读同一份全文（v0.8.8）；
- * - 对话历史：大字号列表，点开切换、可删、可新建；
- * - 右上角「设置」进设置页（家人帮着配 AI/大字模式开关都在这），「退出」直接退出应用；
- * - 是否默认进入大字模式由设置里的开关决定（设置里关了，下次启动就是普通模式）。
+ * 大字模式（适老化现代视觉升级）：
+ * - 图标 + 清晰汉字双编码：杜绝纯图标盲猜和生硬系统 emoji 按钮，按钮最小触控高度 >= 44~68dp；
+ * - 全功能无损打通：待机唤醒状态感知、按住说话/点按发送、智能纠错、自动发送取消按钮、
+ *   倒计时与闹钟提醒横幅、全双工/经典实时通话、富内容表格/路线图、朗读/收藏/分享、防误删历史；
+ * - 与普通模式/灵动模式底层 100% 共用 `WakeHub`、`HoldTalkController`、`DuplexCallController`、
+ *   `VoiceCallOverlays`、`CallTimer` 与 `TtsPlayer`。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LargeTextScreen(
     app: TravelApp,
     onExitApp: () -> Unit,
-    newVersion: String? = null, // 非空 = 有新版本，顶部操作带出更新横幅（MainActivity 统一检查）
+    newVersion: String? = null,
     onUpdateClick: () -> Unit = {},
 ) {
     val vm: ChatViewModel = viewModel(
@@ -151,19 +280,25 @@ fun LargeTextScreen(
     val sessionList by vm.sessionList.collectAsState()
     val currentSessionId by vm.currentSessionId.collectAsState()
     val savedEvidenceTitles by vm.savedEvidenceTitles.collectAsState()
+    val holdState by vm.holdTalk.state.collectAsState()
+    val duplexUi by vm.callController.ui.collectAsState()
+    val standbyAllowed by WakeHub.standbyAllowed.collectAsState()
+    val wakeOneShot by WakeHub.listeningOneShot.collectAsState()
+    val timerState by CallTimer.state.collectAsState()
+    val alarmActive by CallTimer.alarmActive.collectAsState()
+    val alarmText by CallTimer.alarmText.collectAsState()
+    val ttsState by TtsPlayer.state.collectAsState()
+
     val context = LocalContext.current
-    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val keyboard = LocalSoftwareKeyboardController.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val palette = rememberLargeTextPalette()
 
     var showHistory by remember { mutableStateOf(false) }
-    var showCall by remember { mutableStateOf(false) }
+    var showClassicCall by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showUpdate by remember { mutableStateOf(false) }
-    var listening by remember { mutableStateOf(false) } // 转写/系统识别进行中
-    var recording by remember { mutableStateOf<SpeechInput.Recording?>(null) }
-    var recordStartTs by remember { mutableStateOf(0L) }
-    var recordTick by remember { mutableIntStateOf(0) } // 录音秒数（每秒自增驱动刷新）
 
     val updateVm: UpdateViewModel = viewModel(
         factory = remember { viewModelFactory { initializer { UpdateViewModel(app) } } },
@@ -174,125 +309,54 @@ fun LargeTextScreen(
             showUpdate -> showUpdate = false
             showSettings -> showSettings = false
             showHistory -> showHistory = false
-            showCall -> {
+            showClassicCall -> {
                 TtsPlayer.stop()
-                showCall = false
+                showClassicCall = false
             }
+            duplexUi.active -> vm.callController.hangUp()
             else -> {
-                // 大字模式是本应用的默认模式：返回键/退出键都是退出应用（回到桌面），
-                // 不再切回普通模式——模式切换只认设置里的「大字模式」开关
                 TtsPlayer.stop()
                 onExitApp()
             }
         }
     }
 
-    // ---------- 语音：按住说话、松手记录 ----------
-
-    fun beginCloudRecord() {
-        // 开录前先闭嘴：别让朗读声混进麦克风
-        TtsPlayer.stop()
-        // 与灵动模式一致：按住说话前先停待机唤醒的 AudioRecord，让出 builtin mic。
-        // 否则 MediaRecorder(MIC) start() 会因麦克风已被占用返回 -38，提示录音失败。
-        com.lvyoubao.app.ui.common.WakeHub.stopStandby()
-        SpeechInput.startRecording(context)
-            .onSuccess {
-                recording = it
-                recordStartTs = System.currentTimeMillis()
-                recordTick = 0
-            }
-            .onFailure {
-                vm.setTransientError("录音启动失败，请再试一次")
-                WakeHub.resumeStandby() // 失败后恢复待机，否则喊唤醒词没反应
-            }
-    }
-
-    val recordPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    // ---------- 语音：按住说话（与普通/灵动共用 HoldTalkController） ----------
+    var holdTalkAutoSend by remember { mutableStateOf(false) }
+    val recordPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) beginCloudRecord() else {
-            vm.setTransientError("没有录音权限，无法把语音转成文字")
-            WakeHub.resumeStandby()
-        }
-    }
-
-    /** 按下：开始录音（配了转写 Key 走录音+云端转字；没有就用系统识别点一下说） */
-    fun startHoldTalk() {
-        if (recording != null || listening) return
-        // 再按住说话=上一段的自动发送倒计时作废，说完这段重新算
-        vm.cancelAutoSend()
-        if (settings.asrKey.isNotBlank()) {
-            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
-            else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        } else if (SpeechInput.isAvailable(context)) {
-            // 没配 Key：系统识别兜底（它自己管理断句，已把停顿阈值放宽到静音 8 秒）
-            // 系统识别也要开麦：先停待机唤醒，避免与常驻 AudioRecord 抢 mic
-            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
-            listening = true
-            scope.launch {
-                TtsPlayer.stop()
-                HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
-                SpeechInput.listen(context, "请说话")
-                    .onSuccess { vm.appendVoiceTranscript(it) }
-                    .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
-                listening = false
-                WakeHub.resumeStandby() // 系统识别失败/结束都恢复待机
-            }
+        if (granted) {
+            vm.beginHoldTalk(context, settings, autoSend = holdTalkAutoSend, prompt = "请说话") {}
         } else {
-            vm.setTransientError("这台手机没有语音识别。可让家人在设置里填「语音识别 Key」（免费），或点输入框打字提问")
+            vm.setTransientError("没有录音权限，无法把语音转成文字")
+            vm.holdTalk.onPermissionDenied()
         }
     }
 
-    /** 松手：停止录音 → 转文字 → 记进草稿。通话界面里 autoSend=true，松手即问 */
-    fun endHoldTalk(autoSend: Boolean) {
-        val rec = recording ?: return
-        recording = null
-        listening = true
-        scope.launch {
-            SpeechInput.stopAndTranscribe(rec, settings.asrKey, settings.dialectMode)
-                .onSuccess { spoken ->
-                    HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
-                    // 通话模式松手即发：不等 AI 纠错（模型看得到上下文，理解不受影响），只做本地热词
-                    vm.appendVoiceTranscript(spoken, polish = !autoSend)
-                    if (autoSend) vm.send(context)
-                }
-                .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
-            listening = false
-        }
-    }
-
-    /** 按住说话手势：按下开始录，松开记录。放在公共函数里供主界面与通话界面共用 */
-    fun holdToTalkModifier(autoSend: Boolean): Modifier = Modifier.pointerInput("hold_$autoSend") {
-        detectTapGestures(
-            onPress = {
-                startHoldTalk()
-                try {
-                    awaitRelease()
-                } catch (_: Exception) {
-                    // 手势被系统打断（如来电），也按松手处理，别把录音吊死
-                }
-                endHoldTalk(autoSend)
-            },
-        )
-    }
-
-    // 录音秒数计时
-    LaunchedEffect(recording != null) {
-        while (recording != null) {
-            delay(1_000)
-            recordTick++
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { recording?.let { SpeechInput.cancelRecording(it) } }
-    }
+    @Composable
+    fun holdToTalkModifier(autoSend: Boolean): Modifier = rememberHoldTalkGestureModifier(
+        key = "hold_$autoSend",
+        onBegin = {
+            holdTalkAutoSend = autoSend
+            vm.beginHoldTalk(
+                context = context,
+                settings = settings,
+                autoSend = autoSend,
+                prompt = "请说话",
+            ) {
+                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        },
+        onCancelStateChange = { vm.setHoldTalkCancelling(it) },
+        onRelease = { vm.endHoldTalk(context, settings, autoSend = autoSend) },
+        onCancel = { vm.cancelHoldTalk() },
+    )
 
     // ---------- 附件：拍照 / 相册 ----------
-
     fun handlePicked(uri: android.net.Uri) {
         scope.launch {
-            val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val result = withContext(Dispatchers.IO) {
                 runCatching { ChatViewModel.readAttachment(context, uri) }
             }
             result.onSuccess { (attachment, warning) ->
@@ -304,50 +368,15 @@ fun LargeTextScreen(
         }
     }
 
-    // 豆包全双工：client 常驻 remember，进入 doubao 通话时 start，退出 close；classic 链路完全不动。
-    val duplexClient = remember { DoubaoDuplexClient(context) }
-    val duplexState by duplexClient.state.collectAsState()
-    var duplexAsr by remember { mutableStateOf("") }
-    var duplexAnswer by remember { mutableStateOf("") }
-    var duplexHint by remember { mutableStateOf<String?>(null) }
-    // 豆包通话中的拍照缓冲：图片随该轮对话落会话历史（纯语音 S2S 不解析图内容，只作记录）
-    var duplexPhotos by remember { mutableStateOf<List<ChatViewModel.PendingAttachment>>(emptyList()) }
-    // 通话中 FC 工具带回的地图卡缓冲：随本轮回答一起挂到会话
-    val duplexMapCards = remember { mutableStateListOf<MapCardData>() }
-    // 上一轮已落库的（识别|回答）指纹：同一轮被重复收口只落一次
-    var lastDuplexTurnKey by remember { mutableStateOf("") }
-    // 通话会话流（识别=右、回答=左），覆盖层直接渲染
-    val duplexTurns = remember { mutableStateListOf<DuplexTurnUi>() }
-
-    fun duplexNewUserTurn() {
-        duplexTurns.add(DuplexTurnUi("user", "", streaming = true))
-        if (duplexTurns.size > 30) duplexTurns.removeAt(0)
-    }
-    fun duplexUpdateUser(text: String) {
-        val i = duplexTurns.lastIndex
-        if (i >= 0 && duplexTurns[i].role == "user") duplexTurns[i] = duplexTurns[i].copy(text = text)
-        else { duplexNewUserTurn(); duplexUpdateUser(text) }
-    }
-    fun duplexUpdateAssistant(text: String, done: Boolean) {
-        val i = duplexTurns.lastIndex
-        if (i >= 0 && duplexTurns[i].role == "assistant") {
-            duplexTurns[i] = duplexTurns[i].copy(text = text, streaming = !done)
-        } else {
-            duplexTurns.add(DuplexTurnUi("assistant", text, streaming = !done))
-            if (duplexTurns.size > 30) duplexTurns.removeAt(0)
-        }
-    }
-
-    /** 豆包通话专用：拍照/选图只读附件加入 duplexPhotos，不走 vm 的经典发送链 */
     fun handleDuplexPicked(uri: android.net.Uri) {
         scope.launch {
-            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val result = withContext(Dispatchers.IO) {
                 runCatching { ChatViewModel.readAttachment(context, uri) }
             }
             result.onSuccess { (attachment, warning) ->
-                if (attachment.isImage) duplexPhotos = duplexPhotos + attachment
-                warning?.let { duplexHint = it }
-            }.onFailure { duplexHint = "照片读取失败，请重试" }
+                if (attachment.isImage) vm.callController.addPickedPhotos(listOf(attachment))
+                warning?.let { vm.callController.setHint(it) }
+            }.onFailure { vm.callController.setHint("照片读取失败，请重试") }
         }
     }
 
@@ -357,39 +386,30 @@ fun LargeTextScreen(
     ) { ok ->
         val uri = pendingCameraUri
         if (ok && uri != null) {
-            if (showCall && settings.callEngine == "doubao") handleDuplexPicked(uri) else handlePicked(uri)
+            if (duplexUi.active) handleDuplexPicked(uri) else handlePicked(uri)
         }
     }
     val galleryLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(ChatViewModel.MAX_PICK_IMAGES),
     ) { uris ->
-        val duplex = showCall && settings.callEngine == "doubao"
+        val duplex = duplexUi.active
         uris.forEach { if (duplex) handleDuplexPicked(it) else handlePicked(it) }
     }
 
-    // ---------- 自动朗读：新回答一落地就读（通话中不依赖开关，天然要出声） ----------
-
+    // ---------- 自动朗读：流式吐字即开播 + 兜底整段读 ----------
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
     var spokenTs by remember { mutableStateOf(0L) }
-    val ttsState by TtsPlayer.state.collectAsState()
-    // 先把「这次要不要出声」告诉 VM：它会在 AI 一开始吐字就按句开播，
-    // 而不是等整段回答落地再整段合成——那正是普通/大字模式比灵动模式慢几秒的根因。
-    LaunchedEffect(settings.autoSpeak, showCall, settings.callEngine) {
-        val duplexCall = showCall && settings.callEngine == "doubao"
-        vm.setLiveSpeakEnabled(!duplexCall && (showCall || settings.autoSpeak))
+    LaunchedEffect(settings.autoSpeak, showClassicCall, duplexUi.active) {
+        val duplexCall = duplexUi.active
+        vm.setLiveSpeakEnabled(!duplexCall && (showClassicCall || settings.autoSpeak))
     }
-    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showCall, showSettings, showUpdate, settings.callEngine) {
+    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showClassicCall, duplexUi.active, showSettings, showUpdate) {
         val msg = lastAssistant ?: return@LaunchedEffect
-        // 只读 20 秒内的新回答：切历史/重进不再把旧消息复读一遍；停在设置/更新页时也先别出声
         val fresh = System.currentTimeMillis() - msg.ts < 20_000
         val overlayOpen = showSettings || showUpdate
-        // 豆包全双工自己走 WebSocket 出声（音频在 DuplexAudioEngine 里播放），
-        // 绝不能再让 TtsPlayer 读同一段回答，否则两套音频抢 AudioTrack 双重发声。
-        val duplexCall = showCall && settings.callEngine == "doubao"
-        if (!duplexCall && (showCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
+        val duplexCall = duplexUi.active
+        if (!duplexCall && (showClassicCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
-            // 等这一轮的播报裁决：PENDING = 流式还在接第一句（4 字首句实测要 1.7 秒才出声），
-            // 最多等 4.5 秒；已经出声就什么都不做，只有彻底没出声才整段读
             val deadline = System.currentTimeMillis() + 4_500
             while (System.currentTimeMillis() < deadline && vm.speechState.value == ChatViewModel.Speech.PENDING) {
                 delay(120)
@@ -400,7 +420,6 @@ fun LargeTextScreen(
         }
     }
 
-    // 新消息/流式输出增长时滚到最底
     LaunchedEffect(messages.size, state.sending, streamState?.answer?.length) {
         if (messages.isNotEmpty()) {
             val target = (messages.size - 1 + if (state.sending) 1 else 0).coerceAtLeast(0)
@@ -408,553 +427,37 @@ fun LargeTextScreen(
         }
     }
 
-    val canSend = (state.question.isNotBlank() || state.attachments.isNotEmpty()) && !state.sending && !state.polishing
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-    ) {
-        // ---------- 顶部操作带：浅青灰底 + 圆角下缘 + 投影，把「操作」和「会话」隔成两个房间 ----------
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .shadow(elevation = 10.dp, shape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
-            shape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-        ) {
-        Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
-        // 头部：标题 + 五个功能入口（新对话 / 历史 / 通话 / 设置 / 退出）收成一行。
-        // 以前是「第一行 设置+退出、第二行 新对话+历史+通话」两排大按钮，
-        // 240px 高的小屏光控件就吃掉三分之一，手机上更显得散。退出单独留红字，不藏进菜单。
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 14.dp, end = 10.dp, top = 6.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "大字模式",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                modifier = Modifier.weight(1f),
-            )
-            HeaderIcon(Icons.Default.Add, "新对话") { keyboard?.hide(); vm.newSession() }
-            HeaderIcon(Icons.Default.List, "历史对话") { keyboard?.hide(); showHistory = true }
-            HeaderIcon(Icons.Default.Phone, "通话") { keyboard?.hide(); showCall = true }
-            HeaderIcon(Icons.Default.Settings, "设置") { keyboard?.hide(); showSettings = true }
-            // 退出：直接退出应用回桌面（模式切换只认设置里的「大字模式」开关）
-            TextButton(
-                onClick = {
-                    TtsPlayer.stop()
-                    onExitApp()
-                },
-                contentPadding = PaddingValues(horizontal = 8.dp),
-            ) {
-                Text(
-                    "退出",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.error,
-                    maxLines = 1,
-                )
-            }
-        }
-        // 更新横幅：发现新版本时占满一行（大字模式下也要能看到、点得到）
-        if (newVersion != null) {
-            Button(
-                onClick = onUpdateClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
-                    .height(48.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) {
-                Text(
-                    "🚀 发现新版本 $newVersion，点按更新",
-                    fontSize = 17.sp,
-                    maxLines = 1,
-                )
-            }
-        }
-        }
-        }
-
-        // ---------- 会话流：整个对话从头到尾 ----------
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            if (messages.isEmpty() && !state.sending) {
-                item {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(top = 48.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Text("有事您说话", fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            "按住下面的麦克风说话，\n说完松手就记下来，可以连说几段，\n最后点「发送」。",
-                            fontSize = 20.sp,
-                            lineHeight = 30.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(28.dp))
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            LargeTextSuggestions.forEach { suggestion ->
-                                AssistChip(
-                                    onClick = {
-                                        vm.updateQuestion(suggestion)
-                                        vm.send(context)
-                                    },
-                                    // 大字模式 chip 加高到 44dp，19sp 字号不再挤在默认 32dp 的框里
-                                    modifier = Modifier.height(44.dp),
-                                    label = { Text(suggestion, fontSize = 19.sp) },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            items(messages) { message ->
-                when (message.role) {
-                    "user" -> LargeTextUserBubble(
-                        message,
-                        onEdit = { vm.editMessage(message) },
-                        onResend = { vm.resendMessage(context, message) },
-                    )
-                    else -> LargeTextAssistantCard(
-                        message = message,
-                        app = app,
-                        ttsActive = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
-                        onToggleSpeak = {
-                            TtsPlayer.toggle(context, ChatViewModel.speakableText(message))
-                        },
-                        savedMemory = vm.evidenceTitle(message) in savedEvidenceTitles,
-                        onToggleMemory = { vm.toggleSaveMemory(message) },
-                    )
-                }
-            }
-            if (state.sending) {
-                item { LargeTextStreamingCard(streamState) }
-            }
-        }
-
-        state.error?.let { error ->
-            Text(
-                error,
-                fontSize = 17.sp,
-                lineHeight = 24.sp,
-                color = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-            )
-        }
-
-        // ---------- 底部操作区：固定在下方，独立滚动区域，永远不会被卡片盖住。
-        // 浅青灰底与顶部操作带同色呼应——上下两条「操作带」夹着中间的会话区 ----------
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .shadow(elevation = 14.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
-            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding() // 键盘弹出时整块上移，输入框不被键盘盖住
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-            ) {
-                // 附件缩略条
-                if (state.attachments.isNotEmpty()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        state.attachments.forEach { a ->
-                            Surface(
-                                shape = RoundedCornerShape(20.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(start = 12.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(
-                                        (if (a.isImage) "🖼 " else "📄 ") + a.name.take(14),
-                                        fontSize = 16.sp,
-                                    )
-                                    IconButton(onClick = { vm.removeAttachment(a) }, modifier = Modifier.size(28.dp)) {
-                                        Text("✕", fontSize = 16.sp)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(6.dp))
-                }
-                // AI 智能纠错进行中：发送被禁用，改完自动回填输入框（8 秒超时放行）
-                if (state.polishing) {
-                    Text(
-                        "⏳ 正在智能纠错（结合上下文修识别错字），改完才能发送…",
-                        fontSize = 16.sp,
-                        lineHeight = 22.sp,
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
-                    )
-                }
-                // 语音自动发送倒计时（设置里开启后才出现）：点输入框/再按住说话/手动编辑都会取消
-                autoSendIn?.let { sec ->
-                    Text(
-                        "⏳ $sec 秒后自动发送，点一下输入框可取消",
-                        fontSize = 16.sp,
-                        lineHeight = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
-                    )
-                }
-                // 草稿输入框：语音按段累积进这里，也可以直接打字。
-                // 光标交给 TextFieldValue 托管：语音从外面追加文字时把光标放到末尾，
-                // 不然识别结果停在原光标处，看着像「跑到最前面」
-                val draftValue = rememberDraftValue(state.question)
-                OutlinedTextField(
-                    value = draftValue.value,
-                    onValueChange = {
-                        draftValue.value = it
-                        vm.updateQuestion(it.text)
-                    },
-                    // 点输入框（获得焦点）= 用户要自己接管，取消语音自动发送
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onFocusChanged { if (it.isFocused) vm.cancelAutoSend() },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                    ),
-                    placeholder = {
-                        // 一行放得下的写法：21sp 大字下原句太长会折行，不好看
-                        Text(
-                            if (recording != null) "正在听你说…" else "按住下方说话，松手记到这里",
-                            fontSize = 21.sp,
-                            maxLines = 1,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    },
-                    maxLines = 4,
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 21.sp, lineHeight = 30.sp),
-                    shape = RoundedCornerShape(18.dp),
-                    trailingIcon = {
-                        if (state.question.isNotBlank()) {
-                            TextButton(onClick = { vm.clearQuestion() }) { Text("清空", fontSize = 16.sp) }
-                        }
-                    },
-                )
-                Spacer(Modifier.height(10.dp))
-                // 主操作行：拍照 | 相册 | 按住说话（大） | 发送（大）——说话按钮挨着发送，说完顺手就发
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // 拍照
-                    Box(
-                        modifier = Modifier
-                            .size(68.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(MaterialTheme.colorScheme.secondaryContainer)
-                            .clickable {
-                                keyboard?.hide()
-                                val uri = newCameraImageUri(context)
-                                pendingCameraUri = uri
-                                cameraLauncher.launch(uri)
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("📷", fontSize = 26.sp) }
-                    // 相册
-                    Box(
-                        modifier = Modifier
-                            .size(68.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(MaterialTheme.colorScheme.secondaryContainer)
-                            .clickable {
-                                keyboard?.hide()
-                                galleryLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                                )
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("🖼", fontSize = 26.sp) }
-                    // 按住说话大按钮（标签保持一行，不换行不截断）
-                    val holdBig = settings.asrKey.isNotBlank()
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(80.dp)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(
-                                if (recording != null) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.primary
-                            )
-                            .then(holdToTalkModifier(autoSend = false)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            when {
-                                recording != null -> "松手（${recordTick}s）"
-                                listening -> "正在记录…"
-                                // 去掉麦克风 emoji：按钮宽度本就紧张，emoji 挤得文字贴边
-                                holdBig -> "按住说话"
-                                else -> "点一下说"
-                            },
-                            modifier = Modifier.padding(horizontal = 10.dp),
-                            fontSize = 20.sp,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Clip,
-                            fontWeight = FontWeight.Bold,
-                            color = if (recording != null) {
-                                MaterialTheme.colorScheme.onError
-                            } else {
-                                MaterialTheme.colorScheme.onPrimary
-                            },
-                        )
-                    }
-                    // 发送
-                    Button(
-                        onClick = {
-                            keyboard?.hide()
-                            vm.send(context)
-                        },
-                        enabled = canSend,
-                        modifier = Modifier.height(80.dp),
-                        shape = RoundedCornerShape(20.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp),
-                    ) {
-                        Text("发送", fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                    }
-                }
-                if (state.sending) {
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 3.dp)
-                        Spacer(Modifier.width(10.dp))
-                        Text("正在帮你想，稍等一下…", fontSize = 20.sp)
-                    }
-                }
-            }
-        }
-    }
-
-    // ---------- 对话历史（全屏大字号列表） ----------
-    if (showHistory) {
-        LargeTextHistoryOverlay(
-            sessions = sessionList,
-            currentId = currentSessionId,
-            onPick = { id -> vm.switchSession(id) { showHistory = false } },
-            onNew = { vm.newSession { showHistory = false } },
-            onDelete = { vm.deleteSession(it) },
-            onClose = { showHistory = false },
-        )
-    }
-
-    // ---------- 语音通话（全屏） ----------
-    // 收集豆包事件：ASR/回答流累加到局部状态，错误转成提示；播报状态看 State 不看 ASR。
-    LaunchedEffect(Unit) {
-        duplexClient.onEvent.collect { ev ->
-            when (ev) {
-                is DoubaoDuplexClient.Event.AsrStarted -> {
-                    duplexAsr = ""
-                    duplexNewUserTurn()
-                }
-                // transcription.delta 是累计快照，直接覆盖（用 += 会叠成「你你好你好啊」）
-                is DoubaoDuplexClient.Event.Asr -> {
-                    duplexAsr = ev.text
-                    duplexUpdateUser(ev.text)
-                }
-                is DoubaoDuplexClient.Event.Answer -> {
-                    if (ev.isFinal) {
-                        duplexAnswer = ev.text
-                    } else {
-                        // 兼容两种下发：累计快照（新文本以旧文本开头）直接替换，真增量才追加
-                        duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
-                        else duplexAnswer + ev.text
-                    }
-                    duplexUpdateAssistant(duplexAnswer, done = ev.isFinal)
-                }
-                // 模型决定调工具：地图三件套走 AppTools，本机能力（机器人/计时/记事/记忆/音量/电量）
-                // 走 DeviceTools——大字/普通模式没有本地命令链，全靠这条 FC 路补齐。
-                // 失败也要回传——不回传模型就一直干等。
-                is DoubaoDuplexClient.Event.ToolCall -> {
-                    val ackJob = scope.launch {
-                        delay(1_200)
-                        duplexClient.speak("我查一下哈") // 执行超过 1.2 秒先出声，别让通话死寂
-                    }
-                    scope.launch {
-                        val result = withContext(Dispatchers.IO) {
-                            runCatching {
-                                when (ev.name) {
-                                    AppTools.POI, AppTools.WEATHER, AppTools.ROUTE ->
-                                        AppTools.execute(context, settings, ev.name, ev.arguments) { duplexMapCards.add(it) }
-                                    else -> DeviceTools.execute(context, settings, ev.name, ev.arguments)
-                                }
-                            }.getOrElse { "工具执行失败：${it.message ?: "未知原因"}。请如实告知用户。" }
-                        }
-                        ackJob.cancel()
-                        duplexClient.sendToolResult(ev.callId, result)
-                    }
-                }
-                // 识别流里蹦出急停词：客户端已停播+取消回答，这里把机器人也停住
-                is DoubaoDuplexClient.Event.StopRequested -> {
-                    scope.launch { DeviceTools.stopRobot(context, settings) }
-                }
-                // 结束词：关界面触发 duplexClient.close()（见下面 DisposableEffect），回到待机
-                is DoubaoDuplexClient.Event.HangupRequested -> {
-                    TtsPlayer.stop()
-                    showCall = false
-                }
-                // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
-                // FC 一轮可能多段收口，ChatViewModel 里会就地并进同一张卡。
-                is DoubaoDuplexClient.Event.TurnDone -> {
-                    duplexAnswer = ev.answer
-                    duplexUpdateAssistant(ev.answer, done = true)
-                    if (ev.answer.isNotBlank()) {
-                        val key = ev.asr.filterNot { it.isWhitespace() } + "|" + ev.answer.filterNot { it.isWhitespace() }
-                        if (key != lastDuplexTurnKey) {
-                            lastDuplexTurnKey = key
-                            val paths = duplexPhotos.mapNotNull { it.localPath }
-                            vm.appendDuplexTurn(ev.asr, ev.answer, paths)
-                            duplexPhotos = emptyList()
-                            vm.summarizeCallTurns() // 通话也是会话：攒够了就总结进长期记忆
-                        }
-                    }
-                    duplexMapCards.lastOrNull()?.let { vm.attachDuplexMapCard(it) }
-                    duplexMapCards.clear()
-                }
-                is DoubaoDuplexClient.Event.SessionReady -> {
-                    duplexAsr = ""
-                    duplexAnswer = ""
-                    duplexHint = null
-                    duplexPhotos = emptyList()
-                    duplexMapCards.clear()
-                    lastDuplexTurnKey = ""
-                    duplexTurns.clear()
-                }
-                is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
-                    "CONFIG" -> "未配置豆包实时语音 Key，请到设置里填写后再通话"
-                    else -> "通话出错：${ev.message}"
-                }
-                else -> Unit
-            }
-        }
-    }
-
-    // 进入/退出豆包通话：start / close。key 为空时不强启，给出提示（避免老用户默认 doubao 却没 key）。
-    DisposableEffect(showCall, settings.callEngine) {
-        if (showCall && settings.callEngine == "doubao") {
-            // 务必先于 duplexClient.start() 让出待机唤醒的麦克风，避免单麦设备上 startRecording 撞车 -38
-            WakeHub.stopStandby()
-            TtsPlayer.stop() // 先让 classic 朗读闭嘴，避免抢音频输出
-            // 通话期间不许熄屏 + 压住 WiFi 省电：息屏后 WiFi 入睡会让实时音频流断开，
-            // 现象就是「黑屏之后听不到声音」（大字/普通模式同样需要，不只在灵动模式）
-            com.lvyoubao.app.ui.common.ScreenAwake.pin("豆包通话")
-            com.lvyoubao.app.ui.common.NetKeep.acquire(context, "doubao-call")
-            duplexAsr = ""
-            duplexAnswer = ""
-            duplexHint = null
-            if (settings.duplexApiKey.isBlank()) {
-                duplexHint = "未配置豆包实时语音 Key，请到设置里填写后再通话"
-            } else if (!SpeechInput.hasRecordPermission(context)) {
-                duplexHint = "需要麦克风权限才能全双工通话"
-            } else {
-                // 记忆 + 能力一次带上：人设/长期记忆/时间位置进 instructions，
-                // 共享受话的最近成对 QA 进 dialog_context，天气/附近/路线进 tools
-                val setup = DuplexCallSetup.build(
-                    context,
-                    persona = DuplexCallSetup.PERSONA_TRAVEL,
-                    history = vm.duplexHistory(currentSessionId),
-                    settings = settings,
-                    deviceTools = true, // 大字/普通没有本地命令链，机器人/计时等靠 FC 补齐
-                )
-                duplexClient.start(
-                    settings.duplexApiKey, settings.duplexVoice,
-                    systemPrompt = setup.instructions,
-                    callTools = setup.tools,
-                    historyContext = setup.dialogContext,
-                    dialect = setup.dialect,
-                    music = setup.music,
-                )
-            }
-        }
-        onDispose {
-            if (settings.callEngine == "doubao") {
-                duplexClient.close()
-                com.lvyoubao.app.ui.common.NetKeep.release("doubao-call")
-                com.lvyoubao.app.ui.common.ScreenAwake.unpin("豆包通话")
-            }
-        }
-    }
-    // 彻底退出应用时释放 OkHttp 线程池（不可复用，仅 exit 时调用）
-    DisposableEffect(Unit) {
-        onDispose { duplexClient.destroy() }
-    }
-
-    // ---------- 唤醒词（端侧 KWS 零配额；唤醒后按设置进通话或单次语音） ----------
-    var wakeListening by remember { mutableStateOf(false) }
-    fun dispatchWake() {
-        // 播报中喊唤醒词 = 打断答非所问的回答：先停播再出「我在」，别叠音
-        TtsPlayer.stop()
-        com.lvyoubao.app.ui.spark.SparkAck.play(context) // 回应声（与灵动模式同款：会话同音色合成的「我在」）
-        if (settings.wakeAction == "call" && settings.callEngine == "doubao" &&
-            settings.duplexApiKey.isNotBlank() && SpeechInput.hasRecordPermission(context)
-        ) {
-            showCall = true // 上面的 DisposableEffect 会自动起豆包通话
-        } else {
-            wakeListening = true
-            scope.launch {
-                // 等回应声播完再开麦，别把「我在」录进问题里
-                delay(com.lvyoubao.app.ui.spark.SparkAck.DURATION_MS)
-                WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
-                    wakeListening = false
-                    if (!text.isNullOrBlank()) {
-                        // 结束词：停播报、不送 AI，直接回待机
-                        if (com.lvyoubao.app.data.RobotIntent.matchEndFast(text)) {
-                            TtsPlayer.stop()
-                        } else vm.appendVoiceTranscript(text) // 自带「自动发送」调度
-                    }
-                }
-            }
-        }
-    }
-    val standbyAllowed by WakeHub.standbyAllowed.collectAsState()
+    // ---------- 统一待机唤醒 ----------
     LaunchedEffect(
-        standbyAllowed, settings.wakeWordEnabled, settings.wakeAction, settings.callEngine, settings.duplexApiKey,
-        recording, listening, wakeListening, showCall,
+        standbyAllowed,
+        settings.wakeWordEnabled,
+        settings.wakeAction,
+        settings.callEngine,
+        settings.duplexApiKey,
+        settings.asrKey,
+        settings.dialectMode,
+        settings.voiceBargeIn,
+        holdState.recording,
+        holdState.listening,
+        duplexUi.active,
+        showClassicCall,
     ) {
-        val inCall = showCall && settings.callEngine == "doubao"
-        val can = standbyAllowed && settings.wakeWordEnabled && !inCall && recording == null &&
-            !listening && !wakeListening && SpeechInput.hasRecordPermission(context)
-        if (can) {
-            com.lvyoubao.app.ui.spark.SparkAck.preload(context) // 合成要时间，待机时就备好
-            WakeHub.startStandby(context) { dispatchWake() }
-        } else {
-            WakeHub.stopStandby()
-        }
+        vm.syncStandbyWake(
+            context = context,
+            settings = settings,
+            shouldSuppressHit = { duplexUi.active || showClassicCall },
+            onWakeCall = {
+                if (settings.callEngine == "doubao") {
+                    vm.startDuplexCall(settings)
+                } else {
+                    showClassicCall = true
+                }
+            },
+            onWakeText = { text, _ ->
+                vm.appendVoiceTranscript(text, polish = false)
+                vm.send(context)
+            },
+        )
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -963,64 +466,212 @@ fun LargeTextScreen(
         }
     }
 
-    if (showCall) {
-        if (settings.callEngine == "doubao") {
-            DoubaoCallOverlay(
-                state = duplexState,
-                turns = duplexTurns,
-                hint = duplexHint,
-                photos = duplexPhotos,
-                onPickCamera = {
-                    val uri = newCameraImageUri(context)
-                    pendingCameraUri = uri
-                    cameraLauncher.launch(uri)
-                },
-                onPickGallery = {
-                    galleryLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                },
-                onRemovePhoto = { idx -> duplexPhotos = duplexPhotos.filterIndexed { i, _ -> i != idx } },
-                onBargeIn = { duplexClient.bargeIn() },
-                onHangUp = {
-                    duplexClient.close()
-                    showCall = false
-                },
-            )
-        } else {
-            VoiceCallOverlay(
-                messages = messages,
-                streamState = streamState,
-                sending = state.sending,
-                attachments = state.attachments,
-                listening = listening,
-                recording = recording,
-                recordTick = recordTick,
-                ttsSpeaking = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
-                ttsUnavailable = (ttsState as? TtsPlayer.State.Unavailable)?.reason,
-                holdModifier = holdToTalkModifier(autoSend = true),
-                onPickCamera = {
+    val wakeReady = standbyAllowed && settings.wakeWordEnabled && SpeechInput.hasRecordPermission(context) &&
+        !holdState.isBusy && !duplexUi.active && !showClassicCall
+    val canSend = (state.question.isNotBlank() || state.attachments.isNotEmpty()) &&
+        !state.sending && !state.polishing
+    val isTtsBusy = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.pageBg),
+    ) {
+        val compactScreen = maxHeight < 500.dp
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            // ---------- 顶部工作台 ----------
+            LargeTextTopBar(
+                palette = palette,
+                compact = compactScreen,
+                wakeReady = wakeReady,
+                wakeWordEnabled = settings.wakeWordEnabled,
+                sessionCount = sessionList.size,
+                callLabel = if (settings.callEngine == "doubao") "实时通话" else "语音通话",
+                newVersion = newVersion,
+                alarmActive = alarmActive,
+                alarmText = alarmText,
+                timerRemainSec = timerState.remainSec,
+                timerLabel = timerState.label,
+                onNewChat = { keyboard?.hide(); vm.newSession() },
+                onOpenHistory = { keyboard?.hide(); showHistory = true },
+                onStartCall = {
                     keyboard?.hide()
-                    val uri = newCameraImageUri(context)
-                    pendingCameraUri = uri
-                    cameraLauncher.launch(uri)
+                    if (settings.callEngine == "doubao") vm.startDuplexCall(settings)
+                    else showClassicCall = true
                 },
-                onPickGallery = {
-                    keyboard?.hide()
-                    galleryLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                },
-                onRemoveAttachment = { vm.removeAttachment(it) },
-                onHangUp = {
+                onOpenSettings = { keyboard?.hide(); showSettings = true },
+                onExitApp = {
                     TtsPlayer.stop()
-                    showCall = false
+                    onExitApp()
+                },
+                onUpdateClick = onUpdateClick,
+                onStopAlarm = { CallTimer.stopAlarm() },
+                onCancelTimer = { CallTimer.cancel() },
+            )
+
+            // ---------- 中间核心阅读区：欢迎引导首页 或 完整对话卡片流 ----------
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                if (messages.isEmpty() && !state.sending) {
+                    item(key = "welcome") {
+                        LargeTextWelcomePanel(
+                            palette = palette,
+                            callLabel = if (settings.callEngine == "doubao") "实时通话" else "语音通话",
+                            onPickSuggestion = { question ->
+                                keyboard?.hide()
+                                vm.updateQuestion(question)
+                                vm.send(context)
+                            },
+                        )
+                    }
+                }
+                items(messages) { message ->
+                    when (message.role) {
+                        "user" -> LargeTextUserBubble(
+                            palette = palette,
+                            message = message,
+                            onEdit = { vm.editMessage(message) },
+                            onResend = { vm.resendMessage(context, message) },
+                        )
+                        else -> LargeTextAssistantCard(
+                            palette = palette,
+                            message = message,
+                            app = app,
+                            ttsActive = isTtsBusy,
+                            onToggleSpeak = {
+                                TtsPlayer.toggle(context, ChatViewModel.speakableText(message))
+                            },
+                            savedMemory = vm.evidenceTitle(message) in savedEvidenceTitles,
+                            onToggleMemory = { vm.toggleSaveMemory(message) },
+                        )
+                    }
+                }
+                if (state.sending) {
+                    item(key = "streaming") {
+                        LargeTextStreamingCard(palette = palette, streamState = streamState)
+                    }
+                }
+            }
+
+            // ---------- 底部语音与输入控制台 ----------
+            LargeTextBottomDock(
+                palette = palette,
+                state = state,
+                holdState = holdState,
+                wakeOneShot = wakeOneShot,
+                autoSendIn = autoSendIn,
+                canSend = canSend,
+                holdModifier = holdToTalkModifier(autoSend = false),
+                onQuestionChange = { vm.updateQuestion(it) },
+                onClearQuestion = { vm.clearQuestion() },
+                onInputFocus = { vm.cancelAutoSend() },
+                onCancelAutoSend = { vm.cancelAutoSend() },
+                onRemoveAttachment = { vm.removeAttachment(it) },
+                onPickCamera = {
+                    keyboard?.hide()
+                    val uri = newCameraImageUri(context)
+                    pendingCameraUri = uri
+                    cameraLauncher.launch(uri)
+                },
+                onPickGallery = {
+                    keyboard?.hide()
+                    galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                },
+                onSend = {
+                    keyboard?.hide()
+                    vm.send(context)
                 },
             )
         }
     }
 
-    // 自动更新就绪弹窗：新版包后台下载完成就弹「安装」；更新页打开时不重复弹
+    // ---------- 历史对话全屏浮层 ----------
+    if (showHistory) {
+        LargeTextHistoryOverlay(
+            palette = palette,
+            sessions = sessionList,
+            currentId = currentSessionId,
+            onPick = { id ->
+                vm.switchSession(id) { showHistory = false }
+            },
+            onNew = {
+                vm.newSession { showHistory = false }
+            },
+            onDelete = { id -> vm.deleteSession(id) },
+            onClose = { showHistory = false },
+        )
+    }
+
+    // ---------- 全屏通话浮层 ----------
+    if (duplexUi.active && duplexUi.uiVisible) {
+        DoubaoCallOverlay(
+            state = duplexUi.duplexState,
+            turns = duplexUi.turns,
+            hint = duplexUi.hint,
+            photos = duplexUi.photos,
+            onPickCamera = {
+                val uri = newCameraImageUri(context)
+                pendingCameraUri = uri
+                cameraLauncher.launch(uri)
+            },
+            onPickGallery = {
+                galleryLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+            onRemovePhoto = { idx -> vm.callController.removePhoto(idx) },
+            onBargeIn = { vm.callController.bargeIn() },
+            onHangUp = { vm.callController.hangUp() },
+            showPhotoActions = true,
+            startedAtMs = duplexUi.startedAtMs,
+        )
+    } else if (showClassicCall) {
+        VoiceCallOverlay(
+            messages = messages,
+            streamState = streamState,
+            sending = state.sending,
+            attachments = state.attachments,
+            listening = holdState.listening,
+            recording = holdState.recording,
+            recordTick = holdState.recordTick,
+            ttsSpeaking = isTtsBusy,
+            ttsUnavailable = (ttsState as? TtsPlayer.State.Unavailable)?.reason,
+            holdModifier = holdToTalkModifier(autoSend = true),
+            onPickCamera = {
+                keyboard?.hide()
+                val uri = newCameraImageUri(context)
+                pendingCameraUri = uri
+                cameraLauncher.launch(uri)
+            },
+            onPickGallery = {
+                keyboard?.hide()
+                galleryLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+            onRemoveAttachment = { vm.removeAttachment(it) },
+            onHangUp = {
+                TtsPlayer.stop()
+                showClassicCall = false
+            },
+            showPhotoActions = true,
+            holdState = holdState,
+        )
+    } else if (!showHistory && !showSettings && !showUpdate) {
+        // 按住说话全屏动态声波与上滑取消浮层
+        HoldTalkFullScreenOverlay(state = holdState, releaseLabel = "记下来")
+    }
+
+    // ---------- 自动更新提示 / 设置 / 更新全屏页 ----------
     val autoUpdateState by com.lvyoubao.app.data.AutoUpdater.state.collectAsState()
     if (!showUpdate && autoUpdateState.downloadedApk != null && autoUpdateState.release != null &&
         autoUpdateState.dismissedTag != autoUpdateState.release?.tag_name
@@ -1028,9 +679,6 @@ fun LargeTextScreen(
         UpdateReadyDialog(autoUpdateState)
     }
 
-    // ---------- 设置 / 更新（家人帮忙配置时全屏盖在大字模式上） ----------
-    // 这两页自身不带背景色（普通模式里靠 MainActivity 根布局的 Surface 补底），
-    // 叠在大字模式上必须自己垫一整屏不透明 Surface，不然底下会话内容会透出来
     if (showUpdate) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
             UpdateScreen(onClose = { showUpdate = false }, vm = updateVm)
@@ -1046,72 +694,603 @@ fun LargeTextScreen(
     }
 }
 
-/** 用户消息：右侧大气泡，超大字，带图时显示缩略图（点击看大图），长按可选中复制，下方可编辑/重发 */
+/** 顶部双层适老化工作台：品牌标题+唤醒指示+设置退出 / 高频三宫格入口（新对话·历史·通话） / 状态横幅 */
 @Composable
-private fun LargeTextUserBubble(message: SessionMessage, onEdit: () -> Unit, onResend: () -> Unit) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
+private fun LargeTextTopBar(
+    palette: LargeTextPalette,
+    compact: Boolean,
+    wakeReady: Boolean,
+    wakeWordEnabled: Boolean,
+    sessionCount: Int,
+    callLabel: String,
+    newVersion: String?,
+    alarmActive: Boolean,
+    alarmText: String,
+    timerRemainSec: Int,
+    timerLabel: String,
+    onNewChat: () -> Unit,
+    onOpenHistory: () -> Unit,
+    onStartCall: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onExitApp: () -> Unit,
+    onUpdateClick: () -> Unit,
+    onStopAlarm: () -> Unit,
+    onCancelTimer: () -> Unit,
+) {
+    val pulseTransition = rememberInfiniteTransition(label = "wakePulse")
+    val wakeAlpha by pulseTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1_100), RepeatMode.Reverse),
+        label = "wakeDotAlpha",
+    )
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(
+                elevation = 6.dp,
+                shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+            ),
+        shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+        color = palette.chromeBg,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(horizontal = 14.dp, vertical = if (compact) 6.dp else 10.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 10.dp),
         ) {
-            androidx.compose.foundation.text.selection.SelectionContainer {
-                Surface(
-                    shape = RoundedCornerShape(22.dp, 6.dp, 22.dp, 22.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+            // 第一行：名称 + 待机呼吸指示 + 设置 + 退出
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        if (message.imagePaths.isNotEmpty()) {
-                            SentImageThumbnails(paths = message.imagePaths)
-                        }
-                        if (message.text.isNotBlank()) {
+                        Text(
+                            "旅游宝",
+                            fontSize = if (compact) 18.sp else 21.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = palette.primarySoft,
+                        ) {
                             Text(
-                                (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
-                                fontSize = 22.sp,
-                                lineHeight = 32.sp,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                "大字版",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.primaryOnSoft,
+                                maxLines = 1,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
                             )
+                        }
+                    }
+                    if (!compact) {
+                        Spacer(Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .alpha(if (wakeReady) wakeAlpha else 1f)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when {
+                                            wakeReady -> palette.wakeReady
+                                            wakeWordEnabled -> palette.mutedText.copy(alpha = 0.5f)
+                                            else -> palette.mutedText.copy(alpha = 0.35f)
+                                        },
+                                    ),
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                when {
+                                    wakeReady -> "语音待命中，喊「小源」可直接问"
+                                    wakeWordEnabled -> "按住下方大按钮直接说话"
+                                    else -> "语音唤醒已关闭 · 支持按住说话"
+                                },
+                                fontSize = 13.sp,
+                                color = palette.mutedText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+
+                // 设置按钮（带汉字，清晰好认）
+                Surface(
+                    modifier = Modifier
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onOpenSettings),
+                    shape = RoundedCornerShape(12.dp),
+                    color = palette.softSlotBg,
+                    border = BorderStroke(1.dp, palette.cardBorder),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = "设置",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "设置",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+
+                // 退出按钮（柔红高对比轮廓，防止与日常操作混淆）
+                Surface(
+                    modifier = Modifier
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onExitApp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = palette.dangerSoft,
+                    border = BorderStroke(1.dp, palette.danger.copy(alpha = 0.35f)),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_spark_power),
+                            contentDescription = "退出",
+                            tint = palette.danger,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "退出",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            color = palette.danger,
+                        )
+                    }
+                }
+            }
+
+            // 第二行：高频三宫格入口（新对话 · 历史 · 通话，文字+图标一眼即懂）
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TopActionPill(
+                    modifier = Modifier.weight(1f),
+                    height = if (compact) 40.dp else 48.dp,
+                    bgColor = palette.softSlotBg,
+                    borderColor = palette.cardBorder,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    label = "新对话",
+                    onClick = onNewChat,
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                }
+                TopActionPill(
+                    modifier = Modifier.weight(1f),
+                    height = if (compact) 40.dp else 48.dp,
+                    bgColor = palette.softSlotBg,
+                    borderColor = palette.cardBorder,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    label = if (sessionCount > 1) "历史($sessionCount)" else "历史",
+                    onClick = onOpenHistory,
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_lt_history),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                TopActionPill(
+                    modifier = Modifier.weight(1.1f),
+                    height = if (compact) 40.dp else 48.dp,
+                    bgColor = palette.primarySoft,
+                    borderColor = palette.primary.copy(alpha = 0.35f),
+                    contentColor = palette.primaryOnSoft,
+                    label = callLabel,
+                    onClick = onStartCall,
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_spark_phone),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+
+            // 闹钟响铃强提醒横幅（一键停止闹钟）
+            AnimatedVisibility(visible = alarmActive) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = palette.danger,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "提醒闹钟响了",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onError.copy(alpha = 0.85f),
+                            )
+                            Text(
+                                alarmText.ifBlank { "时间到啦" },
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onError,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Surface(
+                            modifier = Modifier
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(onClick = onStopAlarm),
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.onError,
+                        ) {
+                            Box(
+                                modifier = Modifier.padding(horizontal = 14.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "停止响铃",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.danger,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 倒计时实时状态条
+            AnimatedVisibility(visible = timerRemainSec > 0 && !alarmActive) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = palette.warmSoft,
+                    border = BorderStroke(1.dp, palette.warmText.copy(alpha = 0.3f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            buildString {
+                                append("倒计时 ")
+                                append(formatTimerText(timerRemainSec))
+                                if (timerLabel.isNotBlank()) append(" · $timerLabel")
+                            },
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.warmText,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Surface(
+                            modifier = Modifier
+                                .height(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(onClick = onCancelTimer),
+                            shape = RoundedCornerShape(10.dp),
+                            color = palette.chromeBg,
+                        ) {
+                            Box(
+                                modifier = Modifier.padding(horizontal = 10.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("取消", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = palette.warmText)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 版本更新条
+            if (newVersion != null) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable(onClick = onUpdateClick),
+                    shape = RoundedCornerShape(14.dp),
+                    color = palette.primary,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "发现新版本 $newVersion，点这里立即升级",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+        HorizontalDivider(thickness = 1.dp, color = palette.cardBorder.copy(alpha = 0.6f))
+    }
+}
+
+@Composable
+private fun TopActionPill(
+    modifier: Modifier = Modifier,
+    height: androidx.compose.ui.unit.Dp,
+    bgColor: Color,
+    borderColor: Color,
+    contentColor: Color,
+    label: String,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    Surface(
+        modifier = modifier
+            .height(height)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(14.dp),
+        color = bgColor,
+        border = BorderStroke(1.dp, borderColor),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.material3.LocalContentColor provides contentColor,
+            ) {
+                icon()
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    label,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = contentColor,
+                )
+            }
+        }
+    }
+}
+
+/** 空白欢迎页：时段问候 + 精炼指南 + 首屏完整呈现 2×2 大字场景卡片 */
+@Composable
+private fun LargeTextWelcomePanel(
+    palette: LargeTextPalette,
+    callLabel: String,
+    onPickSuggestion: (String) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        // 问候与操作指南卡片（精炼文案，确保下方 2×2 快捷卡片首屏全览不截断）
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = palette.cardBg,
+            border = BorderStroke(1.dp, palette.cardBorder),
+            shadowElevation = 2.dp,
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+                Text(
+                    "${timeGreeting()}，有事您说话",
+                    fontSize = 25.sp,
+                    lineHeight = 32.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "按住下方「按住说话」讲出问题，上滑可取消、松手记入框后再点「发送」；也可以点上方「$callLabel」像打电话一样聊。",
+                    fontSize = 17.sp,
+                    lineHeight = 25.sp,
+                    color = palette.mutedText,
+                )
+            }
+        }
+
+        // 2×2 大字常用问法卡片
+        Text(
+            "直接点下方卡片提问",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            color = palette.mutedText,
+            modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            LargeTextQuickCards.chunked(2).forEach { rowCards ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    rowCards.forEach { card ->
+                        val bgAccent = if (palette.isDark) card.accentBgDark else card.accentBgLight
+                        val fgAccent = if (palette.isDark) card.accentFgDark else card.accentFgLight
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 90.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .clickable { onPickSuggestion(card.question) },
+                            shape = RoundedCornerShape(18.dp),
+                            color = palette.cardBg,
+                            border = BorderStroke(1.dp, palette.cardBorder),
+                            shadowElevation = 1.dp,
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = bgAccent,
+                                ) {
+                                    Text(
+                                        card.title,
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = fgAccent,
+                                        maxLines = 1,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    )
+                                }
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    card.subtitle,
+                                    fontSize = 15.sp,
+                                    lineHeight = 20.sp,
+                                    color = palette.mutedText,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     }
                 }
             }
         }
-        // 编辑/重发：撤回这条及其后的消息——文本图片回输入框改完再发，或原样再问一遍
+    }
+}
+
+/** 用户气泡：右对齐高对比气泡，带时间标记及清晰的 编辑/重发 矢量胶囊 */
+@Composable
+private fun LargeTextUserBubble(
+    palette: LargeTextPalette,
+    message: SessionMessage,
+    onEdit: () -> Unit,
+    onResend: () -> Unit,
+) {
+    val timeLabel = remember(message.ts) {
+        if (message.ts > 0L) SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(message.ts)) else ""
+    }
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(end = 4.dp, bottom = 4.dp),
         ) {
-            // 浅青灰底：对已发消息的修补动作，不再与主操作抢深青色
-            Button(
-                onClick = onEdit,
-                modifier = Modifier.height(44.dp),
+            Text(
+                if (timeLabel.isNotEmpty()) "我 · $timeLabel" else "我",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = palette.mutedText,
+            )
+        }
+        SelectionContainer {
+            Surface(
+                shape = RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.22f)),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (message.imagePaths.isNotEmpty()) {
+                        SentImageThumbnails(paths = message.imagePaths)
+                    }
+                    if (message.text.isNotBlank()) {
+                        Text(
+                            (if (message.imagePaths.isEmpty() && message.hadImage) "【图片】" else "") + message.text,
+                            fontSize = 21.sp,
+                            lineHeight = 31.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(
+                modifier = Modifier
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onEdit),
                 shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
-            ) { Text("✏️ 编辑", fontSize = 17.sp) }
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = onResend,
-                modifier = Modifier.height(44.dp),
+                color = palette.cardBg,
+                border = BorderStroke(1.dp, palette.cardBorder),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = palette.mutedText, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("编辑", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                }
+            }
+            Surface(
+                modifier = Modifier
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onResend),
                 shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
-            ) { Text("🔁 重发", fontSize = 17.sp) }
+                color = palette.cardBg,
+                border = BorderStroke(1.dp, palette.cardBorder),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, tint = palette.mutedText, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("重发", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                }
+            }
         }
     }
 }
 
-/** 助手卡片：超大字回答 + 要点 + 地图卡 + 再读一遍/收藏 */
+/** 助手知识卡：身份头栏 + 舒适大字正文 + 编号圆标步骤 + 建议框 + 路线卡 + 突出的朗读/收藏/分享三钮 */
 @Composable
 private fun LargeTextAssistantCard(
+    palette: LargeTextPalette,
     message: SessionMessage,
     app: TravelApp,
     ttsActive: Boolean,
@@ -1119,130 +1298,703 @@ private fun LargeTextAssistantCard(
     savedMemory: Boolean,
     onToggleMemory: () -> Unit,
 ) {
-    // 分享：卡片图生成/微信/相册/权限，统一在 CardShareUi 收口
     val shareState = rememberCardShareState(message)
-    ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
-        // 文字整体可长按选中、自由复制（按钮不受影响）
-        androidx.compose.foundation.text.selection.SelectionContainer {
-            Column(Modifier.padding(18.dp)) {
-                // 富内容：表格/图表自动渲染成可全屏的卡片（字号随大字模式放大）
-                com.lvyoubao.app.ui.common.RichContent(
-                    text = message.text,
-                    fontSize = 25.sp,
-                    lineHeight = 37.sp,
-                    fontWeight = FontWeight.Bold,
-                    largeText = true,
-                )
-                message.steps.forEachIndexed { index, step ->
-                    Spacer(Modifier.height(10.dp))
-                    Text("${index + 1}. $step", fontSize = 22.sp, lineHeight = 32.sp)
-                }
-                message.action?.let {
-                    Spacer(Modifier.height(12.dp))
-                    Text("👉 $it", fontSize = 21.sp, color = MaterialTheme.colorScheme.primary)
-                }
-            }
-        }
-        message.mapCard?.let { card ->
-            Spacer(Modifier.height(8.dp))
-            RouteMapCard(card = card, app = app, largeText = true)
-        }
-        Spacer(Modifier.height(10.dp))
-        // 按钮行与卡片边缘留出与正文一致的内边距；三颗按钮等宽分摊（不换行、分享不再被挤出屏幕）。
-        // 卡片上的动作一律浅青灰底（surfaceVariant），卡片回归内容主体，深青不再往回答区里扎堆
-        Row(
-            modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Button(
-                onClick = onToggleSpeak,
-                modifier = Modifier.weight(1f).height(52.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-            ) { Text(if (ttsActive) "⏹ 别读了" else "🔊 朗读", fontSize = 17.sp, maxLines = 1) }
-            // 收藏切换：已收藏换浅橙底深棕字（大字模式青底绿字看不清），再点恢复浅青灰「收藏」
-            Button(
-                onClick = onToggleMemory,
-                modifier = Modifier.weight(1f).height(52.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = if (savedMemory) {
-                    ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                } else {
-                    ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
+    val timeLabel = remember(message.ts) {
+        if (message.ts > 0L) SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(message.ts)) else ""
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = palette.cardBg,
+        border = BorderStroke(1.dp, palette.cardBorder),
+        shadowElevation = 2.dp,
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            // 顶部助手身份栏
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (savedMemory) "✔ 已收藏" else "收藏", fontSize = 17.sp, maxLines = 1)
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(palette.primary),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (timeLabel.isNotEmpty()) "旅游宝回答 · $timeLabel" else "旅游宝回答",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.primaryOnSoft,
+                    modifier = Modifier.weight(1f),
+                )
+                if (savedMemory) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = palette.warmSoft,
+                    ) {
+                        Text(
+                            "已收藏",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.warmText,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        )
+                    }
+                }
             }
-            Button(
-                onClick = { shareState.open() },
-                modifier = Modifier.weight(1f).height(52.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-            ) { Text("分享", fontSize = 17.sp, maxLines = 1) }
+
+            SelectionContainer {
+                Column(Modifier.padding(horizontal = 18.dp, vertical = 6.dp)) {
+                    RichContent(
+                        text = message.text,
+                        fontSize = 23.sp,
+                        lineHeight = 35.sp,
+                        fontWeight = FontWeight.Medium,
+                        largeText = true,
+                    )
+
+                    if (message.steps.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            message.steps.forEachIndexed { index, step ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top,
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(top = 4.dp)
+                                            .size(26.dp)
+                                            .clip(CircleShape)
+                                            .background(palette.primarySoft),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            "${index + 1}",
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.primaryOnSoft,
+                                        )
+                                    }
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        step,
+                                        fontSize = 21.sp,
+                                        lineHeight = 31.sp,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    message.action?.let { actionText ->
+                        Spacer(Modifier.height(14.dp))
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = palette.warmSoft,
+                            border = BorderStroke(1.dp, palette.warmText.copy(alpha = 0.25f)),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                Icon(
+                                    Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = palette.warmText,
+                                    modifier = Modifier.padding(top = 3.dp).size(18.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "贴心建议：$actionText",
+                                    fontSize = 19.sp,
+                                    lineHeight = 28.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.warmText,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            message.mapCard?.let { card ->
+                Spacer(Modifier.height(8.dp))
+                RouteMapCard(card = card, app = app, largeText = true)
+            }
+
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider(thickness = 1.dp, color = palette.cardBorder.copy(alpha = 0.6f))
+
+            // 底部三合一清晰操作条：朗读为主按钮，收藏与分享等重分列
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .weight(1.25f)
+                        .height(50.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable(onClick = onToggleSpeak),
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (ttsActive) palette.dangerSoft else palette.primarySoft,
+                    border = BorderStroke(
+                        1.dp,
+                        if (ttsActive) palette.danger.copy(alpha = 0.45f) else palette.primary.copy(alpha = 0.3f),
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(if (ttsActive) R.drawable.ic_lt_stop else R.drawable.ic_lt_speaker),
+                            contentDescription = null,
+                            tint = if (ttsActive) palette.danger else palette.primaryOnSoft,
+                            modifier = Modifier.size(19.dp),
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            if (ttsActive) "停止读" else "朗读",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (ttsActive) palette.danger else palette.primaryOnSoft,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable(onClick = onToggleMemory),
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (savedMemory) palette.warmSoft else palette.softSlotBg,
+                    border = BorderStroke(
+                        1.dp,
+                        if (savedMemory) palette.warmText.copy(alpha = 0.38f) else palette.cardBorder,
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(
+                            if (savedMemory) Icons.Default.CheckCircle else Icons.Default.Star,
+                            contentDescription = null,
+                            tint = if (savedMemory) palette.warmText else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            if (savedMemory) "已收藏" else "收藏",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (savedMemory) palette.warmText else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { shareState.open() },
+                    shape = RoundedCornerShape(14.dp),
+                    color = palette.softSlotBg,
+                    border = BorderStroke(1.dp, palette.cardBorder),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.Share,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "分享",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
         }
     }
     CardShareDialog(shareState)
     CardShareTipDialog(shareState)
 }
 
-
-/** 顶部功能图标：40dp 触控区 + 22dp 图标（小屏上比 17sp 文字按钮省一半地方） */
+/** 思考与流式回答卡 */
 @Composable
-private fun HeaderIcon(icon: ImageVector, desc: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(40.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+private fun LargeTextStreamingCard(
+    palette: LargeTextPalette,
+    streamState: ChatViewModel.StreamState?,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = palette.cardBg,
+        border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.4f)),
+        shadowElevation = 2.dp,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = desc,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(22.dp),
-        )
+        SelectionContainer {
+            Column(Modifier.padding(18.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.5.dp,
+                        color = palette.primary,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        when {
+                            streamState?.answer?.isNotBlank() == true -> "正在为您回答…"
+                            streamState?.reasoning?.isNotBlank() == true -> "正在仔细整理…"
+                            else -> "正在帮您查资料与思考…"
+                        },
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.primaryOnSoft,
+                    )
+                }
+                if (streamState != null && streamState.answer.isNotBlank()) {
+                    Spacer(Modifier.height(12.dp))
+                    RichContent(
+                        text = streamState.answer,
+                        fontSize = 23.sp,
+                        lineHeight = 35.sp,
+                        fontWeight = FontWeight.Medium,
+                        largeText = true,
+                    )
+                }
+            }
+        }
     }
 }
 
-/** 生成中的回答：实时流式正文，超大字，可选中复制 */
+/** 底部语音与输入控制台（悬浮圆角工作台） */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LargeTextStreamingCard(streamState: ChatViewModel.StreamState?) {
-    ElevatedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
-        androidx.compose.foundation.text.selection.SelectionContainer {
-            Column(Modifier.padding(18.dp)) {
-                if (streamState == null || (streamState.answer.isBlank() && streamState.reasoning.isBlank())) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 3.dp)
-                        Spacer(Modifier.width(10.dp))
-                        Text("正在帮你想…", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+private fun LargeTextBottomDock(
+    palette: LargeTextPalette,
+    state: ChatViewModel.UiState,
+    holdState: com.lvyoubao.app.ui.common.HoldTalkController.State,
+    wakeOneShot: Boolean,
+    autoSendIn: Int?,
+    canSend: Boolean,
+    holdModifier: Modifier,
+    onQuestionChange: (String) -> Unit,
+    onClearQuestion: () -> Unit,
+    onInputFocus: () -> Unit,
+    onCancelAutoSend: () -> Unit,
+    onRemoveAttachment: (ChatViewModel.PendingAttachment) -> Unit,
+    onPickCamera: () -> Unit,
+    onPickGallery: () -> Unit,
+    onSend: () -> Unit,
+) {
+    val micScale by animateFloatAsState(
+        targetValue = if (holdState.isRecording) 0.96f else 1f,
+        animationSpec = tween(120),
+        label = "micHoldScale",
+    )
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(elevation = 14.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        color = palette.chromeBg,
+        border = BorderStroke(1.dp, palette.cardBorder),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .imePadding()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // 1. 瞬态报错提醒
+            state.error?.let { err ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = palette.warmSoft,
+                    border = BorderStroke(1.dp, palette.warmText.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = palette.warmText,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            err,
+                            fontSize = 15.sp,
+                            lineHeight = 22.sp,
+                            color = palette.warmText,
+                        )
                     }
-                } else {
-                    if (streamState.answer.isBlank() && streamState.reasoning.isNotBlank()) {
-                        Text("正在想…", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            // 2. 录音实时秒表 / 转写 / 智能纠错 / 自动发送倒计时反馈条
+            AnimatedVisibility(
+                visible = holdState.isRecording || holdState.listening || wakeOneShot || state.polishing || autoSendIn != null,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                when {
+                    holdState.isRecording -> {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = palette.dangerSoft,
+                            border = BorderStroke(1.dp, palette.danger.copy(alpha = 0.45f)),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(palette.danger),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "正在听您说… ${holdState.recordTick} 秒（说完请松手）",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.danger,
+                                )
+                            }
+                        }
                     }
-                    if (streamState.answer.isNotBlank()) {
-                        com.lvyoubao.app.ui.common.RichContent(
-                            text = streamState.answer,
-                            fontSize = 25.sp,
-                            lineHeight = 37.sp,
+                    holdState.listening || wakeOneShot -> {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = palette.primarySoft,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = palette.primaryOnSoft,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    if (wakeOneShot) "已唤醒，请直接说出您想问的问题…" else "正在把声音整理成文字…",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.primaryOnSoft,
+                                )
+                            }
+                        }
+                    }
+                    state.polishing -> {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = palette.warmSoft,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = palette.warmText,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "正在帮您顺一下识别文字，马上就好…",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = palette.warmText,
+                                )
+                            }
+                        }
+                    }
+                    autoSendIn != null -> {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = palette.primarySoft,
+                            border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.35f)),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "$autoSendIn 秒后自动发出去",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = palette.primaryOnSoft,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Surface(
+                                    modifier = Modifier
+                                        .height(36.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable(onClick = onCancelAutoSend),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = palette.chromeBg,
+                                    border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.4f)),
+                                ) {
+                                    Box(
+                                        modifier = Modifier.padding(horizontal = 12.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            "先别发",
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = palette.primaryOnSoft,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. 已挂附件条
+            if (state.attachments.isNotEmpty()) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    state.attachments.forEach { a ->
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = palette.softSlotBg,
+                            border = BorderStroke(1.dp, palette.cardBorder),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    painter = painterResource(
+                                        if (a.isImage) R.drawable.ic_spark_gallery else R.drawable.ic_spark_chat,
+                                    ),
+                                    contentDescription = null,
+                                    tint = palette.primary,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(a.name.take(14), fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                                IconButton(onClick = { onRemoveAttachment(a) }, modifier = Modifier.size(30.dp)) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "移除附件",
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. 文字输入框（大字易读，右侧配明确清空胶囊）
+            val draftValue = rememberDraftValue(state.question)
+            OutlinedTextField(
+                value = draftValue.value,
+                onValueChange = {
+                    draftValue.value = it
+                    onQuestionChange(it.text)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { if (it.isFocused) onInputFocus() },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = palette.softSlotBg,
+                    unfocusedContainerColor = palette.softSlotBg,
+                    focusedBorderColor = palette.primary,
+                    unfocusedBorderColor = palette.cardBorder,
+                ),
+                placeholder = {
+                    Text(
+                        when {
+                            holdState.isRecording -> "正在听您说…"
+                            wakeOneShot -> "唤醒聆听中…"
+                            else -> "说话或打字，内容记到这里"
+                        },
+                        fontSize = 19.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = palette.mutedText,
+                    )
+                },
+                maxLines = 4,
+                textStyle = TextStyle(fontSize = 20.sp, lineHeight = 29.sp),
+                shape = RoundedCornerShape(16.dp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
+                trailingIcon = {
+                    if (state.question.isNotBlank()) {
+                        Surface(
+                            modifier = Modifier
+                                .padding(end = 6.dp)
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(onClick = onClearQuestion),
+                            shape = RoundedCornerShape(10.dp),
+                            color = palette.chromeBg,
+                            border = BorderStroke(1.dp, palette.cardBorder),
+                        ) {
+                            Box(
+                                modifier = Modifier.padding(horizontal = 10.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("清空", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.mutedText)
+                            }
+                        }
+                    }
+                },
+            )
+
+            // 5. 核心操作主排：拍照 | 相册 | 按住说话(超大C位) | 发送
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                DockSquareActionButton(
+                    palette = palette,
+                    iconRes = R.drawable.ic_spark_camera,
+                    label = "拍照",
+                    onClick = onPickCamera,
+                )
+                DockSquareActionButton(
+                    palette = palette,
+                    iconRes = R.drawable.ic_spark_gallery,
+                    label = "相册",
+                    onClick = onPickGallery,
+                )
+
+                // 按住说话大主按钮（矢量话筒 + 大号粗体文字 + 按下回弹感）
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(68.dp)
+                        .scale(micScale)
+                        .clip(RoundedCornerShape(20.dp))
+                        .then(holdModifier),
+                    shape = RoundedCornerShape(20.dp),
+                    color = when {
+                        holdState.isRecording -> palette.danger
+                        holdState.listening || wakeOneShot -> palette.primarySoft
+                        else -> palette.primary
+                    },
+                    border = if (holdState.listening || wakeOneShot) {
+                        BorderStroke(1.5.dp, palette.primary)
+                    } else null,
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        val contentColor = when {
+                            holdState.isRecording -> MaterialTheme.colorScheme.onError
+                            holdState.listening || wakeOneShot -> palette.primaryOnSoft
+                            else -> MaterialTheme.colorScheme.onPrimary
+                        }
+                        Icon(
+                            painter = painterResource(R.drawable.ic_spark_mic),
+                            contentDescription = null,
+                            tint = contentColor,
+                            modifier = Modifier.size(21.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            when {
+                                holdState.cancelling -> "松手取消"
+                                holdState.isRecording -> "松手 (${holdState.recordTick}s)"
+                                holdState.listening -> "整理文字…"
+                                wakeOneShot -> "请说话…"
+                                else -> "按住说话"
+                            },
+                            fontSize = 19.sp,
                             fontWeight = FontWeight.Bold,
-                            largeText = true,
+                            color = contentColor,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                // 发送大按钮（尺寸固定防抖，状态分明）
+                Surface(
+                    modifier = Modifier
+                        .width(74.dp)
+                        .height(68.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .then(if (canSend) Modifier.clickable(onClick = onSend) else Modifier),
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (canSend) palette.primary else palette.softSlotBg,
+                    border = if (!canSend) BorderStroke(1.dp, palette.cardBorder) else null,
+                ) {
+                    val sendTint = if (canSend) MaterialTheme.colorScheme.onPrimary else palette.mutedText.copy(alpha = 0.55f)
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "发送",
+                            tint = sendTint,
+                            modifier = Modifier.size(21.dp),
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "发送",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = sendTint,
+                            maxLines = 1,
                         )
                     }
                 }
@@ -1251,9 +2003,49 @@ private fun LargeTextStreamingCard(streamState: ChatViewModel.StreamState?) {
     }
 }
 
-/** 对话历史：全屏列表，大字号，点了就切过去 */
+@Composable
+private fun DockSquareActionButton(
+    palette: LargeTextPalette,
+    iconRes: Int,
+    label: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .size(width = 58.dp, height = 68.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        color = palette.softSlotBg,
+        border = BorderStroke(1.dp, palette.cardBorder),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = label,
+                tint = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                label,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/** 历史对话全屏管理：清晰大字体、当前使用中标识、防误触二次确认删除 */
 @Composable
 private fun LargeTextHistoryOverlay(
+    palette: LargeTextPalette,
     sessions: List<ChatSession>,
     currentId: String?,
     onPick: (String) -> Unit,
@@ -1261,514 +2053,201 @@ private fun LargeTextHistoryOverlay(
     onDelete: (String) -> Unit,
     onClose: () -> Unit,
 ) {
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("对话历史", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                TextButton(onClick = onClose, modifier = Modifier.height(52.dp)) {
-                    Text("关闭", fontSize = 17.sp)
-                }
-            }
-            Button(
-                onClick = onNew,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) { Text("新对话", fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
-            Spacer(Modifier.height(12.dp))
-            if (sessions.isEmpty()) {
-                Text("还没有对话", fontSize = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(bottom = 16.dp),
-                modifier = Modifier.weight(1f),
-            ) {
-                items(sessions, key = { it.id }) { session ->
-                    val selected = session.id == currentId
-                    ElevatedCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(session.id) },
-                        shape = RoundedCornerShape(18.dp),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    session.title,
-                                    fontSize = 21.sp,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    session.messages.lastOrNull()?.text?.take(36)?.replace("\n", " ") ?: "（空会话）",
-                                    fontSize = 16.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    SimpleDateFormat("MM月dd日 HH:mm", Locale.CHINA).format(Date(session.updatedAt)) +
-                                        if (selected) " · 当前对话" else "",
-                                    fontSize = 14.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            IconButton(onClick = { onDelete(session.id) }, modifier = Modifier.size(44.dp)) {
-                                Text("🗑", fontSize = 20.sp)
-                            }
-                        }
-                    }
-                }
-            }
+    var pendingDeleteId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(pendingDeleteId) {
+        if (pendingDeleteId != null) {
+            delay(3_000)
+            pendingDeleteId = null
         }
     }
-}
 
-/** 通话会话流的一条消息：user=识别稿（右侧），assistant=回答（左侧）；streaming=还在收字 */
-data class DuplexTurnUi(val role: String, val text: String, val streaming: Boolean = false)
-
-/**
- * 豆包全双工通话界面（端到端 S2S）：不走 ASR→LLM→TTS 串行链路，
- * 音频由 DuplexAudioEngine 实时收发；界面按会话流排版（识别右/回答左），
- * 插话按一下（bargeIn）即可打断播报。 fab 按钮常驻，无需按住说话。
- */
-@Composable
-internal fun DoubaoCallOverlay(
-    state: DoubaoDuplexClient.State,
-    turns: List<DuplexTurnUi>,
-    hint: String?,
-    photos: List<ChatViewModel.PendingAttachment>,
-    onPickCamera: () -> Unit,
-    onPickGallery: () -> Unit,
-    onRemovePhoto: (Int) -> Unit,
-    onBargeIn: () -> Unit,
-    onHangUp: () -> Unit,
-    showPhotoActions: Boolean = true,
-    // 通话起算时刻（wall clock ms）：界面收起再展开时计时接着走，不会被重置成 00:00。
-    // 传 0 就按本层首次组合的时刻兜底（大字模式那条老链路不需改）。
-    startedAtMs: Long = 0L,
-) {
-    val baseMs = remember(startedAtMs) {
-        if (startedAtMs > 0L) startedAtMs else System.currentTimeMillis()
-    }
-    val seconds = remember { mutableStateOf(0) }
-    LaunchedEffect(state, baseMs) {
-        while (state == DoubaoDuplexClient.State.LISTENING || state == DoubaoDuplexClient.State.SPEAKING || state == DoubaoDuplexClient.State.CONNECTED) {
-            kotlinx.coroutines.delay(1000)
-            seconds.value = ((System.currentTimeMillis() - baseMs) / 1000L).toInt().coerceAtLeast(0)
-        }
-    }
-    val statusText = when (state) {
-        DoubaoDuplexClient.State.CONNECTING -> "正在连接…"
-        DoubaoDuplexClient.State.CONNECTED -> "已连接，正在建立会话…"
-        DoubaoDuplexClient.State.LISTENING -> "正在听你说"
-        DoubaoDuplexClient.State.SPEAKING -> "正在回答，想插话就点一下"
-        DoubaoDuplexClient.State.CLOSING -> "正在挂断…"
-        DoubaoDuplexClient.State.ERROR -> "连接出错"
-        else -> "语音通话中"
-    }
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-            // 顶栏：状态 + 计时 + 挂断
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("语音通话中", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    Text(statusText, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
-                }
-                Text(
-                    "%02d:%02d".format(seconds.value / 60, seconds.value % 60),
-                    fontSize = 16.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.width(12.dp))
-                Button(
-                    onClick = onHangUp,
-                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                    ),
-                    shape = RoundedCornerShape(20.dp),
-                ) { Text("挂断") }
-            }
-
-            hint?.let {
-                Text(
-                    it,
-                    fontSize = 16.sp,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-                )
-            }
-
-            // 文字稿：会话流排版（识别=右、回答=左，像聊天一样往下滚，新内容自动滚到底）
-            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-            LaunchedEffect(turns.size, turns.lastOrNull()?.text?.length, turns.lastOrNull()?.streaming) {
-                if (turns.isNotEmpty()) listState.animateScrollToItem(turns.lastIndex)
-            }
-            androidx.compose.foundation.lazy.LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                items(turns.size) { idx ->
-                    val t = turns[idx]
-                    val body = if (t.streaming && t.text.isBlank()) "…" else t.text
-                    if (t.role == "user") {
-                        Surface(
-                            color = Color(0xFFD8EEF8),
-                            shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier.fillMaxWidth().wrapContentWidth(Alignment.End),
-                        ) {
-                            Text(body, fontSize = 22.sp, color = Color(0xFF0B3A55), modifier = Modifier.padding(16.dp))
-                        }
-                    } else {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier.fillMaxWidth().wrapContentWidth(Alignment.Start),
-                        ) {
-                            Text(body, fontSize = 22.sp, modifier = Modifier.padding(16.dp))
-                        }
-                    }
-                }
-            }
-
-            // 待发照片条：随本轮对话一起落历史（纯语音 S2S 不解析图内容，只作记录）
-            if (photos.isNotEmpty()) {
-                androidx.compose.foundation.lazy.LazyRow(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(photos.size) { idx ->
-                        Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(4.dp)) {
-                                Text("📷", fontSize = 20.sp)
-                                IconButton(onClick = { onRemovePhoto(idx) }) {
-                                    Text("✕", color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 底部操作区：拍照 / 相册 / 插话打断（全双工常开采集，无需按住说话）
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (showPhotoActions) {
-                    Button(
-                        onClick = onPickCamera,
-                        modifier = Modifier.height(56.dp),
-                        shape = RoundedCornerShape(28.dp),
-                    ) { Text("拍照", fontSize = 16.sp) }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = onPickGallery,
-                        modifier = Modifier.height(56.dp),
-                        shape = RoundedCornerShape(28.dp),
-                    ) { Text("相册", fontSize = 16.sp) }
-                    Spacer(Modifier.width(8.dp))
-                }
-                Button(
-                    onClick = onBargeIn,
-                    enabled = state == DoubaoDuplexClient.State.SPEAKING || state == DoubaoDuplexClient.State.LISTENING,
-                    modifier = Modifier.height(56.dp).weight(1f),
-                    shape = RoundedCornerShape(28.dp),
-                ) { Text("插话打断", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-            }
-        }
-    }
-}
-
-/**
- * 语音通话：像打电话一样的全屏界面。
- * 按住说话、松手就问，回答自动朗读；朗读时随时按住即可插话（会先停掉朗读再录）。
- * 中间展示会话文字稿（含正在生成的回答）：内容与朗读同一份全文（回答+要点+建议，
- * v0.8.8 起不再只有正文——之前"语音播报是完整的、文字稿缺内容"就是这来的），
- * 字号 22sp 与主界面一致，可长按选中复制；
- * 底部常驻操作区：拍照/相册可把图挂到草稿（说完松手图文一起发）+ 按住说话/挂断。
- * 全链路免费：录音→云端方言口音转文字→大模型回答→Edge/云端朗读。
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun VoiceCallOverlay(
-    messages: List<SessionMessage>,
-    streamState: ChatViewModel.StreamState?,
-    sending: Boolean,
-    attachments: List<ChatViewModel.PendingAttachment>,
-    listening: Boolean,
-    recording: SpeechInput.Recording?,
-    recordTick: Int,
-    ttsSpeaking: Boolean,
-    ttsUnavailable: String?,
-    holdModifier: Modifier,
-    onPickCamera: () -> Unit,
-    onPickGallery: () -> Unit,
-    onRemoveAttachment: (ChatViewModel.PendingAttachment) -> Unit,
-    onHangUp: () -> Unit,
-) {
-    var seconds by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1_000)
-            seconds++
-        }
-    }
-    val transcriptState = rememberLazyListState()
-    // 新消息/流式输出增长时文字稿滚到底
-    LaunchedEffect(messages.size, sending, streamState?.answer?.length) {
-        if (messages.isNotEmpty()) {
-            val target = (messages.size - 1 + if (sending) 1 else 0).coerceAtLeast(0)
-            runCatching { transcriptState.animateScrollToItem(target) }
-        }
-    }
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+    Surface(Modifier.fillMaxSize(), color = palette.pageBg) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing),
-            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(14.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            // 顶部导航栏
+            Surface(
+                color = palette.chromeBg,
+                shadowElevation = 4.dp,
             ) {
-                Text("语音通话中", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(12.dp))
-                Text(formatCallDuration(seconds), fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Spacer(Modifier.height(10.dp))
-            val status = when {
-                recording != null -> "正在听你说…（${recordTick}s，说完松手）"
-                listening -> "正在记下来…"
-                sending -> "正在帮你想…"
-                ttsSpeaking -> "正在回答，想插话就按住说话"
-                else -> "按住下面的按钮说话"
-            }
-            Text(
-                status,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 20.dp),
-            )
-            ttsUnavailable?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    it,
-                    fontSize = 17.sp,
-                    lineHeight = 24.sp,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-
-            // 会话文字稿：固定占满中间一整块，看得见 AI 说了什么；每条消息自己包选择容器（长按可复制）。
-            // 注意 weight 必须挂在 Column 的直接子项上：之前整个 LazyColumn 包在 SelectionContainer 里，
-            // weight 失效——空的时候两个按钮全顶到上半屏，消息一多按钮反被顶出屏幕
-            LazyColumn(
-                state = transcriptState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(messages) { message ->
-                    androidx.compose.foundation.text.selection.SelectionContainer {
-                        if (message.role == "user") {
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Surface(
+                            modifier = Modifier
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(onClick = onClose),
+                            shape = RoundedCornerShape(12.dp),
+                            color = palette.softSlotBg,
+                            border = BorderStroke(1.dp, palette.cardBorder),
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Surface(
-                                    shape = RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp),
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                ) {
-                                    Column(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                Icon(
+                                    Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "返回",
+                                    modifier = Modifier.size(20.dp),
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("返回", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            "历史对话",
+                            fontSize = 23.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                        )
+                        Button(
+                            onClick = onNew,
+                            modifier = Modifier.height(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp),
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("新对话", fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                    }
+                    HorizontalDivider(thickness = 1.dp, color = palette.cardBorder.copy(alpha = 0.6f))
+                }
+            }
+
+            if (sessions.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(32.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "还没有对话记录\n点右上角「新对话」开始吧",
+                        fontSize = 20.sp,
+                        lineHeight = 30.sp,
+                        color = palette.mutedText,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(16.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    items(sessions, key = { it.id }) { session ->
+                        val selected = session.id == currentId
+                        val confirmDel = pendingDeleteId == session.id
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(18.dp))
+                                .clickable { onPick(session.id) },
+                            shape = RoundedCornerShape(18.dp),
+                            color = palette.cardBg,
+                            border = BorderStroke(
+                                width = if (selected) 2.dp else 1.dp,
+                                color = if (selected) palette.primary else palette.cardBorder,
+                            ),
+                            shadowElevation = 2.dp,
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
-                                        if (message.imagePaths.isNotEmpty()) {
-                                            SentImageThumbnails(paths = message.imagePaths, thumbSize = 96.dp)
+                                        if (selected) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = palette.primarySoft,
+                                            ) {
+                                                Text(
+                                                    "正在使用",
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = palette.primaryOnSoft,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                )
+                                            }
                                         }
-                                        if (message.text.isNotBlank()) {
+                                        Text(
+                                            session.title,
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            color = if (selected) palette.primaryOnSoft else MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        session.messages.lastOrNull()?.text?.take(50)?.replace("\n", " ") ?: "（空对话）",
+                                        fontSize = 16.sp,
+                                        lineHeight = 23.sp,
+                                        color = palette.mutedText,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        SimpleDateFormat("MM月dd日 HH:mm", Locale.CHINA).format(Date(session.updatedAt)) +
+                                            " · 共 ${session.messages.size} 条",
+                                        fontSize = 14.sp,
+                                        color = palette.mutedText,
+                                    )
+                                }
+
+                                Spacer(Modifier.width(10.dp))
+                                Surface(
+                                    modifier = Modifier
+                                        .height(44.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable {
+                                            if (confirmDel) {
+                                                pendingDeleteId = null
+                                                onDelete(session.id)
+                                            } else {
+                                                pendingDeleteId = session.id
+                                            }
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (confirmDel) palette.danger else palette.dangerSoft,
+                                    border = BorderStroke(1.dp, palette.danger.copy(alpha = 0.35f)),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = if (confirmDel) 12.dp else 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Delete,
+                                            contentDescription = "删除对话",
+                                            tint = if (confirmDel) MaterialTheme.colorScheme.onError else palette.danger,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        if (confirmDel) {
+                                            Spacer(Modifier.width(4.dp))
                                             Text(
-                                                (if (message.imagePaths.isEmpty() && message.hadImage) "🖼 " else "") + message.text,
-                                                fontSize = 22.sp,
-                                                lineHeight = 32.sp,
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                "确定删?",
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onError,
                                             )
                                         }
                                     }
                                 }
                             }
-                        } else {
-                            Surface(
-                                shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                            ) {
-                                Text(
-                                    // 文字稿 = 朗读同一份全文（回答+要点+建议），只是把"第N条"换成编号换行，
-                                    // 之前只显示正文，播报完整而文字缺内容
-                                    callTranscriptText(message),
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    fontSize = 22.sp,
-                                    lineHeight = 32.sp,
-                                )
-                            }
                         }
-                    }
-                }
-                if (sending) {
-                    item {
-                        androidx.compose.foundation.text.selection.SelectionContainer {
-                            Surface(
-                                shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                            ) {
-                                Text(
-                                    streamState?.answer?.takeIf { it.isNotBlank() }
-                                        ?: streamState?.reasoning?.takeIf { it.isNotBlank() }?.let { "（思考中）" + it.takeLast(160) }
-                                        ?: "正在帮你想…",
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    fontSize = 22.sp,
-                                    lineHeight = 32.sp,
-                                    color = if (streamState?.answer?.isNotBlank() == true) {
-                                        MaterialTheme.colorScheme.onSurface
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 底部操作区：跟主界面同一个套路——常驻底栏、永远在最上层，
-            // 大按钮放屏幕最底下，文字稿再多也只在自己的滚动区里滚，压不住它们
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .shadow(elevation = 14.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
-                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                tonalElevation = 3.dp,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                ) {
-                    // 通话里挂的图（拍照/相册），跟主页同一份草稿；说完话松手就图文一起发
-                    if (attachments.isNotEmpty()) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            attachments.forEach { a ->
-                                Surface(
-                                    shape = RoundedCornerShape(20.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(start = 12.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Text(
-                                            (if (a.isImage) "🖼 " else "📄 ") + a.name.take(14),
-                                            fontSize = 16.sp,
-                                        )
-                                        IconButton(
-                                            onClick = { onRemoveAttachment(a) },
-                                            modifier = Modifier.size(28.dp),
-                                        ) { Text("✕", fontSize = 16.sp) }
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        // 拍照：图挂到草稿上，按住说话问，松手图文一起发出
-                        Box(
-                            modifier = Modifier
-                                .size(68.dp)
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(MaterialTheme.colorScheme.secondaryContainer)
-                                .clickable(onClick = onPickCamera),
-                            contentAlignment = Alignment.Center,
-                        ) { Text("📷", fontSize = 26.sp) }
-                        // 相册
-                        Box(
-                            modifier = Modifier
-                                .size(68.dp)
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(MaterialTheme.colorScheme.secondaryContainer)
-                                .clickable(onClick = onPickGallery),
-                            contentAlignment = Alignment.Center,
-                        ) { Text("🖼", fontSize = 26.sp) }
-                        // 按住说话大按钮（松手即发问，自动等回答、自动朗读）——规格与主界面操作行一致
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(80.dp)
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(
-                                    if (recording != null) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.primary
-                                )
-                                .then(holdModifier),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                when {
-                                    recording != null -> "松手（${recordTick}s）"
-                                    listening -> "正在记录…"
-                                    else -> "按住说话"
-                                },
-                                modifier = Modifier.padding(horizontal = 10.dp),
-                                fontSize = 20.sp,
-                                maxLines = 1,
-                                fontWeight = FontWeight.Bold,
-                                color = if (recording != null) {
-                                    MaterialTheme.colorScheme.onError
-                                } else {
-                                    MaterialTheme.colorScheme.onPrimary
-                                },
-                            )
-                        }
-                        Button(
-                            onClick = onHangUp,
-                            modifier = Modifier.height(80.dp),
-                            shape = RoundedCornerShape(20.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                            contentPadding = PaddingValues(horizontal = 14.dp),
-                        ) { Text("挂断", fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                     }
                 }
             }
@@ -1776,17 +2255,20 @@ private fun VoiceCallOverlay(
     }
 }
 
-private fun formatCallDuration(seconds: Int): String {
-    val m = seconds / 60
-    val s = seconds % 60
-    return "%02d:%02d".format(Locale.CHINA, m, s)
+private fun timeGreeting(): String = when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
+    in 5..10 -> "早上好"
+    in 11..13 -> "中午好"
+    in 14..17 -> "下午好"
+    in 18..22 -> "晚上好"
+    else -> "夜深了"
 }
 
-/** 通话文字稿的全文：与朗读同一份内容（回答 + 要点 + 建议），只是换成编号换行排版 */
-private fun callTranscriptText(message: SessionMessage): String = buildString {
-    append(message.text)
-    message.steps.forEachIndexed { i, s -> append("\n${i + 1}. $s") }
-    message.action?.let { append("\n👉 $it") }
+private fun formatTimerText(sec: Int): String {
+    val h = sec / 3600
+    val m = (sec % 3600) / 60
+    val s = sec % 60
+    return if (h > 0) String.format(Locale.CHINA, "%d:%02d:%02d", h, m, s)
+    else String.format(Locale.CHINA, "%02d:%02d", m, s)
 }
 
 private fun newCameraImageUri(context: android.content.Context): android.net.Uri {

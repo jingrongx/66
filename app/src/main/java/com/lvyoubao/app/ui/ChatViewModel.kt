@@ -15,9 +15,9 @@ import com.lvyoubao.app.data.AmapClient
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.CalendarContext
 import com.lvyoubao.app.data.HotwordCorrector
+import com.lvyoubao.app.data.LocalCommandRouter
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.OutMessage
-import com.lvyoubao.app.data.QuickAnswers
 import com.lvyoubao.app.data.RichBlocks
 import com.lvyoubao.app.data.observation.FatigueEngine
 import com.lvyoubao.app.data.MapCardData
@@ -29,9 +29,14 @@ import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.WeatherClient
+import com.lvyoubao.app.data.duplex.DuplexCallController
+import com.lvyoubao.app.data.duplex.DuplexCallSetup
 import com.lvyoubao.app.ui.common.EdgeTts
+import com.lvyoubao.app.ui.common.HoldTalkController
 import com.lvyoubao.app.ui.common.LiveTtsSession
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.WakeHub
+import com.lvyoubao.app.ui.spark.CameraSnapshotHelper
 import com.lvyoubao.app.data.presetById
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -63,6 +68,121 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     private val noteStore = app.noteStore
     // 语音自动发送用应用级 Context 调 send（定位/工具/存储都用得着，不需要 Activity）
     private val appContext: Context = app.applicationContext
+
+    /** 统一按住说话控制器（普通模式、大字模式主界面及经典通话共用） */
+    val holdTalk = HoldTalkController(viewModelScope)
+
+    /** 统一豆包全双工通话控制器（普通模式、大字模式共用） */
+    val callController = DuplexCallController(
+        context = appContext,
+        scope = viewModelScope,
+        onCommitTurn = { asr, answer, paths ->
+            appendDuplexTurn(asr, answer, paths)
+            summarizeCallTurns()
+        },
+        onAttachMapCard = { card -> attachDuplexMapCard(card) },
+    )
+
+    /** 统一启用/刷新普通与大字模式的待机语音唤醒（全部逻辑沉入 WakeHub，页面只负责分发动作） */
+    fun syncStandbyWake(
+        context: Context,
+        settings: AiSettings,
+        shouldSuppressHit: () -> Boolean,
+        onWakeCall: () -> Unit,
+        onWakeText: (text: String, directFromWake: Boolean) -> Unit,
+    ) {
+        val allowed = WakeHub.standbyAllowed.value &&
+            settings.wakeWordEnabled &&
+            !holdTalk.state.value.isBusy &&
+            !shouldSuppressHit() &&
+            com.lvyoubao.app.ui.common.SpeechInput.hasRecordPermission(context)
+        if (!allowed) {
+            WakeHub.stopStandby()
+            return
+        }
+        WakeHub.startStandby(
+            context = context,
+            config = WakeHub.StandbyConfig(
+                sensitivity = settings.voiceBargeIn,
+                asrKey = settings.asrKey,
+                dialect = settings.dialectMode,
+                aiSettings = settings,
+                amapKey = settings.amapKey,
+                preferDirectCall = settings.wakeAction == "call",
+                shouldSuppressHit = { holdTalk.state.value.isBusy || shouldSuppressHit() },
+            ),
+            listener = object : WakeHub.Listener {
+                override fun onWakeCallRequested() {
+                    viewModelScope.launch { onWakeCall() }
+                }
+
+                override fun onTranscript(text: String, fromDirectWake: Boolean) {
+                    viewModelScope.launch {
+                        HotwordCorrector.buildIfNeeded(sessionList.value, quickNotes, memoryFacts)
+                        val corrected = HotwordCorrector.correct(text)
+                        onWakeText(corrected, fromDirectWake)
+                    }
+                }
+            },
+        )
+    }
+
+    /** 统一开启豆包全双工通话 */
+    fun startDuplexCall(settings: AiSettings) {
+        callController.start(
+            settings = settings,
+            persona = DuplexCallSetup.PERSONA_TRAVEL,
+            history = duplexHistory(currentSessionId.value),
+            deviceTools = true,
+            autoCollapse = false,
+        )
+    }
+
+    /** 统一按住说话按下入口（普通/大字主界面与经典通话共用） */
+    fun beginHoldTalk(
+        context: Context,
+        settings: AiSettings,
+        autoSend: Boolean,
+        prompt: String = "请说话",
+        onRequestPermission: () -> Unit,
+    ) {
+        holdTalk.begin(
+            context = context,
+            settings = settings,
+            prompt = prompt,
+            onBeforeMic = { cancelAutoSend() },
+            onRequestPermission = onRequestPermission,
+            onError = { uiMsg, _ -> setTransientError(uiMsg) },
+            onSystemTranscript = { spoken ->
+                HotwordCorrector.buildIfNeeded(sessionList.value, quickNotes, memoryFacts)
+                appendVoiceTranscript(spoken, polish = !autoSend)
+                if (autoSend) send(context)
+            },
+        )
+    }
+
+    /** 统一按住说话松手入口 */
+    fun endHoldTalk(context: Context, settings: AiSettings, autoSend: Boolean) {
+        holdTalk.release(
+            settings = settings,
+            prepareCorpus = { HotwordCorrector.buildIfNeeded(sessionList.value, quickNotes, memoryFacts) },
+            onTranscript = { spoken ->
+                appendVoiceTranscript(spoken, polish = !autoSend)
+                if (autoSend) send(context)
+            },
+            onError = { uiMsg, _ -> setTransientError(uiMsg) },
+        )
+    }
+
+    /** 手指滑入/滑出上滑取消热区 */
+    fun setHoldTalkCancelling(cancelling: Boolean) {
+        holdTalk.setCancelling(cancelling)
+    }
+
+    /** 上滑取消松手：停录删音频并静音恢复待机 */
+    fun cancelHoldTalk() {
+        holdTalk.cancelTalk()
+    }
 
     init {
         // 纠错飞轮：加载用户纠正记录（语音稿 vs 用户实际发送的差异对），AI 纠错时注入提示词
@@ -568,18 +688,46 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                 ),
             )
 
-            // 本地快答：时间/日期/电量这种问题不该走模型。
-            // 灵动模式一直有这条快路（说完就有声），普通/大字模式却要带近 2800 字 prompt
-            // 走一趟模型，同一个问题白白慢 1~2 秒——这就是「那两个模式反应慢」的主因之一。
-            QuickAnswers.answer(context, question)?.let { quick ->
-                // 命中详情（含校时偏差）由 QuickAnswers 内部统一记 "quick" 日志
-                sessions.appendMessage(
-                    sessionId,
-                    SessionMessage(role = "assistant", text = quick, ts = System.currentTimeMillis()),
-                )
-                _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
-                if (settingsValue.autoSpeak) TtsPlayer.speak(context, quick)
-                return@launch
+            // 本地快路与本机动作统一路由（时间/日期/电量/音量/计时闹钟/记事/查记忆/机器人动作）：
+            // 三种模式共用同一套 LocalCommandRouter，不再普通/大字走模型干等或不支持本地指令
+            if (imageAttachments.isEmpty() && textFiles.isEmpty()) {
+                when (
+                    val local = LocalCommandRouter.tryHandle(
+                        context = context,
+                        settings = settingsValue,
+                        text = question,
+                        noteStore = noteStore,
+                        memoryStore = memory,
+                    )
+                ) {
+                    is LocalCommandRouter.Outcome.Replied -> {
+                        sessions.appendMessage(
+                            sessionId,
+                            SessionMessage(role = "assistant", text = local.displayText, ts = System.currentTimeMillis()),
+                        )
+                        _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+                        if ((liveSpeakEnabled || settingsValue.autoSpeak) && local.shouldSpeak) {
+                            TtsPlayer.speak(context, local.spokenText)
+                        }
+                        return@launch
+                    }
+                    is LocalCommandRouter.Outcome.StopConversationRequested -> {
+                        sessions.appendMessage(
+                            sessionId,
+                            SessionMessage(role = "assistant", text = local.replyText, ts = System.currentTimeMillis()),
+                        )
+                        _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+                        if (liveSpeakEnabled || settingsValue.autoSpeak) TtsPlayer.speak(context, local.replyText)
+                        return@launch
+                    }
+                    is LocalCommandRouter.Outcome.LookRequested -> {
+                        val lookResult = captureLookForChat(context, sessionId, local.userAsk, settingsValue)
+                        if (!lookResult) return@launch
+                        // 若已抓拍成功，lookImageData 与提示会注入后续流程；下方继续或直接返回
+                        return@launch
+                    }
+                    LocalCommandRouter.Outcome.NotHandled -> Unit
+                }
             }
 
             // 组装上下文：位置 + 本地记忆（个人飞轮）
@@ -1104,10 +1252,103 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
     }
 
     override fun onCleared() {
-        // 页面销毁（退出模式/换页）时别把播报留在后台继续念
+        // 页面销毁（退出模式/换页）时别把播报或录音留在后台
+        holdTalk.cancel()
+        callController.destroy()
         liveTts?.cancel()
         liveTts = null
         super.onCleared()
+    }
+
+    /** 普通/大字模式触发 LOOK「看看前面」：静默抓拍并走标准识图问答流 */
+    private suspend fun captureLookForChat(
+        context: Context,
+        sessionId: String,
+        userAsk: String,
+        settingsValue: AiSettings,
+    ): Boolean {
+        if (!CameraSnapshotHelper.hasCameraPermission(context)) {
+            val msg = "需要相机权限才能帮你看，请点左下角拍照按钮授权一次。"
+            sessions.appendMessage(sessionId, SessionMessage(role = "assistant", text = msg, ts = System.currentTimeMillis()))
+            _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+            if (liveSpeakEnabled || settingsValue.autoSpeak) TtsPlayer.speak(context, msg)
+            return false
+        }
+        val snap = CameraSnapshotHelper.takeSnapshot(context)
+        if (snap == null) {
+            val msg = "没拍下来（相机没开起来），请再试一次。"
+            sessions.appendMessage(sessionId, SessionMessage(role = "assistant", text = msg, ts = System.currentTimeMillis()))
+            _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+            if (liveSpeakEnabled || settingsValue.autoSpeak) TtsPlayer.speak(context, msg)
+            return false
+        }
+        val out = ByteArrayOutputStream()
+        snap.bitmap.compress(Bitmap.CompressFormat.JPEG, 75, out)
+        val path = saveSentImage(context, out.toByteArray())
+        val prompt = "这是刚拍到的画面，用户问题是：「$userAsk」。请直接给出清晰答案，不用重复客套。"
+        val payload = listOf(
+            OutMessage("system", AiClient.SYSTEM_PROMPT),
+            OutMessage(role = "user", text = prompt, images = listOf(snap.dataUrl)),
+        )
+        if (liveSpeakEnabled) EdgeTts.warmUp()
+        _stream.value = StreamState()
+        liveTts?.cancel()
+        liveTts = null
+        _speech.value = Speech.NONE
+        AiClient(settingsValue).chat(
+            messages = payload,
+            thinking = false,
+            searchEnabled = false,
+            onAnswer = { d ->
+                _stream.update { cur -> val s = cur ?: StreamState(); s.copy(answer = s.answer + d) }
+                if (liveSpeakEnabled && d.isNotBlank()) {
+                    val live = liveTts ?: LiveTtsSession(appContext).also {
+                        it.onFirstSound = { _speech.value = Speech.STREAMING }
+                        liveTts = it
+                        _speech.value = Speech.PENDING
+                    }
+                    live.feed(d)
+                }
+            },
+        ).fold(
+            onSuccess = { reply ->
+                sessions.appendMessage(
+                    sessionId,
+                    SessionMessage(
+                        role = "assistant",
+                        text = reply.answer,
+                        steps = reply.steps,
+                        action = reply.action,
+                        ts = System.currentTimeMillis(),
+                    ),
+                )
+                // 把刚拍下的图补记到刚才那条用户消息里，方便回顾
+                path?.let {
+                    sessions.appendMessage(
+                        sessionId,
+                        SessionMessage(role = "user", text = "📷 刚才拍的画面", hadImage = true, imagePaths = listOf(it), ts = System.currentTimeMillis() - 1),
+                    )
+                }
+                _stream.value = null
+                _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
+                val live = liveTts
+                live?.finish()
+                liveTts = null
+                if (live == null) _speech.value = Speech.NONE
+                else viewModelScope.launch {
+                    val ok = live.awaitSpoken(4_000)
+                    _speech.value = if (ok) Speech.STREAMING else Speech.FALLBACK
+                }
+            },
+            onFailure = { e ->
+                liveTts?.cancel()
+                liveTts = null
+                _speech.value = Speech.NONE
+                _stream.value = null
+                _ui.update { it.copy(sending = false, error = e.message ?: "识图请求失败") }
+            },
+        )
+        return true
     }
 
     companion object {

@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
@@ -94,16 +95,19 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.data.ChatSession
-import com.lvyoubao.app.data.HotwordCorrector
 import com.lvyoubao.app.data.LocationContext
 import com.lvyoubao.app.data.RuleValidator
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.observation.FatigueBand
 import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.ChatViewModel
-import com.lvyoubao.app.ui.common.SpeechInput
+import com.lvyoubao.app.ui.common.DoubaoCallOverlay
+import com.lvyoubao.app.ui.common.HoldTalkFullScreenOverlay
 import com.lvyoubao.app.ui.common.RichContent
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.VoiceCallOverlay
+import com.lvyoubao.app.ui.common.WakeHub
+import com.lvyoubao.app.ui.common.rememberHoldTalkGestureModifier
 import com.lvyoubao.app.ui.common.CardShareDialog
 import com.lvyoubao.app.ui.common.CardShareTipDialog
 import com.lvyoubao.app.ui.common.rememberCardShareState
@@ -152,7 +156,24 @@ fun AskScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
-    BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
+
+    val holdState by vm.holdTalk.state.collectAsState()
+    val duplexUi by vm.callController.ui.collectAsState()
+    var showClassicCall by remember { mutableStateOf(false) }
+    val standbyAllowed by WakeHub.standbyAllowed.collectAsState()
+    val wakeOneShot by WakeHub.listeningOneShot.collectAsState()
+    val ttsState by TtsPlayer.state.collectAsState()
+
+    BackHandler(enabled = drawerState.isOpen || duplexUi.active || showClassicCall) {
+        when {
+            showClassicCall -> {
+                TtsPlayer.stop()
+                showClassicCall = false
+            }
+            duplexUi.active -> vm.callController.hangUp()
+            drawerState.isOpen -> scope.launch { drawerState.close() }
+        }
+    }
 
     var locationDismissed by remember { mutableStateOf(false) }
     var locationGranted by remember { mutableStateOf(LocationContext.hasPermission(context)) }
@@ -204,127 +225,76 @@ fun AskScreen(
         }
     }
 
-    // 语音提问：系统识别优先；没有系统识别时录音 → 大模型云端转文字（设置里填「语音识别 Key」）
-    var listening by remember { mutableStateOf(false) }
-    var recording by remember { mutableStateOf<SpeechInput.Recording?>(null) }
-
-    // ---------- 唤醒词（端侧 KWS 零配额；唤醒后按设置进通话或单次语音） ----------
-    var wakeListening by remember { mutableStateOf(false) }
-    var showWakeCall by remember { mutableStateOf(false) }
-    val wakeScope = rememberCoroutineScope()
-    val standbyAllowed by com.lvyoubao.app.ui.common.WakeHub.standbyAllowed.collectAsState()
-    fun dispatchWake() {
-        // 播报中喊唤醒词 = 打断答非所问的回答：先停播再出「我在」，别叠音
-        com.lvyoubao.app.ui.common.TtsPlayer.stop()
-        com.lvyoubao.app.ui.spark.SparkAck.play(context) // 回应声（与灵动模式同款：会话同音色合成的「我在」）
-        if (settings.wakeAction == "call" && settings.callEngine == "doubao" &&
-            settings.duplexApiKey.isNotBlank() && SpeechInput.hasRecordPermission(context)
-        ) {
-            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
-            showWakeCall = true
-        } else {
-            wakeListening = true
-            wakeScope.launch {
-                // 等回应声播完再开麦，别把「我在」录进问题里
-                kotlinx.coroutines.delay(com.lvyoubao.app.ui.spark.SparkAck.DURATION_MS)
-                com.lvyoubao.app.ui.common.WakeHub.startOneShot(context, settings.asrKey, settings.dialectMode) { text ->
-                    wakeListening = false
-                    if (!text.isNullOrBlank()) {
-                        // 结束词：停播报、不送 AI、不落输入框，直接回待机（见 WakeHub 待机监听）
-                        if (com.lvyoubao.app.data.RobotIntent.matchEndFast(text)) {
-                            com.lvyoubao.app.ui.common.TtsPlayer.stop()
-                        } else vm.appendVoiceTranscript(text) // 自带「自动发送」调度
-                    }
-                }
-            }
-        }
-    }
+    // ---------- 统一待机唤醒（与大字/灵动共用 WakeHub） ----------
     LaunchedEffect(
-        standbyAllowed, settings.wakeWordEnabled, settings.wakeAction, settings.duplexApiKey,
-        recording, listening, wakeListening, showWakeCall,
+        standbyAllowed,
+        settings.wakeWordEnabled,
+        settings.wakeAction,
+        settings.callEngine,
+        settings.duplexApiKey,
+        settings.asrKey,
+        settings.dialectMode,
+        settings.voiceBargeIn,
+        holdState.recording,
+        holdState.listening,
+        duplexUi.active,
+        showClassicCall,
     ) {
-        val can = standbyAllowed && settings.wakeWordEnabled && !showWakeCall && recording == null &&
-            !listening && !wakeListening && SpeechInput.hasRecordPermission(context)
-        if (can) {
-            com.lvyoubao.app.ui.spark.SparkAck.preload(context) // 合成要时间，待机时就备好
-            com.lvyoubao.app.ui.common.WakeHub.startStandby(context) { dispatchWake() }
-        } else com.lvyoubao.app.ui.common.WakeHub.stopStandby()
+        vm.syncStandbyWake(
+            context = context,
+            settings = settings,
+            shouldSuppressHit = { duplexUi.active || showClassicCall },
+            onWakeCall = {
+                if (settings.callEngine == "doubao") {
+                    vm.startDuplexCall(settings)
+                } else {
+                    showClassicCall = true
+                }
+            },
+            onWakeText = { text, _ ->
+                // 与灵动模式同口径：唤醒后听一句话，说完直接发出去提问
+                vm.appendVoiceTranscript(text, polish = false)
+                vm.send(context)
+            },
+        )
     }
     DisposableEffect(Unit) {
         onDispose {
-            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
-            com.lvyoubao.app.ui.common.WakeHub.cancelOneShot()
+            WakeHub.stopStandby()
+            WakeHub.cancelOneShot()
         }
     }
 
-    fun beginCloudRecord() {
-        // 按住说话用 MediaRecorder(MIC)，待机唤醒的 AudioRecord 还占着 builtin mic，
-        // 不停掉就直接 start() 会拿到 -38（录音被占用）。必须在开录前同步让出麦克风，
-        // 不能等下面 LaunchedEffect 观察 recording 变化——那时 MediaRecorder 已经 start 过了。
-        com.lvyoubao.app.ui.common.WakeHub.stopStandby()
-        SpeechInput.startRecording(context)
-            .onSuccess { recording = it }
-            .onFailure {
-                vm.setTransientError("录音启动失败，请再试一次")
-                com.lvyoubao.app.ui.common.WakeHub.resumeStandby() // 失败后恢复待机，否则喊唤醒词没反应
-            }
-    }
-
+    // ---------- 统一按住说话（与大字/灵动共用 HoldTalkController） ----------
+    var holdTalkAutoSend by remember { mutableStateOf(false) }
     val recordPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) beginCloudRecord() else {
-            vm.setTransientError("没有录音权限，无法把语音转成文字")
-            com.lvyoubao.app.ui.common.WakeHub.resumeStandby()
-        }
-    }
-
-    fun startVoice() {
-        if (listening || recording != null) return
-        // 再说话=上一段的自动发送倒计时作废，说完这段重新算
-        vm.cancelAutoSend()
-        if (settings.asrKey.isNotBlank()) {
-            // 配了大模型 Key 就走云端转文字：不依赖手机自带识别（很多 ROM 缺失或常年报忙）
-            if (SpeechInput.hasRecordPermission(context)) beginCloudRecord()
-            else recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        } else if (SpeechInput.isAvailable(context)) {
-            // 系统识别同样要开麦：先停待机唤醒，避免与常驻 AudioRecord 抢 mic
-            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
-            listening = true
-            scope.launch {
-                HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
-                SpeechInput.listen(context, "说出来，我帮你问")
-                    .onSuccess { vm.appendVoiceTranscript(it) }
-                    .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
-                listening = false
-                com.lvyoubao.app.ui.common.WakeHub.resumeStandby() // 系统识别失败/结束都恢复待机
-            }
+        if (granted) {
+            vm.beginHoldTalk(context, settings, autoSend = holdTalkAutoSend, prompt = "说出来，我帮你问") {}
         } else {
-            vm.setTransientError(
-                "这台手机没有语音识别。可在设置里填「语音识别 Key」（siliconflow.cn 免费申请）用大模型转文字，或直接打字",
-            )
+            vm.setTransientError("没有录音权限，无法把语音转成文字")
+            vm.holdTalk.onPermissionDenied()
         }
     }
-
-    /** 松手：停止录音 → 转文字 → 追加进输入框（可连说几段，点发送才发） */
-    fun stopVoice() {
-        val rec = recording ?: return
-        recording = null
-        listening = true
-        scope.launch {
-            SpeechInput.stopAndTranscribe(rec, settings.asrKey, settings.dialectMode)
-                .onSuccess {
-                    HotwordCorrector.buildIfNeeded(vm.sessionList.value, vm.quickNotes, vm.memoryFacts)
-                    vm.appendVoiceTranscript(it)
-                }
-                .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
-            listening = false
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { recording?.let { SpeechInput.cancelRecording(it) } }
-    }
+    @Composable
+    fun holdTalkModifier(autoSend: Boolean): Modifier = rememberHoldTalkGestureModifier(
+        key = "ask-hold-$autoSend",
+        onBegin = {
+            holdTalkAutoSend = autoSend
+            vm.beginHoldTalk(
+                context = context,
+                settings = settings,
+                autoSend = autoSend,
+                prompt = "说出来，我帮你问",
+            ) {
+                recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        },
+        onCancelStateChange = { vm.setHoldTalkCancelling(it) },
+        onRelease = { vm.endHoldTalk(context, settings, autoSend = autoSend) },
+        onCancel = { vm.cancelHoldTalk() },
+    )
 
     // 自动更新就绪弹窗：新版包后台下载完成就弹「安装」，点稍后本轮不再打扰
     val autoUpdateState by com.lvyoubao.app.data.AutoUpdater.state.collectAsState()
@@ -348,15 +318,16 @@ fun AskScreen(
         }
     }
 
-    // 自动播报：开关打开时，**AI 一开始吐字就按句开播**（与灵动模式同一条流水线）
+    // 自动播报：开关打开或经典通话中，AI 一开始吐字就按句开播（豆包 S2S 自己出声，不开 TTS）
     var spokenTs by remember { mutableStateOf(0L) }
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
-    LaunchedEffect(settings.autoSpeak) { vm.setLiveSpeakEnabled(settings.autoSpeak) }
-    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak) {
+    val liveSpeak = !duplexUi.active && (showClassicCall || settings.autoSpeak)
+    LaunchedEffect(liveSpeak) { vm.setLiveSpeakEnabled(liveSpeak) }
+    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showClassicCall, duplexUi.active) {
         val msg = lastAssistant ?: return@LaunchedEffect
         // 只读 20 秒内的新回答：切页面/切会话/重进 App 不再把旧消息读一遍
         val fresh = System.currentTimeMillis() - msg.ts < 20_000
-        if (settings.autoSpeak && msg.ts != spokenTs && fresh) {
+        if (!duplexUi.active && (showClassicCall || settings.autoSpeak) && msg.ts != spokenTs && fresh) {
             spokenTs = msg.ts
             // 等这一轮的播报裁决：PENDING = 流式还在接第一句（4 字首句实测要 1.7 秒才出声），
             // 最多等 4.5 秒；已经出声就跳过，只有彻底没出声才整段兜底
@@ -376,7 +347,7 @@ fun AskScreen(
         } else {
             com.lvyoubao.app.data.LogStore.log(
                 "autospeak",
-                "跳过本次：开关=${settings.autoSpeak} 已读过=${msg.ts == spokenTs} 是否新鲜=$fresh",
+                "跳过本次：开关=${settings.autoSpeak} 通话=$showClassicCall 已读过=${msg.ts == spokenTs} 是否新鲜=$fresh",
             )
         }
     }
@@ -511,6 +482,13 @@ fun AskScreen(
                         .clickable { onOpenObservation() },
                 )
                 Spacer(Modifier.width(6.dp))
+                IconButton(onClick = {
+                    keyboard?.hide()
+                    if (settings.callEngine == "doubao") vm.startDuplexCall(settings)
+                    else showClassicCall = true
+                }) {
+                    Icon(Icons.Default.Phone, contentDescription = "通话")
+                }
                 IconButton(onClick = { vm.newSession() }) {
                     Icon(Icons.Default.Add, contentDescription = "新建会话")
                 }
@@ -750,7 +728,11 @@ fun AskScreen(
                             .onFocusChanged { if (it.isFocused) vm.cancelAutoSend() },
                         placeholder = {
                             Text(
-                                if (recording != null) "正在听你说…" else "发消息，或说说你想去哪…",
+                                when {
+                                    holdState.isRecording -> "正在听你说…（${holdState.recordTick}s）"
+                                    wakeOneShot -> "唤醒聆听中…"
+                                    else -> "发消息，或说说你想去哪…"
+                                },
                             )
                         },
                         maxLines = 4,
@@ -829,28 +811,16 @@ fun AskScreen(
                                 .size(48.dp)
                                 .clip(CircleShape)
                                 .background(
-                                    if (recording != null) MaterialTheme.colorScheme.error
+                                    if (holdState.isRecording) MaterialTheme.colorScheme.error
                                     else MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                                 )
-                                .pointerInput("ask-hold-talk") {
-                                    detectTapGestures(
-                                        onPress = {
-                                            startVoice()
-                                            try {
-                                                awaitRelease()
-                                            } catch (_: Exception) {
-                                                // 手势被系统打断也按松手处理
-                                            }
-                                            stopVoice()
-                                        },
-                                    )
-                                },
+                                .then(holdTalkModifier(autoSend = false)),
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
                                 when {
-                                    recording != null -> "🎙"
-                                    listening -> "…"
+                                    holdState.isRecording -> "🎙"
+                                    holdState.listening -> "…"
                                     else -> "🎤"
                                 },
                                 fontSize = 20.sp,
@@ -877,9 +847,55 @@ fun AskScreen(
         }
     }
 
-    // 唤醒词拉起的豆包全双工通话（唤醒后=直接通话）
-    if (showWakeCall) {
-        AskDuplexCall(vm, settings, currentSessionId) { showWakeCall = false }
+    // 统一通话浮层：豆包全双工 vs 经典串行通话
+    if (duplexUi.active && duplexUi.uiVisible) {
+        DoubaoCallOverlay(
+            state = duplexUi.duplexState,
+            turns = duplexUi.turns,
+            hint = duplexUi.hint,
+            photos = duplexUi.photos,
+            onPickCamera = {},
+            onPickGallery = {},
+            onRemovePhoto = { vm.callController.removePhoto(it) },
+            onBargeIn = { vm.callController.bargeIn() },
+            onHangUp = { vm.callController.hangUp() },
+            showPhotoActions = false,
+            startedAtMs = duplexUi.startedAtMs,
+        )
+    } else if (showClassicCall) {
+        VoiceCallOverlay(
+            messages = messages,
+            streamState = streamState,
+            sending = state.sending,
+            attachments = state.attachments,
+            listening = holdState.listening,
+            recording = holdState.recording,
+            recordTick = holdState.recordTick,
+            ttsSpeaking = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
+            ttsUnavailable = (ttsState as? TtsPlayer.State.Unavailable)?.reason,
+            holdModifier = holdTalkModifier(autoSend = true),
+            onPickCamera = {
+                keyboard?.hide()
+                val uri = newCameraImageUri(context)
+                pendingCameraUri = uri
+                cameraLauncher.launch(uri)
+            },
+            onPickGallery = {
+                keyboard?.hide()
+                galleryLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+            onRemoveAttachment = { vm.removeAttachment(it) },
+            onHangUp = {
+                TtsPlayer.stop()
+                showClassicCall = false
+            },
+            showPhotoActions = true,
+            holdState = holdState,
+        )
+    } else {
+        HoldTalkFullScreenOverlay(state = holdState, releaseLabel = "记下来")
     }
 }
 

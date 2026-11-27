@@ -1600,6 +1600,10 @@ class LiveTtsSession(context: Context) {
     @Volatile
     var onFirstSound: (() -> Unit)? = null
 
+    /** 整轮播报结束回调（无论成功还是兜底退出）；主线程异步由调用方调度 */
+    @Volatile
+    var onFinished: ((spoke: Boolean) -> Unit)? = null
+
     init {
         // 音轨一开播就算「接上了」。不能等 playStreamedPiece 返回——它要等整段流式音频
         // 播完才返回（实测 4.3 秒），而兜底判定在 4 秒左右就问了，晚一步就等于每次都误判成没出声。
@@ -1657,6 +1661,7 @@ class LiveTtsSession(context: Context) {
                 // 兜底：任何路径退出时都要给出裁决，否则调用方会一直等
                 if (!decision.isCompleted) decision.complete(spoke)
                 TtsPlayer.endStreamSession(gen)
+                runCatching { onFinished?.invoke(spoke) }
                 // 这一轮结束：顺手把状态监听协程收掉，别留一个常驻 collect
                 job.cancel()
             }
@@ -1731,9 +1736,9 @@ class LiveTtsSession(context: Context) {
         if (!firstPiece.complete(piece)) pieces.trySend(piece)
     }
 
-    /** 从 [from] 起找句末标点；首句允许在逗号处切（10 字起），后续要求 40 字起 */
+    /** 从 [from] 起找句末标点；首句允许在逗号处切（8 字起），后续要求 40 字起 */
     private fun findCut(from: Int, isFirst: Boolean): Int {
-        val pauseMin = if (isFirst) 10 else 40
+        val pauseMin = if (isFirst) 8 else 40
         for (i in from until buffer.length) {
             val c = buffer[i]
             if ((c in "。！？!?；;…" || c.code == 10) && i - from + 1 >= 3) return i
@@ -1746,6 +1751,6 @@ class LiveTtsSession(context: Context) {
     private companion object {
         const val MIN_FIRST_PIECE = 4
         const val MIN_PIECE = 10
-        const val FIRST_TTS_CHARS = 12
+        const val FIRST_TTS_CHARS = 18
     }
 }

@@ -92,14 +92,11 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lvyoubao.app.R
 import com.lvyoubao.app.TravelApp
 import com.lvyoubao.app.ui.map.RouteMapCard
-import com.lvyoubao.app.data.AppTools
-import com.lvyoubao.app.data.DeviceTools
-import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.duplex.DoubaoDuplexClient
-import com.lvyoubao.app.data.duplex.DuplexCallSetup
-import com.lvyoubao.app.ui.common.SpeechInput
-import com.lvyoubao.app.ui.largetext.DoubaoCallOverlay
-import com.lvyoubao.app.ui.largetext.DuplexTurnUi
+import com.lvyoubao.app.ui.common.DoubaoCallOverlay
+import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.VoiceCallOverlay
+import com.lvyoubao.app.ui.common.rememberHoldTalkGestureModifier
 import com.lvyoubao.app.ui.settings.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -135,288 +132,57 @@ fun SparkModeScreen(
     // 触摸节流：手指划过时每个 move 事件都会重排息屏倒计时，没必要
     var lastTouchAt by remember { mutableStateOf(0L) }
 
-    // ---------- 豆包全双工实时通话（端到端 S2S，灵动模式顶栏 📞 直达） ----------
-    // 灵动模式没有大字模式那排「通话」按钮，这里给一条独立入口：
-    // 通话期间麦克风整条让给豆包（停朗读/待机唤醒），挂断后恢复。
+    // ---------- 统一语音通话（灵动模式顶栏 📞 支持豆包全双工与经典串行通话） ----------
     val settings by vm.settings.collectAsState()
-    var showDuplexCall by remember { mutableStateOf(false) }
-    // 通话进行中但界面已收起（回萌眼待机）：**通话不挂断**，人再开口或点电话键就重新展开
-    var callUiVisible by remember { mutableStateOf(false) }
-    val duplexClient = remember { DoubaoDuplexClient(context) }
-    val duplexState by duplexClient.state.collectAsState()
-    var duplexAsr by remember { mutableStateOf("") }
-    var duplexAnswer by remember { mutableStateOf("") }
-    var duplexHint by remember { mutableStateOf<String?>(null) }
-    // 最后一次「有人在说话」的时间：朗读完 + 几秒没人说话就把界面收回萌眼（不挂断）
-    var lastVoiceAt by remember { mutableStateOf(System.currentTimeMillis()) }
-    // 通话起算时刻：界面收起再展开时通话计时接着走
-    var callStartedAt by remember { mutableStateOf(0L) }
-    // 本轮已被本机能力接走的识别文本：模型那条迟到的回答不再落第二张卡片
-    var localHandledAsr by remember { mutableStateOf("") }
-    var localHandledAt by remember { mutableStateOf(0L) }
-    // 通话中 FC 工具带回的地图卡缓冲：随本轮回答一起挂到会话
-    val duplexMapCards = remember { mutableStateListOf<MapCardData>() }
-    // 通话会话流（识别=右、回答=左），覆盖层直接渲染
-    val duplexTurns = remember { mutableStateListOf<DuplexTurnUi>() }
-    val callScope = rememberCoroutineScope()
+    val duplexUi by vm.callController.ui.collectAsState()
+    val holdState by vm.holdTalk.state.collectAsState()
+    val isStreaming by vm.isStreaming.collectAsState()
+    val classicMessages by vm.classicCallMessages.collectAsState()
+    val classicStream by vm.classicCallStream.collectAsState()
+    val ttsState by TtsPlayer.state.collectAsState()
+    var showClassicCall by remember { mutableStateOf(false) }
 
-    fun duplexNewUserTurn() {
-        duplexTurns.add(DuplexTurnUi("user", "", streaming = true))
-        if (duplexTurns.size > 30) duplexTurns.removeAt(0)
-    }
-    fun duplexUpdateUser(text: String) {
-        val i = duplexTurns.lastIndex
-        if (i >= 0 && duplexTurns[i].role == "user") duplexTurns[i] = duplexTurns[i].copy(text = text)
-        else { duplexNewUserTurn(); duplexUpdateUser(text) }
-    }
-    fun duplexUpdateAssistant(text: String, done: Boolean) {
-        val i = duplexTurns.lastIndex
-        if (i >= 0 && duplexTurns[i].role == "assistant") {
-            duplexTurns[i] = duplexTurns[i].copy(text = text, streaming = !done)
-        } else {
-            duplexTurns.add(DuplexTurnUi("assistant", text, streaming = !done))
-            if (duplexTurns.size > 30) duplexTurns.removeAt(0)
-        }
-    }
+    val showDuplexCall = duplexUi.active
+    val callUiVisible = duplexUi.uiVisible
+    val duplexState = duplexUi.duplexState
+    val callElapsedSec = duplexUi.elapsedSec
 
-    LaunchedEffect(Unit) {
-        duplexClient.onEvent.collect { ev ->
-            when (ev) {
-                // 服务端切新 item = 新一轮说话：上一轮的识别文字先清掉，避免跨轮越滚越长
-                is DoubaoDuplexClient.Event.AsrStarted -> {
-                    duplexAsr = ""
-                    duplexNewUserTurn()
-                }
-                // 注意：豆包的 transcription.delta 是「累计快照」而不是增量，直接覆盖；
-                // 早前用 += 拼会出现「你你好你好啊」这种叠字。
-                is DoubaoDuplexClient.Event.Asr -> {
-                    duplexAsr = ev.text
-                    duplexUpdateUser(ev.text)
-                    lastVoiceAt = System.currentTimeMillis()
-                    // 界面收起时只要有人开口，就把通话界面拉回来（通话一直没断）
-                    if (!callUiVisible && ev.text.isNotBlank()) {
-                        callUiVisible = true
-                        vm.setShowEyes(false)
-                    }
-                    if (ev.isFinal && ev.text.isNotBlank()) {
-                        val said = ev.text
-                        // 先说给本机能力听：机器人动作 / 电量 / 音量 / 计时 / 记事 / 记忆查找命中就本地执行，
-                        // 再用豆包音色把确认话术说出来（模型那条回答同时打断，避免各说一套）。
-                        callScope.launch {
-                            val confirm = runCatching { vm.handleCallCommand(context, said) }.getOrNull()
-                            if (confirm != null) {
-                                duplexClient.cancelResponse()
-                                duplexClient.speak(confirm)
-                                duplexAnswer = confirm
-                                duplexUpdateAssistant(confirm, done = true)
-                                localHandledAsr = said
-                                localHandledAt = System.currentTimeMillis()
-                                SparkChatStore.appendDuplexTurn(said, confirm)
-                                vm.summarizeCallTurns()
-                            }
-                        }
-                    }
-                }
-                is DoubaoDuplexClient.Event.Answer -> {
-                    lastVoiceAt = System.currentTimeMillis()
-                    if (ev.isFinal) {
-                        duplexAnswer = ev.text
-                    } else {
-                        // 兼容两种下发：累计快照直接替换，真增量才追加
-                        duplexAnswer = if (duplexAnswer.isNotEmpty() && ev.text.startsWith(duplexAnswer)) ev.text
-                        else duplexAnswer + ev.text
-                    }
-                    duplexUpdateAssistant(duplexAnswer, done = ev.isFinal)
-                }
-                // 模型决定调工具（天气/附近/路线）：本地执行，结果回传，模型接着说。
-                // 机器人动作/电量/计时这类本机能力不走 FC——Asr final 时已经抢先本地执行了。
-                is DoubaoDuplexClient.Event.ToolCall -> {
-                    lastVoiceAt = System.currentTimeMillis()
-                    val ackJob = callScope.launch {
-                        delay(1_200)
-                        duplexClient.speak("我查一下哈") // 执行超过 1.2 秒先出声，别让通话死寂
-                    }
-                    callScope.launch {
-                        val result = withContext(Dispatchers.IO) {
-                            runCatching {
-                                AppTools.execute(context, settings, ev.name, ev.arguments) { duplexMapCards.add(it) }
-                            }.getOrElse { "工具执行失败：${it.message ?: "未知原因"}。请如实告知用户。" }
-                        }
-                        ackJob.cancel()
-                        duplexClient.sendToolResult(ev.callId, result)
-                    }
-                }
-                // 识别流里蹦出急停词：客户端已停播+取消回答，这里把机器人也停住（本地链的急停要等句尾）
-                is DoubaoDuplexClient.Event.StopRequested -> {
-                    callScope.launch {
-                        DeviceTools.stopRobot(context, settings)
-                        duplexClient.speak("好的，已停下")
-                    }
-                }
-                // 识别流里出现结束词：挂断通话回到待机（不等 AI 决定，也不回话）
-                is DoubaoDuplexClient.Event.HangupRequested -> {
-                    duplexClient.close()
-                    showDuplexCall = false
-                    callUiVisible = false
-                    vm.setShowEyes(true)
-                    com.lvyoubao.app.ui.common.TtsPlayer.stop()
-                }
-                // 一轮收口（response.done / 被打断的残句都走这）：落会话历史的唯一入口。
-                is DoubaoDuplexClient.Event.TurnDone -> {
-                    lastVoiceAt = System.currentTimeMillis()
-                    duplexAnswer = ev.answer
-                    duplexUpdateAssistant(ev.answer, done = true)
-                    if (ev.answer.isNotBlank()) {
-                        // 本轮若已被本机能力接走（并已 cancelResponse），模型这条是残留的下发：
-                        // 只在通话界面显示，不再往会话里落第二张卡片。
-                        val handledLocally = ev.asr.isNotBlank() &&
-                            ev.asr == localHandledAsr &&
-                            System.currentTimeMillis() - localHandledAt < 15_000L
-                        if (!handledLocally) {
-                            // 一轮结束落灵动会话流：挂断后到「聊天」能回看，下一轮对话也带得上
-                            SparkChatStore.appendDuplexTurn(ev.asr, ev.answer)
-                            vm.summarizeCallTurns() // 通话也是会话：攒够了就总结进长期记忆
-                        }
-                    }
-                    duplexMapCards.lastOrNull()?.let { SparkChatStore.attachMapCard(it) }
-                    duplexMapCards.clear()
-                }
-                is DoubaoDuplexClient.Event.SessionReady -> {
-                    duplexAsr = ""
-                    duplexAnswer = ""
-                    duplexHint = null
-                    duplexMapCards.clear()
-                    duplexTurns.clear()
-                }
-                is DoubaoDuplexClient.Event.Error -> duplexHint = when (ev.code) {
-                    "CONFIG" -> "未配置豆包实时语音 Key，请到设置 → 凭证中心 → 豆包 填写"
-                    else -> "通话出错：${ev.message}"
-                }
-                else -> Unit
-            }
-        }
-    }
-
-    DisposableEffect(showDuplexCall) {
-        if (showDuplexCall) {
-            vm.setDuplexAudioActive(true)
-            // 通话期间不许熄屏，并且压住 WiFi 省电：
-            // 这台设备息屏后 WiFi 会睡，豆包实时流一断就「黑屏之后没声音」。
-            // 钉住是按「通话会话」算的，界面收起（callUiVisible=false）不解钉，挂断才解。
-            com.lvyoubao.app.ui.common.ScreenAwake.pin("全双工通话")
-            com.lvyoubao.app.ui.common.NetKeep.acquire(context, "duplex-call")
-            callStartedAt = System.currentTimeMillis()
-            duplexAsr = ""
-            duplexAnswer = ""
-            duplexHint = null
-            if (settings.duplexApiKey.isBlank()) {
-                duplexHint = "未配置豆包实时语音 Key，请到设置 → 凭证中心 → 豆包 填写"
-            } else if (!SpeechInput.hasRecordPermission(context)) {
-                duplexHint = "需要麦克风权限才能全双工通话"
-            } else {
-                // 记忆 + 能力一次带上：小源人设/长期记忆/时间位置进 instructions，
-                // 共享受话的最近成对 QA 进 dialog_context，天气/附近/路线进 tools
-                val setup = DuplexCallSetup.build(
-                    context,
-                    persona = DuplexCallSetup.PERSONA_SPARK,
-                    history = SparkChatStore.historyBudget(8_000),
-                    settings = settings,
-                    // 灵动模式不挂本机能力工具：本地命令链更快，双挂会重复执行
-                    deviceTools = false,
-                )
-                duplexClient.start(
-                    settings.duplexApiKey, settings.duplexVoice,
-                    systemPrompt = setup.instructions,
-                    callTools = setup.tools,
-                    historyContext = setup.dialogContext,
-                    dialect = setup.dialect,
-                    music = setup.music,
-                )
-            }
-        }
-        onDispose {
-            duplexClient.close()
-            vm.setDuplexAudioActive(false)
-            com.lvyoubao.app.ui.common.NetKeep.release("duplex-call")
-            com.lvyoubao.app.ui.common.ScreenAwake.unpin("全双工通话")
-        }
-    }
-    // 彻底退出应用时释放 OkHttp 线程池（与大字模式同口径）
-    DisposableEffect(Unit) {
-        onDispose { duplexClient.destroy() }
-    }
     // 通话中返回键 = 挂断（不能直接退出应用）
-    BackHandler(enabled = showDuplexCall) {
-        duplexClient.close()
-        showDuplexCall = false
-        callUiVisible = false
-        vm.setShowEyes(true)
-    }
-
-    // 通话中「回答播完 + 几秒没人说话」→ 界面收回萌眼动画，但**不挂断**：
-    // 麦克风仍归豆包，人再开口（ASR 到达）或点电话键就重新展开，聊天不断线。
-    LaunchedEffect(showDuplexCall) {
-        if (!showDuplexCall) return@LaunchedEffect
-        lastVoiceAt = System.currentTimeMillis()
-        while (true) {
-            delay(1_000)
-            val silentMs = System.currentTimeMillis() - lastVoiceAt
-            val listening = duplexState == DoubaoDuplexClient.State.LISTENING ||
-                duplexState == DoubaoDuplexClient.State.CONNECTED
-            // 刚接通还没说过话给 10 秒（有充足时间开口），一轮回答之后按 6 秒收
-            val waitMs = if (duplexAsr.isBlank() && duplexAnswer.isBlank()) 10_000L else 6_000L
-            if (callUiVisible && listening && silentMs > waitMs) {
-                callUiVisible = false
-                vm.setShowEyes(true)
+    BackHandler(enabled = showDuplexCall || showClassicCall) {
+        when {
+            showClassicCall -> {
+                TtsPlayer.stop()
+                showClassicCall = false
+                vm.setClassicCallActive(false)
             }
-        }
-    }
-    // 每回到「聆听」态（一轮回答刚播完）重新起算静默时长：只在朗读完之后才收界面，
-    // 说话/思考过程中不会突然被收走。
-    LaunchedEffect(duplexState) {
-        if (duplexState == DoubaoDuplexClient.State.LISTENING) {
-            lastVoiceAt = System.currentTimeMillis()
+            showDuplexCall -> vm.callController.hangUp()
         }
     }
 
-    // 电话键：没通话就起一通；通话中（界面已收起）就重新展开，不重连
+    // 电话键：按设置选择豆包全双工或经典串行；豆包收起回萌眼时点一下重新展开
     val enterCall: () -> Unit = {
-        if (!showDuplexCall) showDuplexCall = true
-        callUiVisible = true
-        lastVoiceAt = System.currentTimeMillis() // 手动展开后重新起算静默，别刚展开就被收走
-        vm.setShowEyes(false)
+        if (settings.callEngine == "classic") {
+            vm.setClassicCallActive(true)
+            showClassicCall = true
+        } else if (!showDuplexCall) {
+            vm.startDuplexCall()
+        } else {
+            vm.callController.expandUi()
+        }
     }
     // 唤醒后动作=直接通话（设置）：VM 发事件，界面拉起通话
     LaunchedEffect(Unit) {
         vm.wakeCallRequest.collect { enterCall() }
     }
-    // 通话中（界面已收起）电话键单独一个状态：底色深一档 + 右上角呼吸点，
-    // 不用在右边「按住说话」上写字，一眼就知道通话还没断
+    // 通话中（界面已收起）电话键呼吸点动效
     val callPulse by rememberInfiniteTransition(label = "callPulse").animateFloat(
         initialValue = 0.22f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
         label = "callPulseAlpha",
     )
-    // 挂断：胶囊上的红键和全屏通话里的按钮共用一套收尾
-    val hangUpCall: () -> Unit = {
-        duplexClient.close()
-        showDuplexCall = false
-        callUiVisible = false
-        vm.setShowEyes(true)
-    }
-    // 通话时长：显示在胶囊通话条上，收起/展开都不归零
-    var callElapsedSec by remember { mutableStateOf(0) }
-    LaunchedEffect(showDuplexCall) {
-        if (!showDuplexCall) {
-            callElapsedSec = 0
-            return@LaunchedEffect
-        }
-        while (true) {
-            callElapsedSec = ((System.currentTimeMillis() - callStartedAt) / 1000L).toInt().coerceAtLeast(0)
-            delay(1_000)
-        }
-    }
+    // 挂断：胶囊上的红键和全屏通话里的按钮共用同一套控制器收尾
+    val hangUpCall: () -> Unit = { vm.callController.hangUp() }
 
     // 长按会话消息弹出的操作面板（收藏/分享）
     var actionMsg by remember { mutableStateOf<SparkMessage?>(null) }
@@ -434,6 +200,7 @@ fun SparkModeScreen(
             vm.startHoldTalk(context) {}
         } else {
             vm.setTransientHint("需要麦克风权限才能录音")
+            vm.holdTalk.onPermissionDenied()
         }
     }
 
@@ -746,24 +513,23 @@ fun SparkModeScreen(
             }
         }
         val onGallery: () -> Unit = { galleryLauncher.launch("image/*") }
-        val talkGesture = Modifier.pointerInput(showDuplexCall) {
-            detectTapGestures(
-                onPress = {
-                    if (showDuplexCall) {
-                        // 通话没挂断、只是界面收起：按住说话不能抢麦克风，点一下就展开通话界面
-                        enterCall()
-                    } else {
-                        vm.startHoldTalk(context) {
-                            recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                        try {
-                            tryAwaitRelease()
-                        } finally {
-                            vm.endHoldTalk(context)
-                        }
-                    }
-                },
-            )
+        val holdGesture = rememberHoldTalkGestureModifier(
+            key = "spark-hold-main",
+            onBegin = {
+                vm.startHoldTalk(context) {
+                    recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
+            onCancelStateChange = { vm.setHoldTalkCancelling(it) },
+            onRelease = { vm.endHoldTalk(context) },
+            onCancel = { vm.cancelHoldTalk() },
+        )
+        val talkGesture = if (showDuplexCall) {
+            Modifier.pointerInput("spark-duplex-expand") {
+                detectTapGestures(onPress = { enterCall() })
+            }
+        } else {
+            holdGesture
         }
 
         Row(
@@ -1023,24 +789,55 @@ fun SparkModeScreen(
             }
         }
 
-        // ---------- 豆包全双工通话覆盖层：点电话键进入，挂断回萌眼 ----------
-        // 注意只在 callUiVisible 时铺满屏：通话没挂断、界面收起时露出下面的萌眼动画
+        // ---------- 通话覆盖层：豆包全双工 vs 经典串行通话 ----------
+        // 豆包模式仅在 uiVisible 时铺满屏：收起时露出下方萌眼动画，通话不断连
         if (showDuplexCall && callUiVisible) {
-            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                DoubaoCallOverlay(
-                    state = duplexState,
-                    turns = duplexTurns,
-                    hint = duplexHint,
-                    photos = emptyList(),
-                    onPickCamera = {},
-                    onPickGallery = {},
-                    onRemovePhoto = {},
-                    onBargeIn = { duplexClient.bargeIn() },
-                    startedAtMs = callStartedAt,
-                    onHangUp = { hangUpCall() },
-                    showPhotoActions = false,
-                )
-            }
+            DoubaoCallOverlay(
+                state = duplexState,
+                turns = duplexUi.turns,
+                hint = duplexUi.hint,
+                photos = duplexUi.photos,
+                onPickCamera = {},
+                onPickGallery = {},
+                onRemovePhoto = {},
+                onBargeIn = { vm.callController.bargeIn() },
+                startedAtMs = duplexUi.startedAtMs,
+                onHangUp = hangUpCall,
+                showPhotoActions = false,
+            )
+        } else if (showClassicCall) {
+            VoiceCallOverlay(
+                messages = classicMessages,
+                streamState = classicStream,
+                sending = isStreaming,
+                attachments = emptyList(),
+                listening = holdState.listening,
+                recording = holdState.recording,
+                recordTick = holdState.recordTick,
+                ttsSpeaking = ttsState is TtsPlayer.State.Speaking || ttsState is TtsPlayer.State.Loading,
+                ttsUnavailable = (ttsState as? TtsPlayer.State.Unavailable)?.reason,
+                holdModifier = rememberHoldTalkGestureModifier(
+                    key = "spark-classic-call-hold",
+                    onBegin = {
+                        vm.startHoldTalk(context) {
+                            recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    onCancelStateChange = { vm.setHoldTalkCancelling(it) },
+                    onRelease = { vm.endHoldTalk(context) },
+                    onCancel = { vm.cancelHoldTalk() },
+                ),
+                onPickCamera = {},
+                onPickGallery = {},
+                onRemoveAttachment = {},
+                onHangUp = {
+                    TtsPlayer.stop()
+                    showClassicCall = false
+                    vm.setClassicCallActive(false)
+                },
+                showPhotoActions = false,
+                holdState = holdState,
+            )
         }
 
         // ---------- 设置页覆盖层：右上角「设置」进入 ----------
