@@ -140,9 +140,21 @@ internal class DuplexAudioEngine(
         } catch (e: IllegalStateException) {
             Log.e(TAG, "AudioRecord.startRecording 失败", e)
             capturing = false
+            runCatching { aec?.release() }
+            aec = null
             rec.release()
             recorder = null
             return false
+        }
+        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            Log.w(TAG, "配置 ${cfg.label} 启动后未进入录音态（可能被占用），释放并换下一组")
+            capturing = false
+            runCatching { aec?.release() }
+            aec = null
+            runCatching { rec.stop() }
+            rec.release()
+            recorder = null
+            return advanceCfg()
         }
         captureJob = scope.launch(Dispatchers.IO) {
             val frame = ByteArray(frameBytes)
@@ -292,6 +304,8 @@ internal class DuplexAudioEngine(
 
     fun stop() {
         capturing = false
+        // 先停 AudioRecord 唤醒阻塞在 rec.read() 的采集协程，再释放句柄
+        runCatching { if (recorder?.state == AudioRecord.STATE_INITIALIZED) recorder?.stop() }
         captureJob?.cancel()
         captureJob = null
         releaseRecorder()

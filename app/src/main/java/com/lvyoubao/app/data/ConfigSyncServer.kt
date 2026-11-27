@@ -2,7 +2,6 @@ package com.lvyoubao.app.data
 
 import java.io.BufferedInputStream
 import java.net.InetAddress
-import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.UUID
@@ -65,30 +64,7 @@ class ConfigSyncServer(private val onConfigReceived: (SyncableConfig) -> Unit) {
     }
 
     /** 取本机局域网 IPv4（优先 192.168 网段） */
-    private fun lanIpv4(): String? {
-        return try {
-            val candidates = mutableListOf<String>()
-            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
-            while (interfaces.hasMoreElements()) {
-                val ni = interfaces.nextElement()
-                if (!ni.isUp || ni.isLoopback) continue
-                val addresses = ni.inetAddresses ?: continue
-                while (addresses.hasMoreElements()) {
-                    val addr = addresses.nextElement()
-                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
-                        val host = addr.hostAddress ?: continue
-                        candidates.add(host)
-                    }
-                }
-            }
-            candidates.firstOrNull { it.startsWith("192.168.") }
-                ?: candidates.firstOrNull { it.startsWith("10.") }
-                ?: candidates.firstOrNull { it.startsWith("172.") }
-                ?: candidates.firstOrNull()
-        } catch (_: Exception) {
-            null
-        }
-    }
+    private fun lanIpv4(): String? = DeviceEnvTools.lanIpv4()
 
     private fun handleClient(client: Socket, token: String) {
         try {

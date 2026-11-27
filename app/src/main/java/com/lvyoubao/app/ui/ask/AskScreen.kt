@@ -212,6 +212,7 @@ fun AskScreen(
     var wakeListening by remember { mutableStateOf(false) }
     var showWakeCall by remember { mutableStateOf(false) }
     val wakeScope = rememberCoroutineScope()
+    val standbyAllowed by com.lvyoubao.app.ui.common.WakeHub.standbyAllowed.collectAsState()
     fun dispatchWake() {
         // 播报中喊唤醒词 = 打断答非所问的回答：先停播再出「我在」，别叠音
         com.lvyoubao.app.ui.common.TtsPlayer.stop()
@@ -219,6 +220,7 @@ fun AskScreen(
         if (settings.wakeAction == "call" && settings.callEngine == "doubao" &&
             settings.duplexApiKey.isNotBlank() && SpeechInput.hasRecordPermission(context)
         ) {
+            com.lvyoubao.app.ui.common.WakeHub.stopStandby()
             showWakeCall = true
         } else {
             wakeListening = true
@@ -238,11 +240,11 @@ fun AskScreen(
         }
     }
     LaunchedEffect(
-        settings.wakeWordEnabled, settings.wakeAction, settings.duplexApiKey,
+        standbyAllowed, settings.wakeWordEnabled, settings.wakeAction, settings.duplexApiKey,
         recording, listening, wakeListening, showWakeCall,
     ) {
-        val can = settings.wakeWordEnabled && !showWakeCall && recording == null && !listening && !wakeListening &&
-            SpeechInput.hasRecordPermission(context)
+        val can = standbyAllowed && settings.wakeWordEnabled && !showWakeCall && recording == null &&
+            !listening && !wakeListening && SpeechInput.hasRecordPermission(context)
         if (can) {
             com.lvyoubao.app.ui.spark.SparkAck.preload(context) // 合成要时间，待机时就备好
             com.lvyoubao.app.ui.common.WakeHub.startStandby(context) { dispatchWake() }

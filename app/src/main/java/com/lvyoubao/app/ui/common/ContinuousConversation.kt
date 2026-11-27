@@ -110,7 +110,9 @@ class ContinuousConversation(
         private const val MAX_READ_ERRORS = 60           // 连续读失败 ~5 秒判麦克风被占
     }
 
+    private val stateLock = Any()
     @Volatile private var running = false
+    @Volatile private var starting = false
     @Volatile private var stopRequested = false
     @Volatile private var ttsActive = false
     @Volatile private var ttsEchoRisk = false
@@ -154,6 +156,7 @@ class ContinuousConversation(
     private var record: AudioRecord? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
+    private var startThread: Thread? = null
     private var audioThread: Thread? = null
 
     // VAD 状态（仅音频线程访问）
@@ -203,6 +206,17 @@ class ContinuousConversation(
     private var segmentSamples = 0
     private var lastActivityAt = 0L
 
+    private fun releaseAudioHandles(
+        rec: AudioRecord?,
+        aec: AcousticEchoCanceler?,
+        ns: NoiseSuppressor?,
+    ) {
+        runCatching { aec?.release() }
+        runCatching { ns?.release() }
+        runCatching { rec?.stop() }
+        runCatching { rec?.release() }
+    }
+
     /**
      * 启动采集（后台重试，不阻塞调用方）。
      * 音频策略在旧录音刚 release 的交接期，新 AudioRecord 的 startRecording 会不生效
@@ -210,19 +224,39 @@ class ContinuousConversation(
      * （每次重建 AudioRecord，约 1.5 秒窗口）；最终失败才回调一次 onError。
      */
     fun start() {
-        if (running) return
-        stopRequested = false
-        thread(name = "conv-start") {
-            var lastReason = "麦克风启动失败"
-            repeat(5) { attempt ->
-                if (stopRequested) return@thread // 重试期间被 stop：放弃启动
-                val reason = tryStartOnce()
-                if (reason == null) return@thread // 成功：tryStartOnce 内已进入采集态并起采集线程
-                lastReason = reason
-                if (attempt < 4) Thread.sleep(300)
+        synchronized(stateLock) {
+            if (running || starting) return
+            stopRequested = false
+            starting = true
+            startThread = thread(name = "conv-start") {
+                try {
+                    var lastReason = "麦克风启动失败"
+                    for (attempt in 0 until 5) {
+                        if (stopRequested) return@thread // 重试期间被 stop：放弃启动
+                        val reason = tryStartOnce()
+                        if (reason == null) return@thread // 成功：tryStartOnce 内已进入采集态并起采集线程
+                        lastReason = reason
+                        if (stopRequested) return@thread
+                        if (attempt < 4) {
+                            try {
+                                Thread.sleep(300)
+                            } catch (_: InterruptedException) {
+                                return@thread
+                            }
+                        }
+                    }
+                    if (!stopRequested) {
+                        listener.onError(lastReason)
+                    }
+                } finally {
+                    synchronized(stateLock) {
+                        starting = false
+                        if (startThread === Thread.currentThread()) {
+                            startThread = null
+                        }
+                    }
+                }
             }
-            if (stopRequested) return@thread
-            listener.onError(lastReason)
         }
     }
 
@@ -233,6 +267,7 @@ class ContinuousConversation(
         var opened: AudioRecord? = null
         var openedCfg: CaptureCfg? = null
         for (cfg in captureOrder()) {
+            if (stopRequested) return "已取消启动"
             val minBuf = AudioRecord.getMinBufferSize(
                 cfg.rate,
                 AudioFormat.CHANNEL_IN_MONO,
@@ -262,11 +297,22 @@ class ContinuousConversation(
             // 必须显式 startRecording：v0.8.90 漏了这一步，AudioRecord 不进入采集态，read 全部失败，
             // 5 秒后误报「麦克风读不到数据」退出（长按说话走 MediaRecorder 是另一条路所以没事）
             runCatching { rec.startRecording() }
-            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING && !stopRequested) {
                 // 上一路会话刚释放时 start() 常回 -38（ENOSYS），等一下重试同一路大概率就成。
                 // 不重试的话会白白降级到 16k/voip 那条削顶通道（实测 48k/mic 是唯一干净的一路）。
-                Thread.sleep(80)
-                runCatching { rec.startRecording() }
+                try {
+                    Thread.sleep(80)
+                } catch (_: InterruptedException) {
+                    releaseAudioHandles(rec, null, null)
+                    return "已取消启动"
+                }
+                if (!stopRequested) {
+                    runCatching { rec.startRecording() }
+                }
+            }
+            if (stopRequested) {
+                releaseAudioHandles(rec, null, null)
+                return "已取消启动"
             }
             if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                 rec.release()
@@ -281,65 +327,101 @@ class ContinuousConversation(
         val cfg = openedCfg ?: return lastError
         val rec = opened ?: return lastError
 
-        record = rec
-        activeRate = cfg.rate
+        if (stopRequested) {
+            releaseAudioHandles(rec, null, null)
+            return "已取消启动"
+        }
         if (config.denoise) {
             // 懒加载：第一次开麦才加载 .so，失败也只是没有降噪
             if (!RnNoise.ensure()) LogStore.log("conv", "降噪不可用，按原始音频继续")
         }
-        LogStore.log("conv", "采集配置：${cfg.label}（VAD 在 16k 上跑，${cfg.rate / SAMPLE_RATE} 倍降采样）")
-        // 重试期间被 stop：立刻清理放弃（快速开关连聊的竞态）
         if (stopRequested) {
-            rec.release()
+            releaseAudioHandles(rec, null, null)
             return "已取消启动"
         }
+        LogStore.log("conv", "采集配置：${cfg.label}（VAD 在 16k 上跑，${cfg.rate / SAMPLE_RATE} 倍降采样）")
         // 系统 AEC/NS：压掉自己喇叭的回声与稳态噪声，打断体验的底线（拿不到就靠动态阈值兜底）
         // 系统 AEC/NS：以前只 create 没 setEnabled，效果器一直是关的（等于白建）。
         // 现在真正打开并回读状态——这台 BSP 支不支持，日志里一眼能看到。
-        echoCanceler = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId) else null
-        noiseSuppressor = if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId) else null
+        val aec = if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId) else null
+        val ns = if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId) else null
         // 回声消除只在「允许打断」的会话里开：单麦设备的 AEC 没有干净的参考信号，
         // 常把近讲人声也当回声压掉；待机唤醒用不到打断，宁可不冒这个险。
-        if (config.bargeInSensitivity > 0) runCatching { echoCanceler?.enabled = true }
-        runCatching { noiseSuppressor?.enabled = true }
+        if (config.bargeInSensitivity > 0) runCatching { aec?.enabled = true }
+        runCatching { ns?.enabled = true }
         LogStore.log(
             "conv",
-            "系统音效：降噪 ${if (noiseSuppressor?.enabled == true) "开" else "不可用"}，" +
-                "回声消除 ${if (echoCanceler?.enabled == true) "开" else "不可用"}",
+            "系统音效：降噪 ${if (ns?.enabled == true) "开" else "不可用"}，" +
+                "回声消除 ${if (aec?.enabled == true) "开" else "不可用"}",
         )
-        noiseFloorDb = -60f
-        denoiseVad = -1f
-        voiceRun = 0
-        inSpeech = false
-        readErrors = 0
-        bargeInFired = false
-        lastActivityAt = SystemClock.elapsedRealtime()
-        running = true
-        audioThread = thread(name = "conv-audio") {
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
-            captureLoop()
+        // 在锁内原子检查 stopRequested 并挂载句柄 + 置 running=true，消灭启动与 stop() 之间的孤儿竞态
+        val aborted = synchronized(stateLock) {
+            if (stopRequested) {
+                true
+            } else {
+                record = rec
+                activeRate = cfg.rate
+                echoCanceler = aec
+                noiseSuppressor = ns
+                noiseFloorDb = -60f
+                denoiseVad = -1f
+                voiceRun = 0
+                inSpeech = false
+                readErrors = 0
+                bargeInFired = false
+                lastActivityAt = SystemClock.elapsedRealtime()
+                running = true
+                audioThread = thread(name = "conv-audio") {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                    captureLoop()
+                }
+                false
+            }
+        }
+        if (aborted) {
+            releaseAudioHandles(rec, aec, ns)
+            return "已取消启动"
         }
         return null
     }
 
     fun stop() {
-        stopRequested = true
-        if (!running) {
-            LogStore.log("conv", "stop 跳过释放：running=false（可能仍在后台重试启动）")
+        val st: Thread?
+        val at: Thread?
+        val rec: AudioRecord?
+        val aec: AcousticEchoCanceler?
+        val ns: NoiseSuppressor?
+        val wasActive: Boolean
+        synchronized(stateLock) {
+            wasActive = running || starting || record != null
+            stopRequested = true
+            running = false
+            st = startThread
+            at = audioThread
+            rec = record
+            aec = echoCanceler
+            ns = noiseSuppressor
+            audioThread = null
+            record = null
+            echoCanceler = null
+            noiseSuppressor = null
+        }
+        if (!wasActive) {
+            LogStore.log("conv", "stop 跳过：会话未启动")
             return
         }
-        running = false
-        audioThread?.let { t ->
-            runCatching { t.join(800) }
+        // 先打断睡眠中的启动线程，并停掉 AudioRecord 唤醒阻塞中的 read()，再 join，避免无谓卡顿或并发释放
+        st?.interrupt()
+        runCatching { rec?.stop() }
+        if (st != null && st !== Thread.currentThread()) {
+            runCatching { st.join(2000) }
         }
-        audioThread = null
-        runCatching { echoCanceler?.release() }
-        runCatching { noiseSuppressor?.release() }
-        echoCanceler = null
-        noiseSuppressor = null
-        runCatching { record?.stop() }
-        runCatching { record?.release() }
-        record = null
+        if (at != null && at !== Thread.currentThread()) {
+            runCatching { at.join(1500) }
+        }
+        runCatching { aec?.release() }
+        runCatching { ns?.release() }
+        runCatching { rec?.release() }
         LogStore.log("conv", "stop 已释放 AudioRecord（mic 让出）")
     }
 
@@ -379,36 +461,58 @@ class ContinuousConversation(
     private fun captureLoop() {
         val factor = (activeRate / SAMPLE_RATE).coerceAtLeast(1)
         val raw = ShortArray(FRAME_SAMPLES * factor)
-        while (running) {
-            // AudioRecord 常短读：补齐一整帧（80ms）再判活，帧长稳定 VAD 才准
-            var filled = 0
-            while (filled < raw.size && running) {
-                val rec = record ?: return
-                val n = try {
-                    rec.read(raw, filled, raw.size - filled)
-                } catch (e: Exception) {
-                    return
+        try {
+            while (running) {
+                // AudioRecord 常短读：补齐一整帧（80ms）再判活，帧长稳定 VAD 才准
+                var filled = 0
+                while (filled < raw.size && running) {
+                    val rec = record ?: return
+                    val n = try {
+                        rec.read(raw, filled, raw.size - filled)
+                    } catch (e: Exception) {
+                        return
+                    }
+                    if (n <= 0) break
+                    filled += n
                 }
-                if (n <= 0) break
-                filled += n
-            }
-            if (filled < raw.size) {
-                if (++readErrors > MAX_READ_ERRORS) {
-                    listener.onError("麦克风连续读不到数据（可能被其他应用占用）")
-                    running = false
-                    break
+                if (!running) break
+                if (filled < raw.size) {
+                    if (++readErrors > MAX_READ_ERRORS) {
+                        running = false
+                        listener.onError("麦克风连续读不到数据（可能被其他应用占用）")
+                        break
+                    }
+                    continue
                 }
-                continue
+                readErrors = 0
+                // 降噪必须在 48k 原始域上做（RNNoise 的模型就是按 48k/10ms 训练的），
+                // 处理完再降到 16k 给 VAD 与 WAV。降噪后的电平才是「人说话 vs 电视在响」
+                // 能分得开的依据——不降噪时底噪一抬到 -24dBFS，峰值回落判据就永远不成立。
+                if (RnNoise.enabled) {
+                    denoiseVad = RnNoise.processInPlace(raw, activeRate)
+                    RnNoise.takeStats()?.let { LogStore.log("denoise", it) }
+                }
+                processFrame(if (factor == 1) raw else downsampleTo16k(raw, factor), FRAME_SAMPLES)
             }
-            readErrors = 0
-            // 降噪必须在 48k 原始域上做（RNNoise 的模型就是按 48k/10ms 训练的），
-            // 处理完再降到 16k 给 VAD 与 WAV。降噪后的电平才是「人说话 vs 电视在响」
-            // 能分得开的依据——不降噪时底噪一抬到 -24dBFS，峰值回落判据就永远不成立。
-            if (RnNoise.enabled) {
-                denoiseVad = RnNoise.processInPlace(raw, activeRate)
-                RnNoise.takeStats()?.let { LogStore.log("denoise", it) }
+        } finally {
+            // 若采集循环因错误自行退出而外部未先调用 stop()，确保自身把 AudioRecord 释掉
+            val rec: AudioRecord?
+            val aec: AcousticEchoCanceler?
+            val ns: NoiseSuppressor?
+            synchronized(stateLock) {
+                running = false
+                if (audioThread === Thread.currentThread()) audioThread = null
+                rec = record
+                aec = echoCanceler
+                ns = noiseSuppressor
+                record = null
+                echoCanceler = null
+                noiseSuppressor = null
             }
-            processFrame(if (factor == 1) raw else downsampleTo16k(raw, factor), FRAME_SAMPLES)
+            if (rec != null || aec != null || ns != null) {
+                releaseAudioHandles(rec, aec, ns)
+                LogStore.log("conv", "采集线程退出自清理完成（mic 已让出）")
+            }
         }
     }
 

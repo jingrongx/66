@@ -30,6 +30,7 @@ import com.lvyoubao.app.ui.common.EdgeTts
 import com.lvyoubao.app.ui.common.ScreenAwake
 import com.lvyoubao.app.ui.common.SpeechInput
 import com.lvyoubao.app.ui.common.TtsPlayer
+import com.lvyoubao.app.ui.common.WakeHub
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -164,6 +165,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     val isContinuous: StateFlow<Boolean> = _isContinuous.asStateFlow()
     private var consecutiveAsrFailures = 0
 
+    private val micSessionLock = Any()
     // 唤醒词监听（待机时喊「小源小源」进连续对话）：与连续对话共用一套引擎，状态机决定开谁
     private var wakeSession: ContinuousConversation? = null
     // 唤醒后的「单次聆听」会话：收一句话就停，不常驻占麦
@@ -285,6 +287,10 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         viewModelScope.launch {
             settings.collect { syncWakeEngine() }
         }
+        // 亮屏切去其它应用退至后台时让出待机麦，回前台自动恢复
+        viewModelScope.launch {
+            WakeHub.standbyAllowed.collect { syncWakeEngine() }
+        }
     }
 
     /** 点会话消息：重新朗读这条内容（打断当前播报） */
@@ -363,9 +369,9 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             return
         }
 
-        // 按住说话用 MediaRecorder，与唤醒监听的 AudioRecord 抢麦：先停唤醒采集再开录音
-        wakeSession?.stop()
-        wakeSession = null
+        // 按住说话用 MediaRecorder，与唤醒监听的 AudioRecord 抢麦：先停唤醒采集（含单次聆听）再开录音
+        stopWakeSession()
+        stopWakeOnceSession()
         stopAlarm() // 用户主动开口交互，铃响也先安静
         // 停止之前的朗读，取消「回萌眼」倒计时（用户开始新交互了）
         // 注意：这里绝不能切视图（v0.8.81 曾在按住时强制 showEyes=true——会话态下按住说话
@@ -399,6 +405,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
             onFailure = { err ->
                 _eyeState.value = SparkEyeState.IDLE
                 _statusHint.value = err.message ?: "麦克风启动失败"
+                syncWakeEngine()
             },
         )
     }
@@ -437,6 +444,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 _statusHint.value = "请在设置中配置语音识别 Key"
                 speakHint(context, "请先在设置中配置语音识别 Key")
                 SpeechInput.cancelRecording(rec)
+                syncWakeEngine()
                 return@launch
             }
 
@@ -1491,8 +1499,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         timerJob?.cancel()
         _timerRemainingSec.value = null
         stopContinuousInternal()
-        wakeSession?.stop()
-        wakeSession = null
+        stopWakeSession()
+        stopWakeOnceSession()
         TtsPlayer.stop()
         activeRecording?.let {
             SpeechInput.cancelRecording(it)
@@ -1562,6 +1570,20 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         }
     }
 
+    private fun stopWakeSession() {
+        val old = synchronized(micSessionLock) {
+            wakeSession.also { wakeSession = null }
+        }
+        old?.stop()
+    }
+
+    private fun stopWakeOnceSession() {
+        val old = synchronized(micSessionLock) {
+            wakeOnceSession.also { wakeOnceSession = null }
+        }
+        old?.stop()
+    }
+
     /**
      * 全双工通话开关：通话期间把麦克风整条链路让给豆包客户端，
      * 停朗读、停连聊、停待机唤醒监听；挂断后按原设置恢复唤醒监听。
@@ -1571,8 +1593,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         if (active) {
             TtsPlayer.stop()
             stopContinuous()
-            wakeSession?.stop()
-            wakeSession = null
+            stopWakeSession()
+            stopWakeOnceSession()
         } else {
             syncWakeEngine()
         }
@@ -1585,99 +1607,115 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
     private fun syncWakeEngine() {
         val cur = settings.value
         val curVoiceSens = cur.voiceBargeIn // 0 关 / 1 标准 / 2 灵敏
-        val shouldRun = sparkActive &&
-            cur.wakeWordEnabled &&
-            cur.asrKey.isNotBlank() &&
-            SpeechInput.hasRecordPermission(appContext) &&
-            !_isContinuous.value &&
-            !duplexAudioActive &&
-            activeRecording == null &&
-            wakeOnceSession == null // 唤醒后的单次聆听正在占麦，待机监听让路
-        if (shouldRun && wakeSession == null) {
-            // 回应语音提前加载好：SoundPool 首次 load 是异步的，等到真唤醒才加载会没声
-            SparkAck.preload(appContext)
-            // 端侧唤醒词常驻：模型只加载一次（~5MB int8），之后每帧只做一次前向
-            ensureLocalKws()
-            val session = ContinuousConversation(
-                appContext,
-                config = ContinuousConversation.Config(
-                    // 设置里的「灵敏度」以前只管连聊打断，连聊并掉之后就等于没用；现在它直接决定唤醒门槛
-                    silenceEndMs = if (curVoiceSens >= 2) 320L else 380L,
-                    minSpeechMs = if (curVoiceSens >= 2) 180L else 220L,
-                    bargeInSensitivity = 0, // 待机不需要打断：主动提醒播报期间不收音，防回灌
-                    idleTimeoutMs = Long.MAX_VALUE / 2, // 待机监听常驻，不自动退
-                    // 单段上限收到 6 秒：屋里电视/聊天一响就是十几秒的长段，
-                    // 唤醒词埋在长段里识别容易被串音盖掉，切碎一点反而更容易命中
-                    maxUtteranceMs = 6_000L,
-                    peakDropDb = 16f,
-                    onsetMarginDb = if (curVoiceSens >= 2) 8f else 12f,
-                    minOnsetDb = if (curVoiceSens >= 2) -46f else -42f,
-                ),
-                listener = object : ContinuousConversation.Listener {
-                    // 一开口就给反馈（约开口后 160ms）：眼睛立刻变「在听」，不用等识别结果
-                    override fun onSpeechStart() {
-                        if (!duplexAudioActive && activeRecording == null) {
-                            _eyeState.value = SparkEyeState.LISTENING
-                            wakeSpeechStartedAt = SystemClock.elapsedRealtime()
-                        }
-                    }
-
-                    override fun onUtterance(wav: java.io.File, snrDb: Float) {
-                        // 空转惩罚期：整段丢弃，连云端转写都不跑。
-                        // 只抬 6dB 门槛对直播人声根本没用——实测那段峰值 -8dBFS，门槛从 -46 抬到 -40
-                        // 照样过线；只有「干脆不送」才真能省电、省配额、少占采集通道。
-                        // 这段时间唤醒仍由端侧 KWS 兜着；但为了不让 KWS 漏命中变成「彻底聋」，
-                        // 连跳 6 段就放一段上去复核——真有人在说话，这一下就把惩罚卸掉了。
-                        if (wakeOnsetBoostUntil > SystemClock.elapsedRealtime()) {
-                            if (wakeSkipCount >= 6) {
-                                wakeSkipCount = 0
-                                LogStore.log("wake", "空转惩罚：连跳 6 段，放一段去云端复核")
-                            } else {
-                                wakeSkipCount++
-                                wav.delete()
-                                if (wakeSkipCount % 5 == 0) {
-                                    LogStore.log(
-                                        "wake",
-                                        "空转惩罚中：跳过待机语音（已跳 $wakeSkipCount 段，端侧唤醒照常）",
-                                    )
-                                }
-                                return
+        val toStop: ContinuousConversation? = synchronized(micSessionLock) {
+            val shouldRun = sparkActive &&
+                WakeHub.standbyAllowed.value &&
+                cur.wakeWordEnabled &&
+                cur.asrKey.isNotBlank() &&
+                SpeechInput.hasRecordPermission(appContext) &&
+                !_isContinuous.value &&
+                !duplexAudioActive &&
+                activeRecording == null &&
+                wakeOnceSession == null // 唤醒后的单次聆听正在占麦，待机监听让路
+            if (shouldRun && wakeSession == null) {
+                // 回应语音提前加载好：SoundPool 首次 load 是异步的，等到真唤醒才加载会没声
+                SparkAck.preload(appContext)
+                // 端侧唤醒词常驻：模型只加载一次（~5MB int8），之后每帧只做一次前向
+                ensureLocalKws()
+                lateinit var session: ContinuousConversation
+                session = ContinuousConversation(
+                    appContext,
+                    config = ContinuousConversation.Config(
+                        // 设置里的「灵敏度」以前只管连聊打断，连聊并掉之后就等于没用；现在它直接决定唤醒门槛
+                        silenceEndMs = if (curVoiceSens >= 2) 320L else 380L,
+                        minSpeechMs = if (curVoiceSens >= 2) 180L else 220L,
+                        bargeInSensitivity = 0, // 待机不需要打断：主动提醒播报期间不收音，防回灌
+                        idleTimeoutMs = Long.MAX_VALUE / 2, // 待机监听常驻，不自动退
+                        // 单段上限收到 6 秒：屋里电视/聊天一响就是十几秒的长段，
+                        // 唤醒词埋在长段里识别容易被串音盖掉，切碎一点反而更容易命中
+                        maxUtteranceMs = 6_000L,
+                        peakDropDb = 16f,
+                        onsetMarginDb = if (curVoiceSens >= 2) 8f else 12f,
+                        minOnsetDb = if (curVoiceSens >= 2) -46f else -42f,
+                    ),
+                    listener = object : ContinuousConversation.Listener {
+                        // 一开口就给反馈（约开口后 160ms）：眼睛立刻变「在听」，不用等识别结果
+                        override fun onSpeechStart() {
+                            if (!duplexAudioActive && activeRecording == null) {
+                                _eyeState.value = SparkEyeState.LISTENING
+                                wakeSpeechStartedAt = SystemClock.elapsedRealtime()
                             }
                         }
-                        handleWakeUtterance(wav, snrDb)
-                    }
 
-                    override fun onBargeIn() {}
-                    override fun onAutoTimeout() {}
-
-                    override fun onError(message: String) {
-                        viewModelScope.launch {
-                            wakeSession?.stop()
-                            wakeSession = null
-                            _statusHint.value = "唤醒监听停了：$message"
+                        override fun onUtterance(wav: java.io.File, snrDb: Float) {
+                            // 空转惩罚期：整段丢弃，连云端转写都不跑。
+                            // 只抬 6dB 门槛对直播人声根本没用——实测那段峰值 -8dBFS，门槛从 -46 抬到 -40
+                            // 照样过线；只有「干脆不送」才真能省电、省配额、少占采集通道。
+                            // 这段时间唤醒仍由端侧 KWS 兜着；但为了不让 KWS 漏命中变成「彻底聋」，
+                            // 连跳 6 段就放一段上去复核——真有人在说话，这一下就把惩罚卸掉了。
+                            if (wakeOnsetBoostUntil > SystemClock.elapsedRealtime()) {
+                                if (wakeSkipCount >= 6) {
+                                    wakeSkipCount = 0
+                                    LogStore.log("wake", "空转惩罚：连跳 6 段，放一段去云端复核")
+                                } else {
+                                    wakeSkipCount++
+                                    wav.delete()
+                                    if (wakeSkipCount % 5 == 0) {
+                                        LogStore.log(
+                                            "wake",
+                                            "空转惩罚中：跳过待机语音（已跳 $wakeSkipCount 段，端侧唤醒照常）",
+                                        )
+                                    }
+                                    return
+                                }
+                            }
+                            handleWakeUtterance(wav, snrDb)
                         }
-                    }
-                },
-            )
-            session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
-            session.setTtsEchoRisk(TtsPlayer.echoRisk.value)
-            session.start() // 后台重试；最终失败由 onError 清理并提示
-            wakeSession = session
-            // 空转惩罚还在一半时重建了会话（切前后台/灵敏度改动），把门槛接着抬，别白罚
-            val boostLeft = wakeOnsetBoostUntil - SystemClock.elapsedRealtime()
-            if (wakeOnsetBoostDb > 0f && boostLeft > 0) {
-                session.boostOnset(wakeOnsetBoostDb, boostLeft)
+
+                        override fun onBargeIn() {}
+                        override fun onAutoTimeout() {}
+
+                        override fun onError(message: String) {
+                            session.stop()
+                            viewModelScope.launch {
+                                val matched = synchronized(micSessionLock) {
+                                    if (wakeSession === session) {
+                                        wakeSession = null
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                if (matched) {
+                                    _statusHint.value = "唤醒监听停了：$message"
+                                }
+                            }
+                        }
+                    },
+                )
+                session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
+                session.setTtsEchoRisk(TtsPlayer.echoRisk.value)
+                session.start() // 后台重试；最终失败由 onError 清理并提示
+                wakeSession = session
+                // 空转惩罚还在一半时重建了会话（切前后台/灵敏度改动），把门槛接着抬，别白罚
+                val boostLeft = wakeOnsetBoostUntil - SystemClock.elapsedRealtime()
+                if (wakeOnsetBoostDb > 0f && boostLeft > 0) {
+                    session.boostOnset(wakeOnsetBoostDb, boostLeft)
+                }
+                LogStore.log(
+                    "wake",
+                    "待机监听启动：灵敏度 $curVoiceSens 档，判活门槛 " +
+                        "${if (curVoiceSens >= 2) 8f else 12f}dB / 下限 ${if (curVoiceSens >= 2) -46f else -42f}dB，" +
+                        "最短 ${if (curVoiceSens >= 2) 180L else 220L}ms，静音收段 ${if (curVoiceSens >= 2) 320L else 380L}ms",
+                )
+                null
+            } else if (!shouldRun && wakeSession != null) {
+                wakeSession.also { wakeSession = null }
+            } else {
+                null
             }
-            LogStore.log(
-                "wake",
-                "待机监听启动：灵敏度 $curVoiceSens 档，判活门槛 " +
-                    "${if (curVoiceSens >= 2) 8f else 12f}dB / 下限 ${if (curVoiceSens >= 2) -46f else -42f}dB，" +
-                    "最短 ${if (curVoiceSens >= 2) 180L else 220L}ms，静音收段 ${if (curVoiceSens >= 2) 320L else 380L}ms",
-            )
-        } else if (!shouldRun && wakeSession != null) {
-            wakeSession?.stop()
-            wakeSession = null
         }
+        toStop?.stop()
     }
 
     /**
@@ -1850,8 +1888,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     // 「小源小源，今天天气怎么样」整句：KWS 那次没拿到问题只开了聆听，
                     // 迟到的整句转写正好补上——停掉聆听直接答，不用让用户再说一遍
                     LogStore.log("wake", "云端迟到整句（问题「$ask」）：停单次聆听直接答")
-                    wakeOnceSession?.stop()
-                    wakeOnceSession = null
+                    stopWakeOnceSession()
                     lastWakeHitAt = SystemClock.elapsedRealtime()
                     answerVoiceQuestion(ask)
                 } else {
@@ -2078,8 +2115,7 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         // 放在所有本地快路之前：停播报、退聆听、回待机，不发 AI 请求也不落库。
         if (matchByeFast(clean) || com.lvyoubao.app.data.RobotIntent.matchEndFast(clean)) {
             TtsPlayer.stop()
-            wakeOnceSession?.stop()
-            wakeOnceSession = null
+            stopWakeOnceSession()
             _eyeState.value = SparkEyeState.IDLE
             _showEyes.value = true
             _statusHint.value = null
@@ -2120,16 +2156,11 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
      */
     private fun startWakeOneShot() {
         ScreenAwake.keepOn() // 正在听人说话，屏幕不能灭
-        wakeOnceSession?.stop()
-        wakeOnceSession = null
-        // 待机监听必须先让出麦克风：一台设备同一时刻只能有一个 AudioRecord。
-        // 两个会话同时开着，单次聆听启动时会连吃几次 `AudioRecord start() -38`（EINVAL），
-        // 一路降级到 16k/asr 甚至 voip，录出来的音质和识别率都跟着掉。
-        // syncWakeEngine 的 shouldRun 里本来就有「wakeOnceSession 存在就让路」，
-        // 但它只在状态变化时跑，这里得主动停一次。
-        wakeSession?.stop()
-        wakeSession = null
-        val session = ContinuousConversation(
+        // 同一时刻只允许一个采集会话：务必先完全停掉旧单次聆听与待机监听再起新会话
+        stopWakeOnceSession()
+        stopWakeSession()
+        lateinit var session: ContinuousConversation
+        session = ContinuousConversation(
             appContext,
             config = ContinuousConversation.Config(
                 // 一句话的收段判据：**宁多等半秒，也别把话切两半**。
@@ -2161,16 +2192,20 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                     }
                     // 单次：拿到第一段就停录音，处理完回待机
                     LogStore.log("wake", "单次聆听收段：信噪比 ${"%.0f".format(snrDb)}dB（近讲越大越可信）")
-                    wakeOnceSession?.stop()
-                    wakeOnceSession = null
+                    session.stop()
+                    synchronized(micSessionLock) {
+                        if (wakeOnceSession === session) wakeOnceSession = null
+                    }
                     handleWakeOnce(wav)
                 }
 
                 override fun onBargeIn() {}
 
                 override fun onAutoTimeout() {
-                    wakeOnceSession?.stop()
-                    wakeOnceSession = null
+                    session.stop()
+                    synchronized(micSessionLock) {
+                        if (wakeOnceSession === session) wakeOnceSession = null
+                    }
                     _eyeState.value = SparkEyeState.IDLE
                     _statusHint.value = null
                     // 喊了唤醒词却一直没说话：回待机，屏幕重新开始空闲倒计时，
@@ -2180,24 +2215,32 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
                 }
 
                 override fun onError(message: String) {
+                    session.stop()
                     viewModelScope.launch {
-                        wakeOnceSession?.stop()
-                        wakeOnceSession = null
-                        _eyeState.value = SparkEyeState.IDLE
-                        _statusHint.value = "没听清：$message"
-                        ScreenAwake.idle()
-                        syncWakeEngine()
+                        val matched = synchronized(micSessionLock) {
+                            if (wakeOnceSession === session) {
+                                wakeOnceSession = null
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        if (matched) {
+                            _eyeState.value = SparkEyeState.IDLE
+                            _statusHint.value = "没听清：$message"
+                            ScreenAwake.idle()
+                            syncWakeEngine()
+                        }
                     }
                 }
             },
         )
         session.setTtsActive(TtsPlayer.state.value is TtsPlayer.State.Speaking)
         session.setTtsEchoRisk(TtsPlayer.echoRisk.value)
+        synchronized(micSessionLock) {
+            wakeOnceSession = session
+        }
         session.start()
-        wakeOnceSession = session
-        // 同一时刻只允许一个采集会话：待机监听先让路
-        wakeSession?.stop()
-        wakeSession = null
     }
 
     /** 单次聆听录到的一段：转写 → 走问答链 → 回待机（下次仍要喊唤醒词） */
@@ -2263,10 +2306,8 @@ class SparkViewModel(app: TravelApp) : ViewModel() {
         sparkActive = false
         timerJob?.cancel()
         stopContinuousInternal()
-        wakeSession?.stop()
-        wakeSession = null
-        wakeOnceSession?.stop()
-        wakeOnceSession = null
+        stopWakeSession()
+        stopWakeOnceSession()
         runCatching { appContext.unregisterReceiver(batteryReceiver) }
         activeRecording?.let {
             SpeechInput.cancelRecording(it)

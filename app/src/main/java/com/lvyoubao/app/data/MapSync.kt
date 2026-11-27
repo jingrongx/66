@@ -3,7 +3,6 @@ package com.lvyoubao.app.data
 import java.io.BufferedInputStream
 import java.io.File
 import java.net.InetAddress
-import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLEncoder
@@ -138,27 +137,7 @@ object MapSync {
             acceptThread = null
         }
 
-        private fun lanIpv4(): String? = try {
-            val candidates = mutableListOf<String>()
-            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
-            while (interfaces.hasMoreElements()) {
-                val ni = interfaces.nextElement()
-                if (!ni.isUp || ni.isLoopback) continue
-                val addresses = ni.inetAddresses ?: continue
-                while (addresses.hasMoreElements()) {
-                    val addr = addresses.nextElement()
-                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
-                        addr.hostAddress?.let(candidates::add)
-                    }
-                }
-            }
-            candidates.firstOrNull { it.startsWith("192.168.") }
-                ?: candidates.firstOrNull { it.startsWith("10.") }
-                ?: candidates.firstOrNull { it.startsWith("172.") }
-                ?: candidates.firstOrNull()
-        } catch (_: Exception) {
-            null
-        }
+        private fun lanIpv4(): String? = DeviceEnvTools.lanIpv4()
 
         private fun handleClient(client: Socket, token: String) {
             try {

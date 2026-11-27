@@ -105,7 +105,8 @@ app/src/main/java/com/lvyoubao/app/
 │   ├── UpdateChecker.kt       # 应用内更新（API + atom 双层检查，代理优先）
 │   ├── ConfigSync.kt          # 扫码同步配置：载荷编解码（局域网推送 + 配置直带两种二维码）
 │   ├── ConfigSyncServer.kt    # 扫码同步接收端：一次性本地 HTTP 服务（ServerSocket + 口令校验）
-│   ├── FullDiagnostics.kt     # 全链路综合诊断：网络/权限/API/ASR/地图/全双工/TTS 一键体检
+│   ├── FullDiagnostics.kt     # 全链路综合诊断：网络/权限/语音唤醒冲突/API/ASR/地图/全双工/TTS 一键体检
+│   ├── DeviceEnvTools.kt      # 设备兼容与调试：Google 语音唤醒占麦检查/禁麦引导 + 网络 ADB（Root 一键开关 / 无 Root 引导） + 公共 IP 获取
 │   ├── VoiceModelOptions.kt   # 语音三段（ASR/LLM/TTS）模型选项注册表 + 常用地址结构
 │   ├── duplex/                # 豆包 Seeduplex 端到端全双工：WebSocket Realtime 事件协议
 │   │   ├── DuplexProtocol.kt      # 事件模型：session.create / audio.append / ASR/text/audio delta
@@ -124,7 +125,7 @@ app/src/main/java/com/lvyoubao/app/
 │   ├── notes/                 # 随手记 + 自动游记
 │   ├── observation/           # 感知日志：积分、指标、真实感受标记、回测分析
 │   ├── memory/                # 我的记忆（收藏的证据 + 画像）
-│   ├── settings/              # 设置：10 区块按设计稿（模式与系统 / 扫码同步 / 8 家凭证 / 核心能力与模型调度 / 常用地址 / 桌面后台 / 诊断日志 / 机器人 / 数据管理 / 关于）+ 日间夜间双主题令牌
+│   ├── settings/              # 设置：12 区块（模式与系统 / 扫码同步 / 8 家凭证 / 核心能力与模型调度 / 常用地址 / 桌面后台 / 时间时区 / 诊断日志 / 设备兼容与网络 ADB / 机器人 / 数据管理 / 关于）+ 日间夜间双主题令牌
 │   ├── sync/                  # 扫码同步：二维码渲染 + 扫码界面（Camera1 + ZXing，兼容 API 21+）
 │   ├── update/                # 应用更新页
 │   └── theme/                 # Material 3 品牌配色（深海青 + 日出橙）+ 全局尺寸体系
@@ -141,6 +142,8 @@ app/src/main/java/com/lvyoubao/app/
 - ⬜ 交通时刻表类硬信息的专项数据源接入
 
 ## 📜 更新日志
+
+**v0.9.69** · 根治「录音被长期占用导致本应用及系统录音均失败」并新增「设备兼容与网络 ADB」设置区——①**定位与修复麦克风泄漏和前后台让麦**：收紧 `ContinuousConversation` 的 `start()`/`tryStartOnce()`/`stop()` 为全锁串行并先 `stop()` 再 `join()`，消除冷启动并发与释放竞态遗留的孤儿 `AudioRecord`；`WakeHub` 加锁并同步前后台允许态 `standbyAllowed`；`MainActivity` 修复 `settings` 初始态挂载即双份抢麦，并在亮屏切到后台 350ms 后主动让出待机监听（息屏留在前台时保留）；`AskScreen`/`LargeTextScreen`/`SparkViewModel`/`DuplexAudioEngine` 补全通话与待机让麦互斥与失败兜底。②**防 Google 语音唤醒抢麦（设置页 → 设备兼容与网络 ADB）**：真机排查发现 `com.google.android.googlequicksearchbox:interactor` 会在亮屏及后台每 5 秒抢麦并在释放后 0.5 秒立即独占接口；新增环境探测与说明卡片，有 Root 时一键禁麦并停进程，无 Root 受安卓安全沙箱限制时清楚说明原因并提供直达「Google 麦克风权限页」「系统默认语音助手设置」及复制无 Root ADB 命令入口。③**网络 ADB 支持**：同卡实时展示本机局域网 IP、USB 调试状态与 `adb connect` 指令，有 Root 设备一键开关 `5555` 端口，无 Root 设备提供说明、直达开发者选项及复制首次激活命令。
 
 **v0.9.68** · 修「喊小源小源没反应」（0.9.65 引入的回归）——真机日志显示 KWS 明明命中了「小源小源」、打了「触发唤醒」，却没有回应、没有聆听、没有任何后续。根因：0.9.65 为修麦克风冲突，在按住说话前加了 `stopStandby()`（它会把唤醒回调 `onWake` 清空），成功后靠 `recording` 状态变化触发 `LaunchedEffect` 重新注册；但**录音/识别失败时 `recording` 没变，LaunchedEffect 不重跑，待机监听永久停摆**——KWS 线程还在跑、照常命中，回调却是 null，用户就看到「喊了没反应」。修复：①命中回调改为捕获稳定引用，不再延迟读可变的 `onWake` 字段；② `WakeHub` 记住上次启动参数并提供 `resumeStandby()`，普通/大字模式所有录音与识别失败分支（含权限拒绝、网络超时）显式恢复待机。
 

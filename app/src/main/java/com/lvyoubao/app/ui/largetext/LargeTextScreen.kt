@@ -867,6 +867,8 @@ fun LargeTextScreen(
     // 进入/退出豆包通话：start / close。key 为空时不强启，给出提示（避免老用户默认 doubao 却没 key）。
     DisposableEffect(showCall, settings.callEngine) {
         if (showCall && settings.callEngine == "doubao") {
+            // 务必先于 duplexClient.start() 让出待机唤醒的麦克风，避免单麦设备上 startRecording 撞车 -38
+            WakeHub.stopStandby()
             TtsPlayer.stop() // 先让 classic 朗读闭嘴，避免抢音频输出
             // 通话期间不许熄屏 + 压住 WiFi 省电：息屏后 WiFi 入睡会让实时音频流断开，
             // 现象就是「黑屏之后听不到声音」（大字/普通模式同样需要，不只在灵动模式）
@@ -939,13 +941,14 @@ fun LargeTextScreen(
             }
         }
     }
+    val standbyAllowed by WakeHub.standbyAllowed.collectAsState()
     LaunchedEffect(
-        settings.wakeWordEnabled, settings.wakeAction, settings.callEngine, settings.duplexApiKey,
+        standbyAllowed, settings.wakeWordEnabled, settings.wakeAction, settings.callEngine, settings.duplexApiKey,
         recording, listening, wakeListening, showCall,
     ) {
         val inCall = showCall && settings.callEngine == "doubao"
-        val can = settings.wakeWordEnabled && !inCall && recording == null && !listening && !wakeListening &&
-            SpeechInput.hasRecordPermission(context)
+        val can = standbyAllowed && settings.wakeWordEnabled && !inCall && recording == null &&
+            !listening && !wakeListening && SpeechInput.hasRecordPermission(context)
         if (can) {
             com.lvyoubao.app.ui.spark.SparkAck.preload(context) // 合成要时间，待机时就备好
             WakeHub.startStandby(context) { dispatchWake() }

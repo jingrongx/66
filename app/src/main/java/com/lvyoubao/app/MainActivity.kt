@@ -1,7 +1,14 @@
 package com.lvyoubao.app
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,8 +35,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.ui.unit.Density
-import com.lvyoubao.app.data.AiSettings
+import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.ui.ask.AskScreen
+import com.lvyoubao.app.ui.common.WakeHub
 import com.lvyoubao.app.ui.largetext.LargeTextScreen
 import com.lvyoubao.app.ui.map.MapScreen
 import com.lvyoubao.app.ui.memory.MemoryScreen
@@ -42,6 +50,28 @@ import com.lvyoubao.app.ui.update.UpdateScreen
 import com.lvyoubao.app.ui.update.UpdateViewModel
 
 class MainActivity : ComponentActivity() {
+    private var activityStarted = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val bgMicCheckRunnable = Runnable {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val screenOn = pm?.isInteractive ?: true
+        if (!activityStarted && screenOn) {
+            WakeHub.setStandbyAllowed(false)
+            LogStore.log("wake", "应用退至后台且屏幕亮着，主动让出待机麦克风")
+        }
+    }
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!activityStarted) scheduleBgMicCheck()
+        }
+    }
+
+    private fun scheduleBgMicCheck() {
+        mainHandler.removeCallbacks(bgMicCheckRunnable)
+        // 延迟 350ms 再判：按电源键息屏瞬间 isInteractive 可能尚未翻成 false，防止误杀息屏待机唤醒
+        mainHandler.postDelayed(bgMicCheckRunnable, 350L)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 空闲息屏 / 唤醒亮屏的总开关在设置里，这里只负责把手交给 ScreenAwake。
@@ -51,12 +81,26 @@ class MainActivity : ComponentActivity() {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
         }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(screenReceiver, filter)
+        }
         com.lvyoubao.app.ui.common.ScreenAwake.bind(this)
         enableEdgeToEdge()
         setContent {
             val app = LocalContext.current.applicationContext as TravelApp
-            val appSettings by app.settingsRepository.settings
-                .collectAsState(initial = AiSettings())
+            // 先等 DataStore 首帧真实配置就绪再挂业务屏，防止首帧拿默认值先进 AskScreen 起麦、
+            // 100ms 后又被真实模式替换导致连续两次启停待机唤醒抢麦
+            val loadedSettings by app.settingsRepository.settings
+                .collectAsState(initial = null)
+            val appSettings = loadedSettings ?: return@setContent
+
             // 屏幕方向：机器人（优必选 Visbot）默认锁横屏，手机上默认跟随系统；
             // 设置页可以改成跟随系统 / 锁定横屏 / 锁定竖屏。
             LaunchedEffect(appSettings.screenOrientation) {
@@ -194,6 +238,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        activityStarted = true
+        mainHandler.removeCallbacks(bgMicCheckRunnable)
+        WakeHub.setStandbyAllowed(true)
+    }
+
     override fun onResume() {
         super.onResume()
         // 屏幕被点亮（按键/唤醒锁/回到前台）后重新计时：
@@ -201,7 +252,15 @@ class MainActivity : ComponentActivity() {
         com.lvyoubao.app.ui.common.ScreenAwake.idle()
     }
 
+    override fun onStop() {
+        super.onStop()
+        activityStarted = false
+        scheduleBgMicCheck()
+    }
+
     override fun onDestroy() {
+        mainHandler.removeCallbacks(bgMicCheckRunnable)
+        runCatching { unregisterReceiver(screenReceiver) }
         com.lvyoubao.app.ui.common.ScreenAwake.unbind(this)
         super.onDestroy()
     }

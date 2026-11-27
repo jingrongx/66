@@ -89,9 +89,10 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 设置页——按 .workbuddy/tmp/settings-design.html 的区块重排，现为 11 个：
+ * 设置页——按 .workbuddy/tmp/settings-design.html 的区块重排，现为 12 个：
  * ① 模式与系统 ② 扫码同步 ③ 8 家凭证中心 ④ 核心能力与模型调度（文本 + 语音两块并存）
- * ⑤ 常用地址 ⑥ 桌面与后台 ⑦ 时间与时区 ⑧ 诊断与日志 ⑨ 机器人控制 ⑩ 数据管理与飞轮 ⑪ 关于
+ * ⑤ 常用地址 ⑥ 桌面与后台 ⑦ 时间与时区 ⑧ 诊断与日志 ⑨ 设备兼容与网络 ADB
+ * ⑩ 机器人控制 ⑪ 数据管理与飞轮 ⑫ 关于
  *
  * 配色/间距/字号/控件形状逐项对齐设计稿；日间模式用同一套版式的浅色令牌。
  * 设计稿顶部与底部的「保存全部」按钮按要求不做——改动即自动保存，标题旁只留轻量反馈。
@@ -711,7 +712,21 @@ fun SettingsScreen(
                         }
                     }
 
-                    // ==================== 9. 机器人控制 ====================
+                    // ==================== 9. 设备兼容与网络 ADB ====================
+                    SettingsSectionTitle(
+                        "设备兼容与网络 ADB",
+                        SectionAccent.Indigo,
+                        badge = {
+                            SettingsBadge(
+                                "防抢麦 / 无线调试",
+                                fg = p.dim,
+                                bg = if (dark) Color(0xFF1E293B) else Color(0xFFF1F5F9),
+                            )
+                        },
+                    )
+                    DeviceToolsCard()
+
+                    // ==================== 10. 机器人控制 ====================
                     SettingsSectionTitle("机器人控制", SectionAccent.Fuchsia)
                     SettingsCard {
                         ToggleRow(

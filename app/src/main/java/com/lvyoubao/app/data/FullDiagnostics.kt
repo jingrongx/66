@@ -35,9 +35,28 @@ object FullDiagnostics {
         }.getOrDefault(false)
         lines += "【网络】${if (netOk) "✓ 外网连通" else "✗ 外网不通（检查 Wi-Fi/流量/代理）"}"
 
-        // 2. 麦克风权限
+        // 2. 麦克风权限与 Google 唤醒抢麦风险
         val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         lines += "【麦克风权限】${if (micOk) "✓ 已授予" else "✗ 未授予（设置→应用→权限）"}"
+        val googleWake = DeviceEnvTools.inspectGoogleWakeStatus(context)
+        val wakeConflictText = when (googleWake.state) {
+            DeviceEnvTools.GoogleWakeState.NOT_INSTALLED,
+            DeviceEnvTools.GoogleWakeState.APP_DISABLED -> "✓ 无 Google 唤醒冲突"
+            DeviceEnvTools.GoogleWakeState.MIC_IGNORED -> "✓ Google 录音已禁止"
+            DeviceEnvTools.GoogleWakeState.VOICE_INTERACTION_ACTIVE ->
+                "△ Google 语音唤醒已激活，可能后台抢占麦克风（设置页→设备兼容与网络 ADB 可禁用）"
+            DeviceEnvTools.GoogleWakeState.INSTALLED_INACTIVE ->
+                "△ 已安装 Google（设置页→设备兼容与网络 ADB 可检查麦克风权限）"
+        }
+        lines += "【语音抢麦风险】$wakeConflictText"
+
+        val adbInfo = DeviceEnvTools.inspectNetworkAdbStatus(context)
+        val adbPortDesc = when {
+            adbInfo.tcpPort != null -> "端口 ${adbInfo.tcpPort} 已开"
+            adbInfo.hasRoot -> "未开（Root 可在设置页开启）"
+            else -> "无 Root，端口状态受限"
+        }
+        lines += "【调试网络】Wi-Fi ${adbInfo.lanIp ?: "未连"} · USB调试=${if (adbInfo.adbEnabled) "开" else "关"} · 网络ADB=$adbPortDesc"
 
         // 3. 文本大模型 API（preset/baseUrl/key/model 齐全 + 探测 /models）
         val preset = presetById(s.presetId)
