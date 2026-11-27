@@ -262,13 +262,19 @@ fun AskScreen(
         com.lvyoubao.app.ui.common.WakeHub.stopStandby()
         SpeechInput.startRecording(context)
             .onSuccess { recording = it }
-            .onFailure { vm.setTransientError("录音启动失败，请再试一次") }
+            .onFailure {
+                vm.setTransientError("录音启动失败，请再试一次")
+                com.lvyoubao.app.ui.common.WakeHub.resumeStandby() // 失败后恢复待机，否则喊唤醒词没反应
+            }
     }
 
     val recordPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) beginCloudRecord() else vm.setTransientError("没有录音权限，无法把语音转成文字")
+        if (granted) beginCloudRecord() else {
+            vm.setTransientError("没有录音权限，无法把语音转成文字")
+            com.lvyoubao.app.ui.common.WakeHub.resumeStandby()
+        }
     }
 
     fun startVoice() {
@@ -289,6 +295,7 @@ fun AskScreen(
                     .onSuccess { vm.appendVoiceTranscript(it) }
                     .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
                 listening = false
+                com.lvyoubao.app.ui.common.WakeHub.resumeStandby() // 系统识别失败/结束都恢复待机
             }
         } else {
             vm.setTransientError(

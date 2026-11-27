@@ -201,13 +201,19 @@ fun LargeTextScreen(
                 recordStartTs = System.currentTimeMillis()
                 recordTick = 0
             }
-            .onFailure { vm.setTransientError("录音启动失败，请再试一次") }
+            .onFailure {
+                vm.setTransientError("录音启动失败，请再试一次")
+                WakeHub.resumeStandby() // 失败后恢复待机，否则喊唤醒词没反应
+            }
     }
 
     val recordPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) beginCloudRecord() else vm.setTransientError("没有录音权限，无法把语音转成文字")
+        if (granted) beginCloudRecord() else {
+            vm.setTransientError("没有录音权限，无法把语音转成文字")
+            WakeHub.resumeStandby()
+        }
     }
 
     /** 按下：开始录音（配了转写 Key 走录音+云端转字；没有就用系统识别点一下说） */
@@ -230,6 +236,7 @@ fun LargeTextScreen(
                     .onSuccess { vm.appendVoiceTranscript(it) }
                     .onFailure { vm.setTransientError(it.message ?: "没听清楚，请再试一次") }
                 listening = false
+                WakeHub.resumeStandby() // 系统识别失败/结束都恢复待机
             }
         } else {
             vm.setTransientError("这台手机没有语音识别。可让家人在设置里填「语音识别 Key」（免费），或点输入框打字提问")
