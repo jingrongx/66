@@ -101,6 +101,7 @@ import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.observation.FatigueBand
 import com.lvyoubao.app.data.observation.SensingBus
 import com.lvyoubao.app.ui.ChatViewModel
+import com.lvyoubao.app.ui.common.AutoSpeakEffect
 import com.lvyoubao.app.ui.common.DoubaoCallOverlay
 import com.lvyoubao.app.ui.common.HoldTalkFullScreenOverlay
 import com.lvyoubao.app.ui.common.RichContent
@@ -318,39 +319,15 @@ fun AskScreen(
         }
     }
 
-    // 自动播报：开关打开或经典通话中，AI 一开始吐字就按句开播（豆包 S2S 自己出声，不开 TTS）
-    var spokenTs by remember { mutableStateOf(0L) }
+    // 自动播报：统一由 AutoSpeakEffect 协调（豆包全双工通话及通话产出的消息不重复播报）
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
-    val liveSpeak = !duplexUi.active && (showClassicCall || settings.autoSpeak)
-    LaunchedEffect(liveSpeak) { vm.setLiveSpeakEnabled(liveSpeak) }
-    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showClassicCall, duplexUi.active) {
-        val msg = lastAssistant ?: return@LaunchedEffect
-        // 只读 20 秒内的新回答：切页面/切会话/重进 App 不再把旧消息读一遍
-        val fresh = System.currentTimeMillis() - msg.ts < 20_000
-        if (!duplexUi.active && (showClassicCall || settings.autoSpeak) && msg.ts != spokenTs && fresh) {
-            spokenTs = msg.ts
-            // 等这一轮的播报裁决：PENDING = 流式还在接第一句（4 字首句实测要 1.7 秒才出声），
-            // 最多等 4.5 秒；已经出声就跳过，只有彻底没出声才整段兜底
-            val deadline = System.currentTimeMillis() + 4_500
-            while (System.currentTimeMillis() < deadline && vm.speechState.value == ChatViewModel.Speech.PENDING) {
-                delay(120)
-            }
-            if (vm.speechState.value == ChatViewModel.Speech.STREAMING) {
-                com.lvyoubao.app.data.LogStore.log("autospeak", "流式播报已接手，跳过整段朗读")
-                return@LaunchedEffect
-            }
-            com.lvyoubao.app.data.LogStore.log(
-                "autospeak",
-                "整段兜底播报：回答 ts=${msg.ts} 长度=${ChatViewModel.speakableText(msg).length} 字",
-            )
-            TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
-        } else {
-            com.lvyoubao.app.data.LogStore.log(
-                "autospeak",
-                "跳过本次：开关=${settings.autoSpeak} 通话=$showClassicCall 已读过=${msg.ts == spokenTs} 是否新鲜=$fresh",
-            )
-        }
-    }
+    AutoSpeakEffect(
+        vm = vm,
+        lastAssistant = lastAssistant,
+        autoSpeak = settings.autoSpeak,
+        inClassicCall = showClassicCall,
+        inDuplexCall = duplexUi.active,
+    )
 
     val isDeepSeek = settings.presetId == "deepseek"
 

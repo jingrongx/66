@@ -129,6 +129,11 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
 
     /** 统一开启豆包全双工通话 */
     fun startDuplexCall(settings: AiSettings) {
+        // 开始全双工实时通话前同步停止流式 TTS 与残余朗读状态，避免通话期间或挂断后重复出声
+        liveSpeakEnabled = false
+        liveTts?.cancel()
+        liveTts = null
+        _speech.value = Speech.NONE
         callController.start(
             settings = settings,
             persona = DuplexCallSetup.PERSONA_TRAVEL,
@@ -337,6 +342,7 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                         role = "assistant",
                         text = answer,
                         ts = System.currentTimeMillis(),
+                        fromDuplexCall = true,
                     ),
                 )
             }

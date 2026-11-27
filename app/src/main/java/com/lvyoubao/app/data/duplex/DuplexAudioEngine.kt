@@ -2,12 +2,14 @@ package com.lvyoubao.app.data.duplex
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,8 +40,52 @@ internal class DuplexAudioEngine(
     companion object {
         private const val TAG = "DuplexAudio"
         private const val TARGET_RATE = 16000
-        private const val PLAYBACK_RATE = 24000
+        private const val PLAYBACK_SRC_RATE = 24000
+        private const val PLAYBACK_OUT_RATE = 48000
         private const val FRAME_MS = 20
+
+        /**
+         * 将 24kHz 单声道 PCM16LE 线性插值上采样到 48kHz（2 倍点数），与 TtsPlayer 保持同一播放采样率与波形连续性。
+         * [carrySample] 为上一块结尾样本，保证块边界平滑无台阶；返回「48kHz 字节数组 + 本块最后一个源样本」。
+         */
+        internal fun upsample24kTo48k(src: ByteArray, carrySample: Short): Pair<ByteArray, Short> {
+            val samples = src.size / 2
+            if (samples <= 0) return ByteArray(0) to carrySample
+            val dst = ByteArray(samples * 4)
+            var prev = carrySample.toInt()
+            var di = 0
+            for (i in 0 until samples) {
+                val si = i * 2
+                val curr = ((src[si + 1].toInt() shl 8) or (src[si].toInt() and 0xFF)).toShort().toInt()
+                val mid = prev + (curr - prev) / 2
+                dst[di] = (mid and 0xFF).toByte()
+                dst[di + 1] = ((mid shr 8) and 0xFF).toByte()
+                dst[di + 2] = (curr and 0xFF).toByte()
+                dst[di + 3] = ((curr shr 8) and 0xFF).toByte()
+                di += 4
+                prev = curr
+            }
+            return dst to prev.toShort()
+        }
+
+        private fun hasExternalAudioOutput(am: AudioManager): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                return am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { dev ->
+                    when (dev.type) {
+                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                        AudioDeviceInfo.TYPE_USB_DEVICE,
+                        AudioDeviceInfo.TYPE_USB_ACCESSORY -> true
+                        else -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            dev.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                    }
+                }
+            }
+            @Suppress("DEPRECATION")
+            return am.isWiredHeadsetOn || am.isBluetoothA2dpOn || am.isBluetoothScoOn
+        }
     }
 
     /** 一组采集配置：采样率 × 采集源 */
@@ -57,13 +103,46 @@ internal class DuplexAudioEngine(
 
     private val audioManager = context.getSystemService(AudioManager::class.java)
     private var prevAudioMode: Int? = null
+    private var prevSpeakerphoneOn: Boolean? = null
     private var aec: AcousticEchoCanceler? = null
     private var recorder: AudioRecord? = null
     private var player: AudioTrack? = null
     private var captureJob: Job? = null
+    private var playbackJob: Job? = null
     @Volatile private var capturing = false
     private val pcmQueue = ConcurrentLinkedQueue<ByteArray>()
+    private var playCarrySample: Short = 0
     private val playLock = Any()
+
+    /** 确保语音采集具备 AEC/AGC 通信模式，同时未插耳机时走外放免提避免误切听筒或音量偏小 */
+    private fun ensureAudioRouting() {
+        val am = audioManager ?: return
+        // voip 通道要靠 AudioManager 的通信模式才会启用 AEC/AGC，否则增益可能失控
+        if (prevAudioMode == null) {
+            prevAudioMode = am.mode
+            runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
+        }
+        if (prevSpeakerphoneOn == null && !hasExternalAudioOutput(am)) {
+            val currentSpeaker = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+            prevSpeakerphoneOn = currentSpeaker
+            if (!currentSpeaker) {
+                runCatching { am.isSpeakerphoneOn = true }
+            }
+        }
+    }
+
+    private fun restoreAudioRouting() {
+        val am = audioManager ?: return
+        prevSpeakerphoneOn?.let { wasOn ->
+            runCatching { am.isSpeakerphoneOn = wasOn }
+            prevSpeakerphoneOn = null
+        }
+        // 还原系统音频模式，别把整机留在通信模式（会影响媒体音量/铃声路由）
+        prevAudioMode?.let { mode ->
+            runCatching { am.mode = mode }
+            prevAudioMode = null
+        }
+    }
 
     /** 48k/32k 采集降采样到 16k（factor 点均值，够 ASR 用，还能压掉部分高频噪声） */
     private fun downsampleTo16k(src: ByteArray, factor: Int): ByteArray {
@@ -94,11 +173,7 @@ internal class DuplexAudioEngine(
     /** 开始采集。调用前需已拿到 RECORD_AUDIO 权限。 */
     fun startCapture(): Boolean {
         if (capturing) return true
-        // voip 通道要靠 AudioManager 的通信模式才会启用 AEC/AGC，否则增益可能失控
-        if (prevAudioMode == null) {
-            prevAudioMode = audioManager?.mode
-            runCatching { audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION }
-        }
+        ensureAudioRouting()
         val cfg = ladder[cfgIndex.coerceIn(0, ladder.lastIndex)]
         val frameBytes = cfg.rate * FRAME_MS / 1000 * 2
         val minBuf = AudioRecord.getMinBufferSize(
@@ -227,29 +302,34 @@ internal class DuplexAudioEngine(
         return startCapture()
     }
 
-    /** 启动播放（24k）。在 session.created 后调用即可，先启动避免首包丢失。 */
+    /** 启动播放（输入 24kHz 上采样至 48kHz 媒体流，对齐微软 TTS 音量与外放曲线）。 */
     fun startPlayback() {
         if (player != null) return
+        ensureAudioRouting()
+        synchronized(playLock) {
+            playCarrySample = 0
+        }
         val minBuf = AudioTrack.getMinBufferSize(
-            PLAYBACK_RATE,
+            PLAYBACK_OUT_RATE,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
+        // 使用 USAGE_MEDIA 与微软 TTS（STREAM_MUSIC）走同一套媒体音量和外放均衡曲线，并上采样到 48kHz
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
             .setAudioFormat(
                 AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(PLAYBACK_RATE)
+                    .setSampleRate(PLAYBACK_OUT_RATE)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build()
             )
-            .setBufferSizeInBytes(maxOf(minBuf * 2, PLAYBACK_RATE * 2)) // 约 1s 缓冲
+            .setBufferSizeInBytes(maxOf(minBuf * 2, PLAYBACK_OUT_RATE * 2)) // 约 1s 缓冲
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         try {
@@ -259,26 +339,30 @@ internal class DuplexAudioEngine(
             track.release()
             return
         }
-        player = track
-        scope.launch(Dispatchers.IO) {
-            val chunk = ByteArray(4096)
+        synchronized(playLock) {
+            player = track
+        }
+        Log.d(TAG, "AudioTrack 已启动（${PLAYBACK_SRC_RATE}→${PLAYBACK_OUT_RATE}Hz / USAGE_MEDIA）")
+
+        playbackJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
-                val pcm = pcmQueue.poll()
-                if (pcm == null) {
+                val up = synchronized(playLock) {
+                    val pcm = pcmQueue.poll() ?: return@synchronized null
+                    val (resampled, nextCarry) = upsample24kTo48k(pcm, playCarrySample)
+                    playCarrySample = nextCarry
+                    resampled
+                }
+                if (up == null) {
                     delay(10)
                     continue
                 }
                 var offset = 0
-                while (offset < pcm.size) {
-                    val n = minOf(chunk.size, pcm.size - offset)
-                    System.arraycopy(pcm, offset, chunk, 0, n)
-                    offset += n
-                    var written = 0
-                    while (written < n) {
-                        val w = track.write(chunk, written, n - written)
-                        if (w <= 0) break
-                        written += w
-                    }
+                while (offset < up.size && isActive) {
+                    val w = runCatching {
+                        track.write(up, offset, up.size - offset, AudioTrack.WRITE_BLOCKING)
+                    }.getOrDefault(-1)
+                    if (w <= 0) break
+                    offset += w
                 }
             }
         }
@@ -292,7 +376,10 @@ internal class DuplexAudioEngine(
 
     /** 插话打断：立刻停掉当前播报，丢弃未播缓冲（对应 response.cancel 的本地侧） */
     fun flushPlayback() {
-        synchronized(playLock) { pcmQueue.clear() }
+        synchronized(playLock) {
+            pcmQueue.clear()
+            playCarrySample = 0
+        }
         try {
             player?.pause()
             player?.flush()
@@ -309,8 +396,11 @@ internal class DuplexAudioEngine(
         captureJob?.cancel()
         captureJob = null
         releaseRecorder()
+        playbackJob?.cancel()
+        playbackJob = null
         synchronized(playLock) {
             pcmQueue.clear()
+            playCarrySample = 0
             try {
                 if (player?.state == AudioTrack.STATE_INITIALIZED) player?.stop()
             } catch (e: IllegalStateException) {
@@ -319,11 +409,7 @@ internal class DuplexAudioEngine(
             player?.release()
             player = null
         }
-        // 还原系统音频模式，别把整机留在通信模式（会影响媒体音量/铃声路由）
-        prevAudioMode?.let { mode ->
-            runCatching { audioManager?.mode = mode }
-            prevAudioMode = null
-        }
+        restoreAudioRouting()
         Log.d(TAG, "音频引擎已停止")
     }
 }

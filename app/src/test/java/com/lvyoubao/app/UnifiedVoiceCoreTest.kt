@@ -3,8 +3,12 @@ package com.lvyoubao.app
 import com.lvyoubao.app.data.CallTimer
 import com.lvyoubao.app.data.DeviceVolume
 import com.lvyoubao.app.data.LocalCommandRouter
+import com.lvyoubao.app.data.SessionMessage
+import com.lvyoubao.app.data.duplex.DuplexAudioEngine
+import com.lvyoubao.app.ui.common.AUTO_SPEAK_FRESH_WINDOW_MS
 import com.lvyoubao.app.ui.common.HoldTalkController
 import com.lvyoubao.app.ui.common.WakeHub
+import com.lvyoubao.app.ui.common.shouldAutoSpeakFallback
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -114,5 +118,146 @@ class UnifiedVoiceCoreTest {
         val transcribing = HoldTalkController.State(pressing = false, listening = true)
         assertFalse(transcribing.isRecording)
         assertTrue(transcribing.isBusy)
+    }
+
+    @Test
+    fun `shouldAutoSpeakFallback 全双工通话产物与挂断切回严禁重复播报`() {
+        val now = 1_000_000L
+        val normalMsg = SessionMessage(
+            role = "assistant",
+            text = "杭州明天晴，气温 22 度。",
+            ts = now - 3_000L,
+        )
+        val duplexMsg = normalMsg.copy(fromDuplexCall = true)
+        val userMsg = SessionMessage(role = "user", text = "天气如何", ts = now - 1_000L)
+
+        // 普通文本/按住说话的新回复，且开着自动朗读 -> 正常播报
+        assertTrue(
+            shouldAutoSpeakFallback(
+                msg = normalMsg,
+                autoSpeak = true,
+                inClassicCall = false,
+                inDuplexCall = false,
+                suppressed = false,
+                lastSpokenTs = 0L,
+                nowMs = now,
+            )
+        )
+        // 经典通话中即使没开自动朗读也应当播报
+        assertTrue(
+            shouldAutoSpeakFallback(
+                msg = normalMsg,
+                autoSpeak = false,
+                inClassicCall = true,
+                inDuplexCall = false,
+                suppressed = false,
+                lastSpokenTs = 0L,
+                nowMs = now,
+            )
+        )
+        // 豆包全双工通话中禁止插手
+        assertFalse(
+            shouldAutoSpeakFallback(
+                msg = normalMsg,
+                autoSpeak = true,
+                inClassicCall = false,
+                inDuplexCall = true,
+                suppressed = false,
+                lastSpokenTs = 0L,
+                nowMs = now,
+            )
+        )
+        // 全双工挂断后（inDuplexCall 变为 false），只要消息来源是实时通话，即便才过去 3 秒也严禁微软 TTS 复读
+        assertFalse(
+            shouldAutoSpeakFallback(
+                msg = duplexMsg,
+                autoSpeak = true,
+                inClassicCall = false,
+                inDuplexCall = false,
+                suppressed = false,
+                lastSpokenTs = 0L,
+                nowMs = now,
+            )
+        )
+        // 同一条 ts 只允许播报一次；超过新鲜窗口、非助手消息或有遮挡均不播
+        assertFalse(
+            shouldAutoSpeakFallback(
+                msg = normalMsg,
+                autoSpeak = true,
+                inClassicCall = false,
+                inDuplexCall = false,
+                suppressed = false,
+                lastSpokenTs = normalMsg.ts,
+                nowMs = now,
+            )
+        )
+        assertFalse(
+            shouldAutoSpeakFallback(
+                msg = normalMsg.copy(ts = now - AUTO_SPEAK_FRESH_WINDOW_MS),
+                autoSpeak = true,
+                inClassicCall = false,
+                inDuplexCall = false,
+                suppressed = false,
+                lastSpokenTs = 0L,
+                nowMs = now,
+            )
+        )
+        assertFalse(
+            shouldAutoSpeakFallback(
+                msg = userMsg,
+                autoSpeak = true,
+                inClassicCall = false,
+                inDuplexCall = false,
+                suppressed = false,
+                lastSpokenTs = 0L,
+                nowMs = now,
+            )
+        )
+        assertFalse(
+            shouldAutoSpeakFallback(
+                msg = normalMsg,
+                autoSpeak = true,
+                inClassicCall = false,
+                inDuplexCall = false,
+                suppressed = true,
+                lastSpokenTs = 0L,
+                nowMs = now,
+            )
+        )
+    }
+
+    @Test
+    fun `DuplexAudioEngine upsample24kTo48k 线性插值倍率与跨块连续`() {
+        fun encodeSamples(vararg values: Short): ByteArray {
+            val bytes = ByteArray(values.size * 2)
+            values.forEachIndexed { idx, s ->
+                bytes[idx * 2] = (s.toInt() and 0xFF).toByte()
+                bytes[idx * 2 + 1] = ((s.toInt() shr 8) and 0xFF).toByte()
+            }
+            return bytes
+        }
+
+        fun decodeSamples(bytes: ByteArray): List<Short> =
+            (0 until bytes.size / 2).map { i ->
+                ((bytes[i * 2 + 1].toInt() shl 8) or (bytes[i * 2].toInt() and 0xFF)).toShort()
+            }
+
+        val (emptyOut, preservedCarry) = DuplexAudioEngine.upsample24kTo48k(ByteArray(0), 123)
+        assertEquals(0, emptyOut.size)
+        assertEquals(123.toShort(), preservedCarry)
+
+        val (firstOut, firstCarry) = DuplexAudioEngine.upsample24kTo48k(encodeSamples(100, 300), 0)
+        assertEquals(listOf<Short>(50, 100, 200, 300), decodeSamples(firstOut))
+        assertEquals(300.toShort(), firstCarry)
+
+        // 下一块沿用上一块结尾样本 300 做中点插值，消除块间台阶
+        val (secondOut, secondCarry) = DuplexAudioEngine.upsample24kTo48k(encodeSamples(500), firstCarry)
+        assertEquals(listOf<Short>(400, 500), decodeSamples(secondOut))
+        assertEquals(500.toShort(), secondCarry)
+
+        // 负奇数差值与 TtsPlayer (prev + (curr - prev) / 2) 舍入口径一致
+        val (negOut, negCarry) = DuplexAudioEngine.upsample24kTo48k(encodeSamples(-1), 0)
+        assertEquals(listOf<Short>(0, -1), decodeSamples(negOut))
+        assertEquals((-1).toShort(), negCarry)
     }
 }

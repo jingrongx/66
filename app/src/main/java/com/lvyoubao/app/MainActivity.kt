@@ -92,6 +92,8 @@ class MainActivity : ComponentActivity() {
             registerReceiver(screenReceiver, filter)
         }
         com.lvyoubao.app.ui.common.ScreenAwake.bind(this)
+        // 统一让硬件音量键始终调节媒体流（与微软 TTS 及实时语音通话下行保持同一通道）
+        volumeControlStream = android.media.AudioManager.STREAM_MUSIC
         enableEdgeToEdge()
         setContent {
             val app = LocalContext.current.applicationContext as TravelApp

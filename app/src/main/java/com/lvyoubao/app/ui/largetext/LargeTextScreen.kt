@@ -114,6 +114,7 @@ import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.ui.ChatViewModel
 import com.lvyoubao.app.ui.SentImageThumbnails
 import com.lvyoubao.app.ui.common.CardShareDialog
+import com.lvyoubao.app.ui.common.AutoSpeakEffect
 import com.lvyoubao.app.ui.common.CardShareTipDialog
 import com.lvyoubao.app.ui.common.DoubaoCallOverlay
 import com.lvyoubao.app.ui.common.HoldTalkFullScreenOverlay
@@ -398,27 +399,14 @@ fun LargeTextScreen(
 
     // ---------- 自动朗读：流式吐字即开播 + 兜底整段读 ----------
     val lastAssistant = messages.lastOrNull { it.role == "assistant" }
-    var spokenTs by remember { mutableStateOf(0L) }
-    LaunchedEffect(settings.autoSpeak, showClassicCall, duplexUi.active) {
-        val duplexCall = duplexUi.active
-        vm.setLiveSpeakEnabled(!duplexCall && (showClassicCall || settings.autoSpeak))
-    }
-    LaunchedEffect(lastAssistant?.ts, settings.autoSpeak, showClassicCall, duplexUi.active, showSettings, showUpdate) {
-        val msg = lastAssistant ?: return@LaunchedEffect
-        val fresh = System.currentTimeMillis() - msg.ts < 20_000
-        val overlayOpen = showSettings || showUpdate
-        val duplexCall = duplexUi.active
-        if (!duplexCall && (showClassicCall || settings.autoSpeak) && !overlayOpen && msg.ts != spokenTs && fresh) {
-            spokenTs = msg.ts
-            val deadline = System.currentTimeMillis() + 4_500
-            while (System.currentTimeMillis() < deadline && vm.speechState.value == ChatViewModel.Speech.PENDING) {
-                delay(120)
-            }
-            if (vm.speechState.value == ChatViewModel.Speech.STREAMING) return@LaunchedEffect
-            com.lvyoubao.app.data.LogStore.log("autospeak", "整段兜底播报：流式没出声，回答 ${msg.text.length} 字")
-            TtsPlayer.speak(context, ChatViewModel.speakableText(msg))
-        }
-    }
+    AutoSpeakEffect(
+        vm = vm,
+        lastAssistant = lastAssistant,
+        autoSpeak = settings.autoSpeak,
+        inClassicCall = showClassicCall,
+        inDuplexCall = duplexUi.active,
+        suppressed = showSettings || showUpdate,
+    )
 
     LaunchedEffect(messages.size, state.sending, streamState?.answer?.length) {
         if (messages.isNotEmpty()) {

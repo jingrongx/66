@@ -25,6 +25,8 @@ data class SessionMessage(
     val imagePaths: List<String> = emptyList(),
     val mapCard: MapCardData? = null,   // 地图卡：问路线/地点时由工具层捕获，会话里直接渲染
     val ts: Long,
+    // 来自豆包全双工实时语音通话：S2S 已原声播报，切回对话界面后禁止被自动朗读重复播报
+    val fromDuplexCall: Boolean = false,
 ) {
     /** 还原会话上下文中的完整正文（含要点步骤 steps 与行动建议 action，杜绝多轮对话丢失上下文） */
     fun toChatText(): String {
