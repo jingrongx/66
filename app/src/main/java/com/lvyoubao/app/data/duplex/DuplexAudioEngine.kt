@@ -149,19 +149,53 @@ internal class DuplexAudioEngine(
             if (prevAudioMode == null) prevAudioMode = am.mode
             runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
         }
-        runCatching { am.isSpeakerphoneOn = enabled }
-        Log.i(TAG, "通话声道切换：${if (enabled) "免提外放" else "听筒"}")
+        applySpeakerphoneRoute(am, enabled)
+        Log.i(
+            TAG,
+            "通话声道切换：${if (enabled) "免提外放" else "听筒"}（mode=${am.mode}, speaker=${isSpeakerOutputActive(am)}）",
+        )
         if (enabled) {
             scope.launch(Dispatchers.Main) {
                 delay(180)
                 if (_callAudioActive.value && desiredSpeakerphone) {
-                    if (!runCatching { am.isSpeakerphoneOn }.getOrDefault(false)) {
-                        runCatching { am.isSpeakerphoneOn = true }
+                    if (!isSpeakerOutputActive(am)) {
+                        applySpeakerphoneRoute(am, true)
                     }
                     syncVoiceVolumeIfNeeded()
                 }
             }
         }
+    }
+
+    /** 统一切换免提/听筒路由：API 31+ 走 setCommunicationDevice，老版本及兜底走 isSpeakerphoneOn */
+    private fun applySpeakerphoneRoute(am: AudioManager, enableSpeaker: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val targetType = if (enableSpeaker) {
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            } else {
+                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            }
+            val targetDev = runCatching {
+                am.availableCommunicationDevices.firstOrNull { it.type == targetType }
+            }.getOrNull()
+            if (targetDev != null) {
+                runCatching { am.setCommunicationDevice(targetDev) }
+            } else if (!enableSpeaker) {
+                runCatching { am.clearCommunicationDevice() }
+            }
+        }
+        @Suppress("DEPRECATION")
+        runCatching { am.isSpeakerphoneOn = enableSpeaker }
+    }
+
+    private fun isSpeakerOutputActive(am: AudioManager): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val commType = runCatching { am.communicationDevice?.type }.getOrNull()
+            if (commType == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) return true
+            if (commType == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) return false
+        }
+        @Suppress("DEPRECATION")
+        return runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
     }
 
     /** 确保语音采集具备 AEC/AGC 通信模式，并按设置或手动切换路由到免提外放 / 听筒 */
@@ -173,16 +207,15 @@ internal class DuplexAudioEngine(
             runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
         }
         if (prevSpeakerphoneOn == null) {
-            prevSpeakerphoneOn = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+            prevSpeakerphoneOn = isSpeakerOutputActive(am)
         }
         val targetSpeaker = resolveSpeakerphoneTarget(
             desired = desiredSpeakerphone,
             hasExternal = hasExternalAudioOutput(am),
             userOverrode = userOverrodeSpeakerphone,
         )
-        val curSpeaker = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
-        if (curSpeaker != targetSpeaker) {
-            runCatching { am.isSpeakerphoneOn = targetSpeaker }
+        if (isSpeakerOutputActive(am) != targetSpeaker || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            applySpeakerphoneRoute(am, targetSpeaker)
         }
         _callAudioActive.value = true
     }
@@ -191,7 +224,7 @@ internal class DuplexAudioEngine(
     private fun syncVoiceVolumeIfNeeded() {
         if (speakerVolumeSynced) return
         val am = audioManager ?: return
-        val isSpeakerActive = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+        val isSpeakerActive = isSpeakerOutputActive(am)
         if (!isSpeakerActive) return
         speakerVolumeSynced = true
         val minVoice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -217,7 +250,11 @@ internal class DuplexAudioEngine(
         speakerVolumeSynced = false
         userOverrodeSpeakerphone = false
         val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching { am.clearCommunicationDevice() }
+        }
         prevSpeakerphoneOn?.let { wasOn ->
+            @Suppress("DEPRECATION")
             runCatching { am.isSpeakerphoneOn = wasOn }
             prevSpeakerphoneOn = null
         }

@@ -12,6 +12,8 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 通话声道路由控制：调用 setMode(MODE_IN_COMMUNICATION) / setSpeakerphoneOn / setCommunicationDevice 切换听筒与免提必需 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- 唤醒亮屏：灵动模式空闲息屏后，喊唤醒词用唤醒锁把屏幕点亮 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!--

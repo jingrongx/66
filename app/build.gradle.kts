@@ -17,8 +17,8 @@ android {
         applicationId = "com.lvyoubao.app"
         minSdk = 21 // 覆盖比亚迪宋等 Android 5.1（API 22）车机
         targetSdk = 35
-        versionCode = 196
-        versionName = "0.9.73"
+        versionCode = 197
+        versionName = "0.9.74"
         // 应用名走占位符：debug 构建在 buildTypes 里覆盖成「旅游宝β」，真机上和正式版好区分
         manifestPlaceholders["appLabel"] = "@string/app_name"
 

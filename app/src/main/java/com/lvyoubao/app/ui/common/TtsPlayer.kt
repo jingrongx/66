@@ -2,12 +2,14 @@ package com.lvyoubao.app.ui.common
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaPlayer
+import android.os.Build
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -186,19 +188,37 @@ object TtsPlayer {
             callAudioManager = am
             if (prevCallAudioMode == null) prevCallAudioMode = am.mode
             if (prevCallSpeakerphone == null) {
+                @Suppress("DEPRECATION")
                 prevCallSpeakerphone = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
             }
             runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val earpiece = runCatching {
+                    am.availableCommunicationDevices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                    }
+                }.getOrNull()
+                if (earpiece != null) {
+                    runCatching { am.setCommunicationDevice(earpiece) }
+                } else {
+                    runCatching { am.clearCommunicationDevice() }
+                }
+            }
+            @Suppress("DEPRECATION")
             runCatching { am.isSpeakerphoneOn = false }
         } else {
             restoreCallAudioRoute()
         }
-        ttsLog("经典通话声道切换：${if (speakerphone) "免提外放" else "听筒"}")
+        ttsLog("经典通话声道切换：${if (speakerphone) "免提外放" else "听筒"}（mode=${am.mode}）")
     }
 
     private fun restoreCallAudioRoute() {
         val am = callAudioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching { am.clearCommunicationDevice() }
+        }
         prevCallSpeakerphone?.let { wasOn ->
+            @Suppress("DEPRECATION")
             runCatching { am.isSpeakerphoneOn = wasOn }
             prevCallSpeakerphone = null
         }
