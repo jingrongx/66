@@ -280,10 +280,11 @@ internal class DuplexAudioEngine(
             // 3. 重新读取最新意图（防止切换期间用户又点了一次）
             val latest = computeDesiredRoute()
             applyRoutePlan(am, latest)
-            openAndMountPlaybackTrack(latest)
             cfgIndex = 0
             saturatedSeconds = 0
+            // 先建录音拿到 audioSessionId，播放轨再复用该会话，保证 AEC 参考有效
             startCaptureWithRetry()
+            openAndMountPlaybackTrack(latest)
             if (latest.outputMode == DuplexOutputMode.VOICE_COMMUNICATION) {
                 scheduleRouteCheck(latest.targetSpeaker)
             }
@@ -478,6 +479,7 @@ internal class DuplexAudioEngine(
         }
         recorder = rec
         // 显式打开系统 AEC 与 NS（切到 MIC 后必须自己开，压掉稳态噪声与扬声器回声）
+        // 附加到录音会话；下行播放轨会复用该会话，AEC 才有本地播放参考可抵消回声
         val aecAvail = AcousticEchoCanceler.isAvailable()
         if (aecAvail) {
             aec = runCatching { AcousticEchoCanceler.create(rec.audioSessionId) }.getOrNull()
@@ -619,11 +621,17 @@ internal class DuplexAudioEngine(
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
+        // 关键：播放轨复用上行 AudioRecord 的音频会话。系统 AEC 附加在录音会话上，
+        // 只有播放轨同会话，AEC 才能拿到"自己刚播出去的声音"作为参考并从上行里抵消，
+        // 否则扬声器外放的播报会被麦克风原样录回，形成回声/自问自答。
+        // 建链保证录音先于播放建立（startAudio / hotSwitchOutputMode 已调整顺序）。
+        val aecSessionId = recorder?.audioSessionId ?: AudioManager.AUDIO_SESSION_ID_GENERATE
         val track = CallAudioRouter.createStreamingAudioTrack(
             useVoiceCall = !isMediaBypass,
             sampleRate = outRate,
             channelMask = AudioFormat.CHANNEL_OUT_MONO,
             bufferSizeInBytes = maxOf(minBuf * 2, outRate * 2), // 约 1s 缓冲
+            sessionId = aecSessionId,
         )
         CallAudioRouter.applyPreferredDevice(
             track = track,

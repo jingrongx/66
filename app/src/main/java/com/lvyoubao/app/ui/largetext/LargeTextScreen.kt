@@ -140,6 +140,33 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
+/**
+ * 大字模式统一尺寸规范：同类按钮/卡片一律套用，避免高度、圆角、图标、字号长短宽窄不一。
+ * - 标准按钮：顶栏三宫格、设置/退出、卡片内操作条、历史页操作、发送；
+ * - 紧凑按钮：嵌在状态条里的清空/取消/先别发/停止响铃等；
+ * - 卡片圆角统一 22dp，主操作区（按住说话/发送/拍照/相册）保持大触控高度但图标字号与规范对齐。
+ */
+private object LtSpec {
+    val ButtonHeight = 48.dp
+    val CompactHeight = 40.dp
+    val Corner = 14.dp
+    val CompactCorner = 12.dp
+    val CardCorner = 22.dp
+    val Icon = 20.dp
+    val TextSize = 16.sp
+    val CompactTextSize = 15.sp
+}
+
+/** 底部主操作区：四个按钮统一 68dp 高、20dp 圆角、20dp 图标；仅"按住说话"文字放大突出 */
+private object DockSpec {
+    val Height = 68.dp
+    val Corner = 20.dp
+    val Icon = 20.dp
+    val SecondaryWidth = 64.dp
+    val TextSize = 16.sp
+    val MicTextSize = 19.sp
+}
+
 private data class QuickPromptCard(
     val title: String,
     val subtitle: String,
@@ -797,30 +824,30 @@ private fun LargeTextTopBar(
                     }
                 }
 
-                // 设置按钮（带汉字，清晰好认）
+                // 设置按钮（与三宫格同规格：等高、等圆角、等图标、等字号）
                 Surface(
                     modifier = Modifier
-                        .height(40.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                        .height(if (compact) LtSpec.CompactHeight else LtSpec.ButtonHeight)
+                        .clip(RoundedCornerShape(LtSpec.Corner))
                         .clickable(onClick = onOpenSettings),
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(LtSpec.Corner),
                     color = palette.softSlotBg,
                     border = BorderStroke(1.dp, palette.cardBorder),
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 10.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
                             Icons.Default.Settings,
                             contentDescription = "设置",
                             tint = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(LtSpec.Icon),
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(5.dp))
                         Text(
                             "设置",
-                            fontSize = 14.sp,
+                            fontSize = LtSpec.TextSize,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             color = MaterialTheme.colorScheme.onSurface,
@@ -828,30 +855,30 @@ private fun LargeTextTopBar(
                     }
                 }
 
-                // 退出按钮（柔红高对比轮廓，防止与日常操作混淆）
+                // 退出按钮（柔红高对比轮廓，防止与日常操作混淆；规格与设置/三宫格一致）
                 Surface(
                     modifier = Modifier
-                        .height(40.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                        .height(if (compact) LtSpec.CompactHeight else LtSpec.ButtonHeight)
+                        .clip(RoundedCornerShape(LtSpec.Corner))
                         .clickable(onClick = onExitApp),
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(LtSpec.Corner),
                     color = palette.dangerSoft,
                     border = BorderStroke(1.dp, palette.danger.copy(alpha = 0.35f)),
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 10.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
                             painter = painterResource(R.drawable.ic_spark_power),
                             contentDescription = "退出",
                             tint = palette.danger,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(LtSpec.Icon),
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(5.dp))
                         Text(
                             "退出",
-                            fontSize = 14.sp,
+                            fontSize = LtSpec.TextSize,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             color = palette.danger,
@@ -867,18 +894,18 @@ private fun LargeTextTopBar(
             ) {
                 TopActionPill(
                     modifier = Modifier.weight(1f),
-                    height = if (compact) 40.dp else 48.dp,
+                    height = if (compact) LtSpec.CompactHeight else LtSpec.ButtonHeight,
                     bgColor = palette.softSlotBg,
                     borderColor = palette.cardBorder,
                     contentColor = MaterialTheme.colorScheme.onSurface,
                     label = "新对话",
                     onClick = onNewChat,
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(LtSpec.Icon))
                 }
                 TopActionPill(
                     modifier = Modifier.weight(1f),
-                    height = if (compact) 40.dp else 48.dp,
+                    height = if (compact) LtSpec.CompactHeight else LtSpec.ButtonHeight,
                     bgColor = palette.softSlotBg,
                     borderColor = palette.cardBorder,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -888,12 +915,12 @@ private fun LargeTextTopBar(
                     Icon(
                         painter = painterResource(R.drawable.ic_lt_history),
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(LtSpec.Icon),
                     )
                 }
                 TopActionPill(
-                    modifier = Modifier.weight(1.1f),
-                    height = if (compact) 40.dp else 48.dp,
+                    modifier = Modifier.weight(1f),
+                    height = if (compact) LtSpec.CompactHeight else LtSpec.ButtonHeight,
                     bgColor = palette.primarySoft,
                     borderColor = palette.primary.copy(alpha = 0.35f),
                     contentColor = palette.primaryOnSoft,
@@ -903,7 +930,7 @@ private fun LargeTextTopBar(
                     Icon(
                         painter = painterResource(R.drawable.ic_spark_phone),
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(LtSpec.Icon),
                     )
                 }
             }
@@ -938,10 +965,10 @@ private fun LargeTextTopBar(
                         Spacer(Modifier.width(10.dp))
                         Surface(
                             modifier = Modifier
-                                .height(44.dp)
-                                .clip(RoundedCornerShape(12.dp))
+                                .height(LtSpec.ButtonHeight)
+                                .clip(RoundedCornerShape(LtSpec.Corner))
                                 .clickable(onClick = onStopAlarm),
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(LtSpec.Corner),
                             color = MaterialTheme.colorScheme.onError,
                         ) {
                             Box(
@@ -950,7 +977,7 @@ private fun LargeTextTopBar(
                             ) {
                                 Text(
                                     "停止响铃",
-                                    fontSize = 15.sp,
+                                    fontSize = LtSpec.TextSize,
                                     fontWeight = FontWeight.Bold,
                                     color = palette.danger,
                                 )
@@ -987,17 +1014,18 @@ private fun LargeTextTopBar(
                         )
                         Surface(
                             modifier = Modifier
-                                .height(34.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .height(LtSpec.CompactHeight)
+                                .clip(RoundedCornerShape(LtSpec.CompactCorner))
                                 .clickable(onClick = onCancelTimer),
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(LtSpec.CompactCorner),
                             color = palette.chromeBg,
+                            border = BorderStroke(1.dp, palette.cardBorder),
                         ) {
                             Box(
-                                modifier = Modifier.padding(horizontal = 10.dp),
+                                modifier = Modifier.padding(horizontal = 14.dp),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Text("取消", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = palette.warmText)
+                                Text("取消", fontSize = LtSpec.CompactTextSize, fontWeight = FontWeight.Bold, color = palette.warmText)
                             }
                         }
                     }
@@ -1055,9 +1083,9 @@ private fun TopActionPill(
     Surface(
         modifier = modifier
             .height(height)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(LtSpec.Corner))
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(LtSpec.Corner),
         color = bgColor,
         border = BorderStroke(1.dp, borderColor),
     ) {
@@ -1073,7 +1101,7 @@ private fun TopActionPill(
                 Spacer(Modifier.width(5.dp))
                 Text(
                     label,
-                    fontSize = 15.sp,
+                    fontSize = LtSpec.TextSize,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1100,7 +1128,7 @@ private fun LargeTextWelcomePanel(
         // 问候与操作指南卡片（精炼文案，确保下方 2×2 快捷卡片首屏全览不截断）
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(LtSpec.CardCorner),
             color = palette.cardBg,
             border = BorderStroke(1.dp, palette.cardBorder),
             shadowElevation = 2.dp,
@@ -1144,9 +1172,9 @@ private fun LargeTextWelcomePanel(
                             modifier = Modifier
                                 .weight(1f)
                                 .defaultMinSize(minHeight = 90.dp)
-                                .clip(RoundedCornerShape(18.dp))
+                                .clip(RoundedCornerShape(LtSpec.CardCorner))
                                 .clickable { onPickSuggestion(card.question) },
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(LtSpec.CardCorner),
                             color = palette.cardBg,
                             border = BorderStroke(1.dp, palette.cardBorder),
                             shadowElevation = 1.dp,
@@ -1186,7 +1214,10 @@ private fun LargeTextWelcomePanel(
     }
 }
 
-/** 用户气泡：右对齐高对比气泡，带时间标记及清晰的 编辑/重发 矢量胶囊 */
+/**
+ * 用户消息卡：与回答卡同构（身份栏 + 正文 + 分隔线 + 底部操作条内嵌），
+ * 右对齐但编辑/重发按钮收进卡片内部，视觉与回答卡一致、不再悬在卡片外。
+ */
 @Composable
 private fun LargeTextUserBubble(
     palette: LargeTextPalette,
@@ -1198,80 +1229,126 @@ private fun LargeTextUserBubble(
         if (message.ts > 0L) SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(message.ts)) else ""
     }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(end = 4.dp, bottom = 4.dp),
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.94f),
+            shape = RoundedCornerShape(LtSpec.CardCorner),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.22f)),
+            shadowElevation = 2.dp,
         ) {
-            Text(
-                if (timeLabel.isNotEmpty()) "我 · $timeLabel" else "我",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-                color = palette.mutedText,
-            )
-        }
-        SelectionContainer {
-            Surface(
-                shape = RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-                border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.22f)),
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (message.imagePaths.isNotEmpty()) {
-                        SentImageThumbnails(paths = message.imagePaths)
-                    }
-                    if (message.text.isNotBlank()) {
-                        Text(
-                            (if (message.imagePaths.isEmpty() && message.hadImage) "【图片】" else "") + message.text,
-                            fontSize = 21.sp,
-                            lineHeight = 31.sp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                    }
-                }
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Surface(
-                modifier = Modifier
-                    .height(40.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onEdit),
-                shape = RoundedCornerShape(12.dp),
-                color = palette.cardBg,
-                border = BorderStroke(1.dp, palette.cardBorder),
-            ) {
+            Column(Modifier.fillMaxWidth()) {
+                // 顶部身份栏（与回答卡对齐：圆点 + "我 · 时间"）
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Default.Edit, contentDescription = null, tint = palette.mutedText, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("编辑", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(palette.primary),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (timeLabel.isNotEmpty()) "我 · $timeLabel" else "我",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.primaryOnSoft,
+                    )
                 }
-            }
-            Surface(
-                modifier = Modifier
-                    .height(40.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onResend),
-                shape = RoundedCornerShape(12.dp),
-                color = palette.cardBg,
-                border = BorderStroke(1.dp, palette.cardBorder),
-            ) {
+                SelectionContainer {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (message.imagePaths.isNotEmpty()) {
+                            SentImageThumbnails(paths = message.imagePaths)
+                        }
+                        if (message.text.isNotBlank()) {
+                            Text(
+                                (if (message.imagePaths.isEmpty() && message.hadImage) "【图片】" else "") + message.text,
+                                fontSize = 21.sp,
+                                lineHeight = 31.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(thickness = 1.dp, color = palette.primary.copy(alpha = 0.22f))
+
+                // 底部操作条：与回答卡同款胶囊（等高、等圆角、等字号），编辑/重发均分宽度
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, tint = palette.mutedText, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("重发", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(LtSpec.ButtonHeight)
+                            .clip(RoundedCornerShape(LtSpec.Corner))
+                            .clickable(onClick = onEdit),
+                        shape = RoundedCornerShape(LtSpec.Corner),
+                        color = palette.cardBg,
+                        border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.3f)),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = null,
+                                tint = palette.primaryOnSoft,
+                                modifier = Modifier.size(LtSpec.Icon),
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                "编辑",
+                                fontSize = LtSpec.TextSize,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.primaryOnSoft,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(LtSpec.ButtonHeight)
+                            .clip(RoundedCornerShape(LtSpec.Corner))
+                            .clickable(onClick = onResend),
+                        shape = RoundedCornerShape(LtSpec.Corner),
+                        color = palette.cardBg,
+                        border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.3f)),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = null,
+                                tint = palette.primaryOnSoft,
+                                modifier = Modifier.size(LtSpec.Icon),
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                "重发",
+                                fontSize = LtSpec.TextSize,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.primaryOnSoft,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1295,7 +1372,7 @@ private fun LargeTextAssistantCard(
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(LtSpec.CardCorner),
         color = palette.cardBg,
         border = BorderStroke(1.dp, palette.cardBorder),
         shadowElevation = 2.dp,
@@ -1434,10 +1511,10 @@ private fun LargeTextAssistantCard(
                 Surface(
                     modifier = Modifier
                         .weight(1.25f)
-                        .height(50.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .height(LtSpec.ButtonHeight)
+                        .clip(RoundedCornerShape(LtSpec.Corner))
                         .clickable(onClick = onToggleSpeak),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(LtSpec.Corner),
                     color = if (ttsActive) palette.dangerSoft else palette.primarySoft,
                     border = BorderStroke(
                         1.dp,
@@ -1453,12 +1530,12 @@ private fun LargeTextAssistantCard(
                             painter = painterResource(if (ttsActive) R.drawable.ic_lt_stop else R.drawable.ic_lt_speaker),
                             contentDescription = null,
                             tint = if (ttsActive) palette.danger else palette.primaryOnSoft,
-                            modifier = Modifier.size(19.dp),
+                            modifier = Modifier.size(LtSpec.Icon),
                         )
                         Spacer(Modifier.width(5.dp))
                         Text(
                             if (ttsActive) "停止读" else "朗读",
-                            fontSize = 16.sp,
+                            fontSize = LtSpec.TextSize,
                             fontWeight = FontWeight.Bold,
                             color = if (ttsActive) palette.danger else palette.primaryOnSoft,
                             maxLines = 1,
@@ -1469,10 +1546,10 @@ private fun LargeTextAssistantCard(
                 Surface(
                     modifier = Modifier
                         .weight(1f)
-                        .height(50.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .height(LtSpec.ButtonHeight)
+                        .clip(RoundedCornerShape(LtSpec.Corner))
                         .clickable(onClick = onToggleMemory),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(LtSpec.Corner),
                     color = if (savedMemory) palette.warmSoft else palette.softSlotBg,
                     border = BorderStroke(
                         1.dp,
@@ -1488,12 +1565,12 @@ private fun LargeTextAssistantCard(
                             if (savedMemory) Icons.Default.CheckCircle else Icons.Default.Star,
                             contentDescription = null,
                             tint = if (savedMemory) palette.warmText else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(LtSpec.Icon),
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(5.dp))
                         Text(
                             if (savedMemory) "已收藏" else "收藏",
-                            fontSize = 16.sp,
+                            fontSize = LtSpec.TextSize,
                             fontWeight = FontWeight.Bold,
                             color = if (savedMemory) palette.warmText else MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
@@ -1504,10 +1581,10 @@ private fun LargeTextAssistantCard(
                 Surface(
                     modifier = Modifier
                         .weight(1f)
-                        .height(50.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .height(LtSpec.ButtonHeight)
+                        .clip(RoundedCornerShape(LtSpec.Corner))
                         .clickable { shareState.open() },
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(LtSpec.Corner),
                     color = palette.softSlotBg,
                     border = BorderStroke(1.dp, palette.cardBorder),
                 ) {
@@ -1520,12 +1597,12 @@ private fun LargeTextAssistantCard(
                             Icons.Default.Share,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(LtSpec.Icon),
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(5.dp))
                         Text(
                             "分享",
-                            fontSize = 16.sp,
+                            fontSize = LtSpec.TextSize,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
@@ -1547,7 +1624,7 @@ private fun LargeTextStreamingCard(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(LtSpec.CardCorner),
         color = palette.cardBg,
         border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.4f)),
         shadowElevation = 2.dp,
@@ -1762,20 +1839,20 @@ private fun LargeTextBottomDock(
                                 )
                                 Surface(
                                     modifier = Modifier
-                                        .height(36.dp)
-                                        .clip(RoundedCornerShape(10.dp))
+                                        .height(LtSpec.CompactHeight)
+                                        .clip(RoundedCornerShape(LtSpec.CompactCorner))
                                         .clickable(onClick = onCancelAutoSend),
-                                    shape = RoundedCornerShape(10.dp),
+                                    shape = RoundedCornerShape(LtSpec.CompactCorner),
                                     color = palette.chromeBg,
                                     border = BorderStroke(1.dp, palette.primary.copy(alpha = 0.4f)),
                                 ) {
                                     Box(
-                                        modifier = Modifier.padding(horizontal = 12.dp),
+                                        modifier = Modifier.padding(horizontal = 14.dp),
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Text(
                                             "先别发",
-                                            fontSize = 14.sp,
+                                            fontSize = LtSpec.CompactTextSize,
                                             fontWeight = FontWeight.Bold,
                                             color = palette.primaryOnSoft,
                                         )
@@ -1866,18 +1943,18 @@ private fun LargeTextBottomDock(
                         Surface(
                             modifier = Modifier
                                 .padding(end = 6.dp)
-                                .height(36.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .height(LtSpec.CompactHeight)
+                                .clip(RoundedCornerShape(LtSpec.CompactCorner))
                                 .clickable(onClick = onClearQuestion),
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(LtSpec.CompactCorner),
                             color = palette.chromeBg,
                             border = BorderStroke(1.dp, palette.cardBorder),
                         ) {
                             Box(
-                                modifier = Modifier.padding(horizontal = 10.dp),
+                                modifier = Modifier.padding(horizontal = 14.dp),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Text("清空", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.mutedText)
+                                Text("清空", fontSize = LtSpec.CompactTextSize, fontWeight = FontWeight.SemiBold, color = palette.mutedText)
                             }
                         }
                     }
@@ -1907,11 +1984,11 @@ private fun LargeTextBottomDock(
                 Surface(
                     modifier = Modifier
                         .weight(1f)
-                        .height(68.dp)
+                        .height(DockSpec.Height)
                         .scale(micScale)
-                        .clip(RoundedCornerShape(20.dp))
+                        .clip(RoundedCornerShape(DockSpec.Corner))
                         .then(holdModifier),
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(DockSpec.Corner),
                     color = when {
                         holdState.isRecording -> palette.danger
                         holdState.listening || wakeOneShot -> palette.primarySoft
@@ -1935,7 +2012,7 @@ private fun LargeTextBottomDock(
                             painter = painterResource(R.drawable.ic_spark_mic),
                             contentDescription = null,
                             tint = contentColor,
-                            modifier = Modifier.size(21.dp),
+                            modifier = Modifier.size(DockSpec.Icon),
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
@@ -1946,7 +2023,7 @@ private fun LargeTextBottomDock(
                                 wakeOneShot -> "请说话…"
                                 else -> "按住说话"
                             },
-                            fontSize = 19.sp,
+                            fontSize = DockSpec.MicTextSize,
                             fontWeight = FontWeight.Bold,
                             color = contentColor,
                             maxLines = 1,
@@ -1956,14 +2033,14 @@ private fun LargeTextBottomDock(
                     }
                 }
 
-                // 发送大按钮（尺寸固定防抖，状态分明）
+                // 发送大按钮（尺寸与拍照/相册一致，状态分明）
                 Surface(
                     modifier = Modifier
-                        .width(74.dp)
-                        .height(68.dp)
-                        .clip(RoundedCornerShape(20.dp))
+                        .width(DockSpec.SecondaryWidth)
+                        .height(DockSpec.Height)
+                        .clip(RoundedCornerShape(DockSpec.Corner))
                         .then(if (canSend) Modifier.clickable(onClick = onSend) else Modifier),
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(DockSpec.Corner),
                     color = if (canSend) palette.primary else palette.softSlotBg,
                     border = if (!canSend) BorderStroke(1.dp, palette.cardBorder) else null,
                 ) {
@@ -1977,12 +2054,12 @@ private fun LargeTextBottomDock(
                             Icons.AutoMirrored.Filled.Send,
                             contentDescription = "发送",
                             tint = sendTint,
-                            modifier = Modifier.size(21.dp),
+                            modifier = Modifier.size(DockSpec.Icon),
                         )
-                        Spacer(Modifier.height(2.dp))
+                        Spacer(Modifier.height(3.dp))
                         Text(
                             "发送",
-                            fontSize = 14.sp,
+                            fontSize = DockSpec.TextSize,
                             fontWeight = FontWeight.Bold,
                             color = sendTint,
                             maxLines = 1,
@@ -2003,10 +2080,10 @@ private fun DockSquareActionButton(
 ) {
     Surface(
         modifier = Modifier
-            .size(width = 58.dp, height = 68.dp)
-            .clip(RoundedCornerShape(18.dp))
+            .size(width = DockSpec.SecondaryWidth, height = DockSpec.Height)
+            .clip(RoundedCornerShape(DockSpec.Corner))
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(DockSpec.Corner),
         color = palette.softSlotBg,
         border = BorderStroke(1.dp, palette.cardBorder),
     ) {
@@ -2019,12 +2096,12 @@ private fun DockSquareActionButton(
                 painter = painterResource(iconRes),
                 contentDescription = label,
                 tint = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(DockSpec.Icon),
             )
             Spacer(Modifier.height(3.dp))
             Text(
                 label,
-                fontSize = 13.sp,
+                fontSize = DockSpec.TextSize,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
@@ -2072,10 +2149,10 @@ private fun LargeTextHistoryOverlay(
                     ) {
                         Surface(
                             modifier = Modifier
-                                .height(44.dp)
-                                .clip(RoundedCornerShape(12.dp))
+                                .height(LtSpec.ButtonHeight)
+                                .clip(RoundedCornerShape(LtSpec.Corner))
                                 .clickable(onClick = onClose),
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(LtSpec.Corner),
                             color = palette.softSlotBg,
                             border = BorderStroke(1.dp, palette.cardBorder),
                         ) {
@@ -2086,10 +2163,10 @@ private fun LargeTextHistoryOverlay(
                                 Icon(
                                     Icons.AutoMirrored.Filled.ArrowBack,
                                     contentDescription = "返回",
-                                    modifier = Modifier.size(20.dp),
+                                    modifier = Modifier.size(LtSpec.Icon),
                                 )
-                                Spacer(Modifier.width(4.dp))
-                                Text("返回", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                Spacer(Modifier.width(5.dp))
+                                Text("返回", fontSize = LtSpec.TextSize, fontWeight = FontWeight.Bold)
                             }
                         }
                         Spacer(Modifier.width(12.dp))
@@ -2102,13 +2179,13 @@ private fun LargeTextHistoryOverlay(
                         )
                         Button(
                             onClick = onNew,
-                            modifier = Modifier.height(44.dp),
-                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.height(LtSpec.ButtonHeight),
+                            shape = RoundedCornerShape(LtSpec.Corner),
                             contentPadding = PaddingValues(horizontal = 14.dp),
                         ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("新对话", fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(LtSpec.Icon))
+                            Spacer(Modifier.width(5.dp))
+                            Text("新对话", fontSize = LtSpec.TextSize, fontWeight = FontWeight.Bold, maxLines = 1)
                         }
                     }
                     HorizontalDivider(thickness = 1.dp, color = palette.cardBorder.copy(alpha = 0.6f))
@@ -2139,9 +2216,9 @@ private fun LargeTextHistoryOverlay(
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(18.dp))
+                                .clip(RoundedCornerShape(LtSpec.CardCorner))
                                 .clickable { onPick(session.id) },
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(LtSpec.CardCorner),
                             color = palette.cardBg,
                             border = BorderStroke(
                                 width = if (selected) 2.dp else 1.dp,
@@ -2202,8 +2279,8 @@ private fun LargeTextHistoryOverlay(
                                 Spacer(Modifier.width(10.dp))
                                 Surface(
                                     modifier = Modifier
-                                        .height(44.dp)
-                                        .clip(RoundedCornerShape(12.dp))
+                                        .height(LtSpec.ButtonHeight)
+                                        .clip(RoundedCornerShape(LtSpec.Corner))
                                         .clickable {
                                             if (confirmDel) {
                                                 pendingDeleteId = null
@@ -2212,25 +2289,25 @@ private fun LargeTextHistoryOverlay(
                                                 pendingDeleteId = session.id
                                             }
                                         },
-                                    shape = RoundedCornerShape(12.dp),
+                                    shape = RoundedCornerShape(LtSpec.Corner),
                                     color = if (confirmDel) palette.danger else palette.dangerSoft,
                                     border = BorderStroke(1.dp, palette.danger.copy(alpha = 0.35f)),
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = if (confirmDel) 12.dp else 10.dp),
+                                        modifier = Modifier.padding(horizontal = 12.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         Icon(
                                             Icons.Default.Delete,
                                             contentDescription = "删除对话",
                                             tint = if (confirmDel) MaterialTheme.colorScheme.onError else palette.danger,
-                                            modifier = Modifier.size(18.dp),
+                                            modifier = Modifier.size(LtSpec.Icon),
                                         )
                                         if (confirmDel) {
                                             Spacer(Modifier.width(4.dp))
                                             Text(
                                                 "确定删?",
-                                                fontSize = 14.sp,
+                                                fontSize = LtSpec.CompactTextSize,
                                                 fontWeight = FontWeight.Bold,
                                                 color = MaterialTheme.colorScheme.onError,
                                             )

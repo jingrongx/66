@@ -63,12 +63,19 @@ internal object CallAudioRouter {
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
 
-    /** 创建流式 PCM16 AudioTrack（兼容 API 21+，统一通过 AudioAttributes 控制流用途） */
+    /**
+     * 创建流式 PCM16 AudioTrack（兼容 API 21+，统一通过 AudioAttributes 控制流用途）。
+     *
+     * [sessionId] 用于与上行 AudioRecord 共享音频会话：系统 AEC（AcousticEchoCanceler）附加在
+     * 采集会话上，只有播放轨也在同一会话时才能拿到本地播放的参考信号、把扬声器里自己说的话从
+     * 上行里抵消掉。默认 AUDIO_SESSION_ID_GENERATE 保持普通一次性播报（如 TTS）的既有行为。
+     */
     fun createStreamingAudioTrack(
         useVoiceCall: Boolean,
         sampleRate: Int,
         channelMask: Int,
         bufferSizeInBytes: Int,
+        sessionId: Int = AudioManager.AUDIO_SESSION_ID_GENERATE,
     ): AudioTrack {
         val attrs = buildPlaybackAttributes(useVoiceCall)
         val format = AudioFormat.Builder()
@@ -82,6 +89,7 @@ internal object CallAudioRouter {
                 .setAudioFormat(format)
                 .setBufferSizeInBytes(bufferSizeInBytes)
                 .setTransferMode(AudioTrack.MODE_STREAM)
+                .setSessionId(sessionId)
                 .build()
         } else {
             AudioTrack(
@@ -89,7 +97,7 @@ internal object CallAudioRouter {
                 format,
                 bufferSizeInBytes,
                 AudioTrack.MODE_STREAM,
-                AudioManager.AUDIO_SESSION_ID_GENERATE,
+                sessionId,
             )
         }
     }
