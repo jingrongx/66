@@ -182,6 +182,12 @@ internal class DuplexAudioEngine(
     private var activePlayback: PlaybackTrack? = null
     private var playCarrySample: Short = 0
 
+    // 软件回声消除：卓易通容器下系统 AEC 不可用、播放走 USAGE_MEDIA 无硬件参考线，
+    // 只能自己把下行播报作为参考从上行里抵消，才能同时保住免提外放与语音打断。
+    private val softwareAec = SoftwareAec()
+    @Volatile private var aecHasReference = false
+    @Volatile private var aecLastRefMs = 0L
+
     private fun logDuplex(msg: String) {
         Log.i(TAG, msg)
         LogStore.log("duplex", msg)
@@ -558,19 +564,29 @@ internal class DuplexAudioEngine(
                     if (peak > secPeak) secPeak = peak
                     frames++
                     if (frames % 50 == 0) {
-                        Log.i(TAG, "上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)}) ${cfg.label}")
+                        // 写 LogStore：应用内日志导出也要能看到上行电平，否则"说话没响应"无法判断
+                        // 是麦克风没声音 / 削顶 / 还是服务端没识别（这三类全在 logcat 里看不到）
+                        logDuplex("上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)}) ${cfg.label}")
                         if (secPeak >= 32000) saturatedSeconds++ else saturatedSeconds = 0
                         if (saturatedSeconds >= 3) {
                             saturatedSeconds = 0
                             if (cfgIndex < activeLadder.lastIndex) {
                                 needNextCfg = true
-                                Log.w(TAG, "上行持续削顶，${cfg.label} 换下一组采集配置")
+                                logDuplex("上行持续削顶，${cfg.label} 换下一组采集配置")
                                 capturing = false
                             }
                         }
                         secPeak = 0
                     }
-                    onPcmFrame(pcm16)
+                    // 软件 AEC：有下行播报参考时，把回声从上行里抵消；参考过期（没在播）则直通。
+                    // 参考过期阈值 1.5s，覆盖播报结束后的尾音与缓冲残余。
+                    val nowMs = System.currentTimeMillis()
+                    val aecActive = aecHasReference && nowMs - aecLastRefMs < 1_500L
+                    val upstream = if (aecActive) softwareAec.process(pcm16, nowMs) else pcm16
+                    if (aecActive && frames % 50 == 0) {
+                        logDuplex("软件AEC 工作中：${softwareAec.stats()}")
+                    }
+                    onPcmFrame(upstream)
                 }
             }
             Log.d(TAG, "采集循环结束 ${cfg.label}")
@@ -727,7 +743,41 @@ internal class DuplexAudioEngine(
     /** 喂入一段 24k PCM16LE 音频（来自下行 delta 的 Base64 解码结果） */
     fun enqueuePlayback(pcm: ByteArray) {
         if (pcm.isEmpty() || stopped) return
+        // 下行 24k 播报作为 AEC 参考（降到 16k 与上行对齐）。必须在上采样/入队前喂，
+        // 因为 pcmQueue 里 MEDIA bypass 会被改成 48k；用原始 24k 源降采样最准确。
+        feedAecReference(pcm)
         synchronized(playLock) { pcmQueue.add(pcm) }
+    }
+
+    /** 24k → 16k 线性插值降采样（3:2），喂给软件 AEC 作参考 */
+    private fun feedAecReference(pcm24: ByteArray) {
+        val inSamples = pcm24.size / 2
+        if (inSamples == 0) return
+        val outSamples = inSamples * 2 / 3
+        if (outSamples <= 0) return
+        val out = ByteArray(outSamples * 2)
+        var o = 0
+        var n = 0
+        while (n < outSamples) {
+            // 输入位置 = n * 1.5
+            val srcPos = n * 3
+            val i0 = srcPos / 2
+            val frac = srcPos % 2
+            val s0 = if (i0 + 1 < pcm24.size) {
+                ((pcm24[i0 * 2 + 1].toInt() shl 8) or (pcm24[i0 * 2].toInt() and 0xFF)).toShort().toInt()
+            } else 0
+            val s1 = if (i0 + 3 < pcm24.size) {
+                ((pcm24[i0 * 2 + 3].toInt() shl 8) or (pcm24[i0 * 2 + 2].toInt() and 0xFF)).toShort().toInt()
+            } else s0
+            val v = if (frac == 0) s0 else (s0 + s1) / 2
+            out[o] = (v and 0xFF).toByte()
+            out[o + 1] = ((v shr 8) and 0xFF).toByte()
+            o += 2
+            n++
+        }
+        softwareAec.feedReference(out)
+        aecHasReference = true
+        aecLastRefMs = System.currentTimeMillis()
     }
 
     /** 插话打断：立刻停掉当前播报，丢弃未播缓冲（对应 response.cancel 的本地侧） */
@@ -737,6 +787,10 @@ internal class DuplexAudioEngine(
             playCarrySample = 0
             activePlayback?.track
         }
+        // 插话打断：丢弃旧参考并复位滤波器，否则用户插话会被旧参考当成回声抵消掉
+        softwareAec.reset()
+        aecHasReference = false
+        aecLastRefMs = 0L
         try {
             track?.pause()
             track?.flush()
@@ -763,6 +817,9 @@ internal class DuplexAudioEngine(
         synchronized(playLock) {
             pcmQueue.clear()
         }
+        softwareAec.reset()
+        aecHasReference = false
+        aecLastRefMs = 0L
         releasePlaybackTrack()
         restoreAudioRouting()
         Log.d(TAG, "音频引擎已停止")

@@ -183,7 +183,9 @@ class DoubaoDuplexClient(private val context: Context) {
                     }
                 }
                 is DuplexProtocol.Downstream.AsrCompleted -> {
-                    Log.d(TAG, "ASR final：${ev.transcript.take(40)}")
+                    // 写 LogStore：应用内日志导出要能看到服务端是否收到上行、识别成了什么，
+                    // 否则"说话没响应"分不清是麦克风没声音 / 上行发不出 / ASR 没命中 / UI 没显示
+                    com.lvyoubao.app.data.LogStore.log("duplex", "ASR final：${ev.transcript.take(40)}")
                     // 若上一轮因嘈杂打断遗留未收口的残余文本且当前不在播报态，先收口清理再进入新问答
                     if (_state.value != State.SPEAKING && turnText.isNotEmpty()) {
                         finishTurn(interrupted = true)
@@ -237,7 +239,7 @@ class DoubaoDuplexClient(private val context: Context) {
                     // 由 response.done 统一收口（官方：播放状态跟 response 走）。
                 }
                 is DuplexProtocol.Downstream.ResponseDone -> {
-                    Log.d(TAG, "response.done 一轮结束 responseId=${ev.responseId}")
+                    com.lvyoubao.app.data.LogStore.log("duplex", "response.done 一轮结束 responseId=${ev.responseId}")
                     setState(State.LISTENING)
                     finishTurn(interrupted = false)
                 }
