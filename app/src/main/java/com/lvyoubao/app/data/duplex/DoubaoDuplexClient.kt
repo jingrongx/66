@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.lvyoubao.app.data.AppTools
+import com.lvyoubao.app.data.LogStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,6 +49,8 @@ class DoubaoDuplexClient(private val context: Context) {
         /** 新一轮识别开始（服务端切了一个新 item）：界面应清空上一轮的识别文字 */
         data object AsrStarted : Event
         data class Asr(val text: String, val isFinal: Boolean) : Event
+        /** 本轮识别失败（噪声误触发或服务端未听清） */
+        data object AsrFailed : Event
         data class Answer(val text: String, val isFinal: Boolean) : Event
         data class StateChanged(val state: State) : Event
         data class Level(val value: Float) : Event
@@ -181,6 +184,10 @@ class DoubaoDuplexClient(private val context: Context) {
                 }
                 is DuplexProtocol.Downstream.AsrCompleted -> {
                     Log.d(TAG, "ASR final：${ev.transcript.take(40)}")
+                    // 若上一轮因嘈杂打断遗留未收口的残余文本且当前不在播报态，先收口清理再进入新问答
+                    if (_state.value != State.SPEAKING && turnText.isNotEmpty()) {
+                        finishTurn(interrupted = true)
+                    }
                     pendingAsr = ev.transcript
                     _events.tryEmit(Event.Asr(ev.transcript, isFinal = true))
                     userSpeaking = false
@@ -193,6 +200,11 @@ class DoubaoDuplexClient(private val context: Context) {
                         ws.send(DuplexProtocol.simple("response.cancel"))
                         _events.tryEmit(Event.HangupRequested)
                     }
+                }
+                is DuplexProtocol.Downstream.AsrFailed -> {
+                    LogStore.log("duplex", "ASR 识别未命中（可能为环境噪声）：${ev.raw.take(120)}")
+                    userSpeaking = false
+                    _events.tryEmit(Event.AsrFailed)
                 }
                 is DuplexProtocol.Downstream.TextDelta -> {
                     turnText.append(ev.delta)
@@ -230,6 +242,7 @@ class DoubaoDuplexClient(private val context: Context) {
                     finishTurn(interrupted = false)
                 }
                 is DuplexProtocol.Downstream.Interrupted -> {
+                    LogStore.log("duplex", "服务端响应被打断/取消（response.canceled）")
                     audio?.flushPlayback()
                     setState(State.LISTENING)
                     finishTurn(interrupted = true)

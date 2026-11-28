@@ -1,8 +1,6 @@
 package com.lvyoubao.app.ui.common
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
@@ -13,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import com.lvyoubao.app.data.CallAudioRouter
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
@@ -141,9 +140,11 @@ object TtsPlayer {
     /** 经典通话切到听筒时为 true，供主界面与语音调节同步切换至 STREAM_VOICE_CALL */
     val useVoiceCallStream: StateFlow<Boolean> = _useVoiceCallStream.asStateFlow()
 
+    private var callContext: Context? = null
     private var callAudioManager: AudioManager? = null
     private var prevCallAudioMode: Int? = null
     private var prevCallSpeakerphone: Boolean? = null
+    private val callFocusSession = CallAudioRouter.AudioFocusSession()
 
     /** DeepSeek TTS 用的主对话 Key（复用 apiKey；与硅基流动 cloudKey 分开存） */
     @Volatile
@@ -162,6 +163,7 @@ object TtsPlayer {
         if (active) {
             callMode = true
             if (context != null) {
+                callContext = context.applicationContext
                 setCallSpeakerphone(context, defaultSpeakerphone)
             } else {
                 callSpeakerphone = defaultSpeakerphone
@@ -174,54 +176,57 @@ object TtsPlayer {
             callSpeakerphone = true
             _useVoiceCallStream.value = false
             restoreCallAudioRoute()
+            callContext = null
             ttsLog("通话播报模式：关")
         }
     }
 
-    /** 经典通话中切换免提外放 / 听筒，立即切换系统音频模式与后续播报流 */
+    /** 经典通话中切换免提外放 / 听筒，立即切换系统音频模式与当前/后续播报流 */
     fun setCallSpeakerphone(context: Context, speakerphone: Boolean) {
+        callContext = context.applicationContext
         callSpeakerphone = speakerphone
         _useVoiceCallStream.value = callMode && !speakerphone
         if (!callMode) return
-        val am = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-        if (!speakerphone) {
-            callAudioManager = am
+        applyCallSpeakerRouteInternal(context.applicationContext)
+    }
+
+    private fun ensureCallAudioRouteIfNeeded(context: Context? = null) {
+        if (!callMode) return
+        val ctx = context?.applicationContext ?: callContext ?: return
+        applyCallSpeakerRouteInternal(ctx)
+    }
+
+    private fun applyCallSpeakerRouteInternal(ctx: Context) {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        callAudioManager = am
+        if (!callSpeakerphone) {
             if (prevCallAudioMode == null) prevCallAudioMode = am.mode
             if (prevCallSpeakerphone == null) {
-                @Suppress("DEPRECATION")
-                prevCallSpeakerphone = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+                prevCallSpeakerphone = CallAudioRouter.isSpeakerOutputActive(am)
             }
-            runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val earpiece = runCatching {
-                    am.availableCommunicationDevices.firstOrNull {
-                        it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-                    }
-                }.getOrNull()
-                if (earpiece != null) {
-                    runCatching { am.setCommunicationDevice(earpiece) }
-                } else {
-                    runCatching { am.clearCommunicationDevice() }
-                }
+            callFocusSession.acquire(am, useVoiceCall = true)
+            if (am.mode != AudioManager.MODE_IN_COMMUNICATION) {
+                runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
             }
-            @Suppress("DEPRECATION")
-            runCatching { am.isSpeakerphoneOn = false }
+            val hasExt = CallAudioRouter.hasExternalAudioOutput(am)
+            val detail = CallAudioRouter.applyCommunicationRoute(
+                am = am,
+                enableSpeaker = false,
+                hasExternal = hasExt,
+                userOverrode = true,
+            )
+            ttsLog("经典通话声道切换：听筒（mode=${am.mode}, $detail）")
         } else {
             restoreCallAudioRoute()
+            ttsLog("经典通话声道切换：免提外放（mode=${am.mode}）")
         }
-        ttsLog("经典通话声道切换：${if (speakerphone) "免提外放" else "听筒"}（mode=${am.mode}）")
     }
 
     private fun restoreCallAudioRoute() {
+        callFocusSession.abandon()
         val am = callAudioManager ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching { am.clearCommunicationDevice() }
-        }
-        prevCallSpeakerphone?.let { wasOn ->
-            @Suppress("DEPRECATION")
-            runCatching { am.isSpeakerphoneOn = wasOn }
-            prevCallSpeakerphone = null
-        }
+        CallAudioRouter.clearCommunicationRoute(am, restoreSpeaker = prevCallSpeakerphone)
+        prevCallSpeakerphone = null
         prevCallAudioMode?.let { mode ->
             runCatching { am.mode = mode }
             prevCallAudioMode = null
@@ -231,6 +236,33 @@ object TtsPlayer {
 
     private fun activeAudioStreamType(): Int =
         if (callMode && !callSpeakerphone) AudioManager.STREAM_VOICE_CALL else AudioManager.STREAM_MUSIC
+
+    private fun buildConfiguredAudioTrack(
+        useVoiceCall: Boolean,
+        sampleRate: Int,
+        channels: Int,
+        bufSize: Int,
+    ): AudioTrack {
+        val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+        val track = CallAudioRouter.createStreamingAudioTrack(
+            useVoiceCall = useVoiceCall,
+            sampleRate = sampleRate,
+            channelMask = chMask,
+            bufferSizeInBytes = bufSize,
+        )
+        val am = callAudioManager ?: callContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (callMode && am != null) {
+            val hasExt = CallAudioRouter.hasExternalAudioOutput(am)
+            CallAudioRouter.applyPreferredDevice(
+                track = track,
+                am = am,
+                targetSpeaker = callSpeakerphone,
+                hasExternal = hasExt,
+                userOverrode = true,
+            )
+        }
+        return track
+    }
 
     /** 当前实际生效的首选引擎 */
     private fun activeEngine(): String = if (callMode && callEngine.isNotBlank()) callEngine else preferredEngine
@@ -323,6 +355,7 @@ object TtsPlayer {
         // 若各自重启一遍，旧句被拦腰打断、新句从头读，听感就是“话赶话”。
         if ((_state.value is State.Loading || _state.value is State.Speaking) && body == currentText) return
         stop()
+        ensureCallAudioRouteIfNeeded(context)
         val myGen = ++generation
         currentText = body
         markEchoRisk(body)
@@ -399,6 +432,7 @@ object TtsPlayer {
     /** 开一轮流水线播报：打断上一轮并返回新的播放代次 */
     fun startStreamSession(): Int {
         stop()
+        ensureCallAudioRouteIfNeeded()
         val gen = ++generation
         currentText = null
         _state.value = State.Loading
@@ -673,61 +707,96 @@ object TtsPlayer {
      * 结束判据也不能看 isPlaying：缓冲/焦点抖动时它会瞬时变 false，一句会被从中间掐断，
      * 同样表现为"播到一半没声音"。改看播放头是否走完，只有连续 1.5 秒不前进才算真卡死。
      */
+    private fun createConfiguredMediaPlayer(file: File, useVoice: Boolean, seekToMs: Int = 0): MediaPlayer {
+        val candidate = MediaPlayer()
+        val am = callAudioManager ?: callContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        candidate.setAudioAttributes(CallAudioRouter.buildPlaybackAttributes(useVoiceCall = useVoice))
+        if (callMode && am != null) {
+            val hasExt = CallAudioRouter.hasExternalAudioOutput(am)
+            CallAudioRouter.applyPreferredDevice(
+                mp = candidate,
+                am = am,
+                targetSpeaker = !useVoice,
+                hasExternal = hasExt,
+                userOverrode = true,
+            )
+        }
+        candidate.setDataSource(file.absolutePath)
+        candidate.prepare()
+        if (seekToMs > 0) runCatching { candidate.seekTo(seekToMs) }
+        return candidate
+    }
+
     private suspend fun playFileAwait(file: File, gen: Int): Boolean {
         return withContext(Dispatchers.Main) {
             // 开播前最后核对一次代次（和 stop()/speak() 同在主线程执行，此检查无竞态窗口）：
             // 已被接管的旧流水线到此为止，一个音都不许出
             if (gen != generation) return@withContext false
 
+            var activeUseVoice = activeAudioStreamType() == AudioManager.STREAM_VOICE_CALL
             var mp: MediaPlayer? = null
             var started = false
             for (attempt in 0 until 2) {
                 if (gen != generation) break
                 if (attempt > 0) delay(120)
-                val candidate = MediaPlayer()
-                mp = candidate
-                player = candidate
-                started = try {
-                    val useVoice = activeAudioStreamType() == AudioManager.STREAM_VOICE_CALL
-                    candidate.setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(
-                                if (useVoice) AudioAttributes.USAGE_VOICE_COMMUNICATION
-                                else AudioAttributes.USAGE_MEDIA,
-                            )
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build(),
-                    )
-                    candidate.setDataSource(file.absolutePath)
-                    candidate.prepare()
-                    if (gen == generation) {
-                        _state.value = State.Speaking
-                        candidate.start()
-                        true
-                    } else {
-                        false
+                activeUseVoice = activeAudioStreamType() == AudioManager.STREAM_VOICE_CALL
+                val candidate = try {
+                    createConfiguredMediaPlayer(file, activeUseVoice).also {
+                        mp = it
+                        player = it
                     }
                 } catch (e: Exception) {
                     ttsLog("播放器起播失败（第 ${attempt + 1} 次）：${e.javaClass.simpleName} ${e.message ?: ""}")
+                    null
+                }
+                started = if (candidate != null && gen == generation) {
+                    runCatching {
+                        _state.value = State.Speaking
+                        candidate.start()
+                        true
+                    }.getOrElse { e ->
+                        ttsLog("播放器 start 失败（第 ${attempt + 1} 次）：${e.javaClass.simpleName} ${e.message ?: ""}")
+                        false
+                    }
+                } else {
                     false
                 }
                 if (!started) {
                     // 只释放自己这个播放器，不误伤后继流水线
-                    runCatching { candidate.release() }
+                    runCatching { candidate?.release() }
                     if (player === candidate) player = null
                     mp = null
                 } else {
                     break
                 }
             }
-            val active = mp
-            if (!started || active == null) return@withContext false
+            var active = mp ?: return@withContext false
+            if (!started) return@withContext false
 
             try {
                 var lastPos = -1
                 var stuckMs = 0L
                 while (true) {
                     if (gen != generation) break
+                    val wantVoice = activeAudioStreamType() == AudioManager.STREAM_VOICE_CALL
+                    if (wantVoice != activeUseVoice) {
+                        val resumePos = runCatching { active.currentPosition }.getOrDefault(0).coerceAtLeast(0)
+                        runCatching { if (active.isPlaying) active.stop() }
+                        runCatching { active.release() }
+                        if (player === active) player = null
+                        val switched = runCatching {
+                            createConfiguredMediaPlayer(file, wantVoice, resumePos).also { nextMp ->
+                                player = nextMp
+                                nextMp.start()
+                            }
+                        }.getOrNull()
+                        if (switched == null) break
+                        active = switched
+                        activeUseVoice = wantVoice
+                        lastPos = resumePos
+                        stuckMs = 0L
+                        ttsLog("MediaPlayer 播报中热切声道：voice=$wantVoice pos=${resumePos}ms")
+                    }
                     val pos = runCatching { active.currentPosition }.getOrDefault(-1)
                     val dur = runCatching { active.duration }.getOrDefault(-1)
                     if (pos < 0) break // 播放器已出错
@@ -796,8 +865,14 @@ object TtsPlayer {
                             if (cont.isActive) cont.resume(Unit)
                         }
                     })
+                    val streamType = activeAudioStreamType()
+                    runCatching {
+                        engine.setAudioAttributes(
+                            CallAudioRouter.buildPlaybackAttributes(useVoiceCall = streamType == AudioManager.STREAM_VOICE_CALL),
+                        )
+                    }
                     val ttsParams = Bundle().apply {
-                        putString(TextToSpeech.Engine.KEY_PARAM_STREAM, activeAudioStreamType().toString())
+                        putString(TextToSpeech.Engine.KEY_PARAM_STREAM, streamType.toString())
                     }
                     val result = engine.speak(
                         text,
@@ -868,6 +943,7 @@ object TtsPlayer {
         private val isCurrent: () -> Boolean,
         private val onStarted: () -> Unit,
     ) {
+        private val trackLock = Any()
         @Volatile private var track: AudioTrack? = null
         private var streamType = AudioManager.STREAM_MUSIC
         private var channels = 1
@@ -915,29 +991,54 @@ object TtsPlayer {
          * 这一层不确定性就没了。
          */
         fun ensureTrack(rate: Int, ch: Int) {
+            if (!alive) return
             val wantStream = activeAudioStreamType()
-            if (track != null && streamType != wantStream) {
-                runCatching { if (track?.playState == AudioTrack.PLAYSTATE_PLAYING) track?.pause() }
-                runCatching { track?.release() }
+            val prevTrack: AudioTrack?
+            val wasStarted: Boolean
+            val needCreate: Boolean
+            synchronized(trackLock) {
+                if (!alive) return
+                if (track != null && streamType == wantStream) return
+                prevTrack = track
+                wasStarted = started
                 track = null
                 started = false
                 writtenBytes = 0L
+                streamType = wantStream
+                channels = if (ch > 0) ch else 1
+                needCreate = true
             }
-            if (!alive || track != null) return
-            streamType = wantStream
-            channels = if (ch > 0) ch else 1
+            prevTrack?.let { old ->
+                runCatching { if (old.playState == AudioTrack.PLAYSTATE_PLAYING) old.pause() }
+                runCatching { old.flush() }
+                runCatching { old.release() }
+            }
+            if (!needCreate || !alive) return
             val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
             val minBuf = AudioTrack.getMinBufferSize(OUT_RATE, chMask, AudioFormat.ENCODING_PCM_16BIT)
             // 缓冲 ≈4 秒 @48kHz：解码耗时、合成空档、录音抢麦都靠它吸收
             val bufSize = maxOf(minBuf * 4, 384_000)
-            track = runCatching {
-                @Suppress("DEPRECATION")
-                AudioTrack(
-                    wantStream, OUT_RATE, chMask, AudioFormat.ENCODING_PCM_16BIT,
-                    bufSize, AudioTrack.MODE_STREAM,
+            val created = runCatching {
+                buildConfiguredAudioTrack(
+                    useVoiceCall = wantStream == AudioManager.STREAM_VOICE_CALL,
+                    sampleRate = OUT_RATE,
+                    channels = channels,
+                    bufSize = bufSize,
                 )
             }.getOrNull()
-            ttsLog("共用音轨就绪：${OUT_RATE}Hz ${channels}ch 缓冲 ${bufSize}B（源 ${rate}Hz → 线性上采样，流=$wantStream）")
+            synchronized(trackLock) {
+                if (!alive) {
+                    runCatching { created?.release() }
+                    return
+                }
+                track = created
+                if (prevTrack != null && wasStarted && created != null) {
+                    // 播报中途切免提/听筒：立即起播新音轨，无缝续读
+                    started = true
+                    runCatching { created.play() }
+                }
+            }
+            ttsLog("共用音轨就绪：${OUT_RATE}Hz ${channels}ch 缓冲 ${bufSize}B（源 ${rate}Hz → 线性上采样，流=$wantStream，热切换=${prevTrack != null}）")
         }
 
         /** 这一段能不能原样写进已建的轨道（声道数不一致会彻底错位，直接刺耳破音） */
@@ -945,8 +1046,9 @@ object TtsPlayer {
             track == null || ch == channels
 
         fun writePcm(buf: java.nio.ByteBuffer, size: Int, srcRate: Int): Int {
-            val t = track ?: return -1
             if (!alive) return -1
+            if (track == null || streamType != activeAudioStreamType()) ensureTrack(srcRate, channels)
+            val t = synchronized(trackLock) { track } ?: return -1
             val frame = 2 * channels
             val n = (size / frame) * frame // 帧对齐：奇数字节会让后面所有样本高低字节错位
             if (n <= 0) return 0
@@ -965,8 +1067,9 @@ object TtsPlayer {
         }
 
         fun writePcm(pcm: ByteArray, offset: Int, len: Int, srcRate: Int): Int {
-            val t = track ?: return -1
             if (!alive) return -1
+            if (track == null || streamType != activeAudioStreamType()) ensureTrack(srcRate, channels)
+            val t = synchronized(trackLock) { track } ?: return -1
             val frame = 2 * channels
             val n = (len / frame) * frame
             if (n <= 0) return 0
@@ -974,18 +1077,23 @@ object TtsPlayer {
         }
 
         /** 上采样后整块写进音轨；返回消费掉的**源**字节数（调用方按它推进 offset） */
-        private fun push(t: AudioTrack, src: ByteArray, offset: Int, len: Int, srcRate: Int): Int {
+        private fun push(initialTrack: AudioTrack, src: ByteArray, offset: Int, len: Int, srcRate: Int): Int {
             val up = resample(src, offset, len, srcRate)
+            var activeTrack = initialTrack
             var off = 0
             while (off < up.size) {
                 if (!alive) return -1
+                if (streamType != activeAudioStreamType()) {
+                    ensureTrack(srcRate, channels)
+                    activeTrack = synchronized(trackLock) { track } ?: return -1
+                }
                 val w = runCatching {
-                    t.write(up, off, up.size - off, AudioTrack.WRITE_BLOCKING)
+                    activeTrack.write(up, off, up.size - off, AudioTrack.WRITE_BLOCKING)
                 }.getOrDefault(-1)
                 if (w <= 0) return -1
                 off += w
+                count(w)
             }
-            count(up.size)
             return len
         }
 
@@ -1055,39 +1163,53 @@ object TtsPlayer {
         }
 
         private fun count(bytes: Int) {
-            writtenBytes += bytes
-            // 攒够预滚量才起播；不够就先让它攒着（见 prerollBytes 的说明）
-            if (started || writtenBytes < prerollBytes) return
-            startNow()
+            val needStart = synchronized(trackLock) {
+                writtenBytes += bytes
+                !started && writtenBytes >= prerollBytes
+            }
+            if (needStart) startNow()
         }
 
         /** 兜底起播：短句可能永远攒不到预滚量，写完就必须放，否则一直不出声 */
         fun ensureStarted() {
-            if (started || writtenBytes <= 0) return
-            startNow()
+            val needStart = synchronized(trackLock) { !started && writtenBytes > 0 }
+            if (needStart) startNow()
         }
 
         private fun startNow() {
-            if (started) return
-            val t = track ?: return
-            started = true
+            val t: AudioTrack?
+            val prerollMs: Int
+            synchronized(trackLock) {
+                if (started) return
+                t = track
+                if (t == null) return
+                started = true
+                prerollMs = (writtenBytes * 1000 / (2L * channels * OUT_RATE)).toInt()
+            }
             // 记下起播时的预滚量：太小 = 后面容易欠载破音，太大 = 首句变慢，调参全靠这行
-            val prerollMs = (writtenBytes * 1000 / (2L * channels * OUT_RATE)).toInt()
             ttsLog("共用音轨起播：预滚 ${prerollMs}ms")
-            runCatching { t.play() }
+            runCatching { t?.play() }
             onStarted()
         }
 
         /** 等播放头追上写入量（= 整段真的播完）；中断时立刻返回 */
         suspend fun awaitDrained() {
-            val t = track ?: return
+            if (synchronized(trackLock) { track } == null) return
             ensureStarted()
-            if (!started) return
+            if (!synchronized(trackLock) { started }) return
             var lastHead = -1L
+            var lastTrack: AudioTrack? = null
             var sameMs = 0L
             while (alive && isCurrent()) {
-                val head = runCatching { t.playbackHeadPosition.toLong() }.getOrDefault(writtenFrames)
-                if (head >= writtenFrames - 2) break
+                val (t, targetFrames) = synchronized(trackLock) { track to writtenFrames }
+                if (t == null) break
+                if (t !== lastTrack) {
+                    lastTrack = t
+                    lastHead = -1L
+                    sameMs = 0L
+                }
+                val head = runCatching { t.playbackHeadPosition.toLong() }.getOrDefault(targetFrames)
+                if (head >= targetFrames - 2) break
                 if (head == lastHead) {
                     sameMs += 40
                     if (sameMs >= 3_000) break // 播放头 3 秒不动 = 真卡死，别把整轮对话挂住
@@ -1100,10 +1222,13 @@ object TtsPlayer {
         }
 
         fun abort() {
-            if (!alive) return
-            alive = false
-            val t = track
-            track = null
+            val t: AudioTrack?
+            synchronized(trackLock) {
+                if (!alive) return
+                alive = false
+                t = track
+                track = null
+            }
             runCatching { t?.pause() }
             runCatching { t?.flush() }
             runCatching { t?.release() }
@@ -1443,6 +1568,7 @@ object TtsPlayer {
         private val input = LinkedBlockingQueue<ByteArray>()
         private var codec: MediaCodec? = null
         private var track: AudioTrack? = null
+        private var trackStreamType = AudioManager.STREAM_MUSIC
         private var sampleRate = 24_000
         private var channels = 1
         private var writtenFrames = 0L
@@ -1541,8 +1667,7 @@ object TtsPlayer {
                         idleAfterEos = 0
                         if (info.size > 0) {
                             ensureTrack(c.outputFormat)
-                            val t = track
-                            if (sink == null && t == null) {
+                            if (sink == null && track == null) {
                                 c.releaseOutputBuffer(outIdx, false)
                                 break
                             }
@@ -1554,7 +1679,9 @@ object TtsPlayer {
                                 val w = if (sink != null) {
                                     sink.writePcm(out, info.size, sampleRate)
                                 } else {
-                                    t!!.write(out, info.size, AudioTrack.WRITE_BLOCKING)
+                                    val t = track!!
+                                    val written = t.write(out, info.size, AudioTrack.WRITE_BLOCKING)
+                                    written
                                 }
                                 if (w > 0) {
                                     sawPcm = true
@@ -1563,7 +1690,7 @@ object TtsPlayer {
                                         writtenBytes += w
                                         if (!started && (writtenBytes >= prerollBytes() || eosQueued)) {
                                             started = true
-                                            t!!.play()
+                                            track?.play()
                                             onStarted()
                                         }
                                     }
@@ -1592,9 +1719,10 @@ object TtsPlayer {
                 }
                 // 等播完：播放头追上写入量（部分 ROM 的回调不可靠，与 playFileAwait 同样用轮询）
                 // 共用音轨时不在这里等——整段回答的收尾由 awaitPlaybackDone 统一等
-                val t = track
-                if (sink == null && t != null && started) {
-                    while (!aborted && isCurrent() && t.playbackHeadPosition < writtenFrames) {
+                if (sink == null && track != null && started) {
+                    while (!aborted && isCurrent()) {
+                        val activeTrack = track ?: break
+                        if (activeTrack.playbackHeadPosition >= writtenFrames) break
                         delay(80)
                     }
                 }
@@ -1612,25 +1740,43 @@ object TtsPlayer {
         private fun prerollBytes(): Long = sampleRate * 2L * channels * 150 / 1000
 
         private fun ensureTrack(fmt: MediaFormat) {
-            if (track != null) return
             runCatching {
                 sampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                 channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             }
-            // 流水线会话：整段回答共用一条音轨，这里只负责把它建起来
+            // 流水线会话：整段回答共用一条音轨，这里只负责把它建起来（含声道热切换）
             if (sink != null) {
                 sink.ensureTrack(sampleRate, channels)
                 return
             }
+            val wantStream = activeAudioStreamType()
+            if (track != null && trackStreamType == wantStream) return
+            val old = track
+            val wasStarted = started
+            track = null
+            old?.let {
+                runCatching { if (it.playState == AudioTrack.PLAYSTATE_PLAYING) it.pause() }
+                runCatching { it.flush() }
+                runCatching { it.release() }
+            }
+            writtenFrames = 0L
+            writtenBytes = 0L
+            trackStreamType = wantStream
             val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
             val minBuf = AudioTrack.getMinBufferSize(sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT)
             // 缓冲给足：Edge 下发快于实时，写入端要能吸收突发（64KB ≈ 1.3 秒 @24kHz 单声道）
             val bufSize = maxOf(minBuf * 4, 64_000)
-            @Suppress("DEPRECATION")
-            track = AudioTrack(
-                activeAudioStreamType(), sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT,
-                bufSize, AudioTrack.MODE_STREAM,
+            val created = buildConfiguredAudioTrack(
+                useVoiceCall = wantStream == AudioManager.STREAM_VOICE_CALL,
+                sampleRate = sampleRate,
+                channels = channels,
+                bufSize = bufSize,
             )
+            track = created
+            if (old != null && wasStarted) {
+                started = true
+                runCatching { created.play() }
+            }
         }
 
         private fun releaseInternal() {

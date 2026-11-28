@@ -19,6 +19,7 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import androidx.core.content.FileProvider
 import com.lvyoubao.app.R
+import com.lvyoubao.app.data.DeviceProfile
 import com.lvyoubao.app.data.RichBlocks
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.ui.common.drawTableBitmap
@@ -41,7 +42,6 @@ import kotlinx.coroutines.withContext
 object CardSharer {
 
     private const val WECHAT_PACKAGE = "com.tencent.mm"
-    private const val ZHUOYI_STORE_PACKAGE = "com.zhuoyi.appstore.lite"
 
     // 配色与 app 主题呼应：近黑正文、浅灰辅助、白色卡面
     private const val CARD_BG = 0xFFFFFFFF.toInt()
@@ -167,22 +167,8 @@ object CardSharer {
             bitmap
         }
 
-    /**
-     * 是否运行在鸿蒙 NEXT 的卓易通安卓容器里。Build.*（MANUFACTURER/BRAND/MODEL）全被容器伪装，
-     * 只能靠容器特征判断：①安装来源是卓易通内置商店（出境易等同系商店按 com.zhuoyi. 前缀一起命中）；
-     * ②商店本体跑在容器里、安卓层可直接看到其包名（应用内更新等侧载路径的兜底信号）。
-     */
-    fun isZhuoyiContainer(context: Context): Boolean = runCatching {
-        val pm = context.packageManager
-        val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            pm.getInstallSourceInfo(context.packageName).installingPackageName
-        } else {
-            @Suppress("DEPRECATION")
-            pm.getInstallerPackageName(context.packageName)
-        }
-        if (installer?.startsWith("com.zhuoyi.") == true) return@runCatching true
-        runCatching { pm.getPackageInfo(ZHUOYI_STORE_PACKAGE, 0) }.isSuccess
-    }.getOrDefault(false)
+    /** 是否运行在鸿蒙 NEXT 的卓易通安卓容器里（统一委托给 [DeviceProfile.isZhuoyiContainer]）。 */
+    fun isZhuoyiContainer(context: Context): Boolean = DeviceProfile.isZhuoyiContainer(context)
 
     /**
      * 分享图片到微信：先探测微信能否被安卓层拉起——

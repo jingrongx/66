@@ -1,14 +1,18 @@
 package com.lvyoubao.app
 
 import com.lvyoubao.app.data.AiSettings
+import com.lvyoubao.app.data.CallAudioRouter
 import com.lvyoubao.app.data.CallTimer
 import com.lvyoubao.app.data.ConfigSyncCodec
+import com.lvyoubao.app.data.DeviceProfile
 import com.lvyoubao.app.data.DeviceVolume
 import com.lvyoubao.app.data.LocalCommandRouter
 import com.lvyoubao.app.data.SessionMessage
+import com.lvyoubao.app.data.SessionStore
 import com.lvyoubao.app.data.SyncableConfig
 import com.lvyoubao.app.data.duplex.DuplexAudioEngine
 import com.lvyoubao.app.data.duplex.DuplexCallController
+import com.lvyoubao.app.data.duplex.DuplexTurnsTracker
 import com.lvyoubao.app.ui.common.AUTO_SPEAK_FRESH_WINDOW_MS
 import com.lvyoubao.app.ui.common.HoldTalkController
 import com.lvyoubao.app.ui.common.WakeHub
@@ -291,5 +295,111 @@ class UnifiedVoiceCoreTest {
         // 旧版二维码缺少 callSpeakerphone（null）时保留接收端原有配置
         val legacyMerged = ConfigSyncCodec.merge(AiSettings(callSpeakerphone = false), SyncableConfig())
         assertFalse(legacyMerged.callSpeakerphone)
+    }
+
+    @Test
+    fun `DeviceProfile isZhuoyiEnvironment 识别卓易通容器特征而不误伤原生安卓`() {
+        assertTrue(DeviceProfile.isZhuoyiEnvironment(installer = "com.zhuoyi.appstore.lite", cgroupText = null, hasContainerPkg = false))
+        assertTrue(DeviceProfile.isZhuoyiEnvironment(installer = "com.droi.tong", cgroupText = null, hasContainerPkg = false))
+        assertTrue(DeviceProfile.isZhuoyiEnvironment(installer = null, cgroupText = "0::/isulad/anco_box", hasContainerPkg = false))
+        assertTrue(DeviceProfile.isZhuoyiEnvironment(installer = null, cgroupText = "0::/droi/container", hasContainerPkg = false))
+        assertTrue(DeviceProfile.isZhuoyiEnvironment(installer = null, cgroupText = null, hasContainerPkg = true))
+        // "android" 含有 "droi" 子串，绝不能误判原生安卓包安装器或 cgroup 为卓易通容器
+        assertFalse(DeviceProfile.isZhuoyiEnvironment(installer = "com.android.packageinstaller", cgroupText = "0::/android/uid_10123", hasContainerPkg = false))
+        assertFalse(DeviceProfile.isZhuoyiEnvironment(installer = "com.google.android.packageinstaller", cgroupText = "0::/uid_10123", hasContainerPkg = false))
+    }
+
+    @Test
+    fun `CallAudioRouter 路由决策区分卓易通免提媒体绕过与原生通信通路`() {
+        // 鸿蒙卓易通：免提切至 MEDIA_SPEAKER_BYPASS 绕开容器 voip 听筒锁死；听筒保持 VOICE_COMMUNICATION
+        assertEquals(
+            CallAudioRouter.DuplexOutputMode.MEDIA_SPEAKER_BYPASS,
+            CallAudioRouter.resolveDuplexOutputMode(isZhuoyi = true, targetSpeaker = true),
+        )
+        assertEquals(
+            CallAudioRouter.DuplexOutputMode.VOICE_COMMUNICATION,
+            CallAudioRouter.resolveDuplexOutputMode(isZhuoyi = true, targetSpeaker = false),
+        )
+        // 原生安卓：免提/听筒均走 VOICE_COMMUNICATION，完整保留硬件 AEC
+        assertEquals(
+            CallAudioRouter.DuplexOutputMode.VOICE_COMMUNICATION,
+            CallAudioRouter.resolveDuplexOutputMode(isZhuoyi = false, targetSpeaker = true),
+        )
+        assertEquals(
+            CallAudioRouter.DuplexOutputMode.VOICE_COMMUNICATION,
+            CallAudioRouter.resolveDuplexOutputMode(isZhuoyi = false, targetSpeaker = false),
+        )
+        // API 31+ setCommunicationDevice 成功后绝不回调 deprecated isSpeakerphoneOn 以防覆盖路由
+        assertFalse(CallAudioRouter.shouldUseLegacySpeakerphoneFallback(sdkInt = 31, targetDeviceFound = true, setCommSucceeded = true))
+        assertTrue(CallAudioRouter.shouldUseLegacySpeakerphoneFallback(sdkInt = 31, targetDeviceFound = false, setCommSucceeded = false))
+        assertTrue(CallAudioRouter.shouldUseLegacySpeakerphoneFallback(sdkInt = 30, targetDeviceFound = true, setCommSucceeded = true))
+    }
+
+    @Test
+    fun `DuplexAudioEngine upsample24kTo48k 连续线性插值保持采样连续且长度翻倍`() {
+        // 两个 16-bit 样本: 100 和 200 (little-endian), 上一块尾样本 carry = 0
+        val src = byteArrayOf(100, 0, (200 and 0xFF).toByte(), 0)
+        val (out, nextCarry) = DuplexAudioEngine.upsample24kTo48k(src, prevCarry = 0)
+        assertEquals(8, out.size)
+        assertEquals(200.toShort(), nextCarry)
+        fun sampleAt(idx: Int): Short {
+            val b0 = out[idx * 2].toInt() and 0xFF
+            val b1 = out[idx * 2 + 1].toInt() shl 8
+            return (b0 or b1).toShort()
+        }
+        assertEquals(50.toShort(), sampleAt(0))
+        assertEquals(100.toShort(), sampleAt(1))
+        assertEquals(150.toShort(), sampleAt(2))
+        assertEquals(200.toShort(), sampleAt(3))
+    }
+
+    @Test
+    fun `DuplexTurnsTracker 隔绝历史回答串接并在嘈杂环境中保护已识别问句`() {
+        val tracker = DuplexTurnsTracker()
+        // 第一轮正常问答收口
+        tracker.onAsrStarted()
+        tracker.onAsr("今天几度", isFinal = true, nowMs = 1_000L)
+        tracker.onAnswer("今天二十度。", isFinal = false, nowMs = 1_500L)
+        tracker.onTurnDone("今天几度", "今天二十度。", nowMs = 2_000L)
+        assertEquals(2, tracker.turns.size)
+        assertEquals("今天二十度。", tracker.turns[1].text)
+
+        // 第二轮开始：新 ASR 起振并识别问句，此时嘈杂环境触发空起振 + 识别失败，已识别出的第二轮问句绝不能被抹成空白
+        tracker.onAsrStarted()
+        tracker.onAsr("明天会下雨吗", isFinal = true, nowMs = 5_000L)
+        tracker.onAsrStarted() // 噪声误起振
+        tracker.onAsrFailed()  // 噪声音频未成句
+        assertEquals(3, tracker.turns.size)
+        assertEquals("user", tracker.turns[2].role)
+        assertEquals("明天会下雨吗", tracker.turns[2].text)
+
+        // 第二轮开始流式回答：绝不能接在上一轮「今天二十度。」后面再跳回
+        tracker.onAnswer("明天", isFinal = false, nowMs = 5_500L)
+        assertEquals(4, tracker.turns.size)
+        assertEquals("明天", tracker.turns[3].text)
+        tracker.onAnswer("晴天", isFinal = false, nowMs = 5_800L)
+        assertEquals("明天晴天", tracker.turns[3].text)
+        tracker.onTurnDone("明天会下雨吗", "明天晴天。", nowMs = 6_200L)
+        assertEquals("明天晴天。", tracker.turns[3].text)
+        assertFalse(tracker.turns[3].streaming)
+    }
+
+    @Test
+    fun `SessionStore 关联抓拍图片到用户消息且保证时间戳严格单调不出现助手后跟用户`() {
+        val u1 = SessionMessage(role = "user", text = "看看前面有什么", ts = 1000L)
+        val afterUser = SessionStore.appendOrdered(emptyList(), u1)
+        val withPhoto = SessionStore.attachImagesToLastUserMessage(afterUser, listOf("/tmp/snap.jpg"))!!
+        val finalMsgs = SessionStore.appendOrdered(
+            withPhoto,
+            SessionMessage(role = "assistant", text = "前面是一张木桌", ts = 1000L), // 故意传入同毫秒时间戳验证单调递增
+        )
+        assertEquals(2, finalMsgs.size)
+        assertEquals("user", finalMsgs[0].role)
+        assertTrue(finalMsgs[0].hadImage)
+        assertEquals(listOf("/tmp/snap.jpg"), finalMsgs[0].imagePaths)
+        assertEquals("assistant", finalMsgs[1].role)
+        assertTrue(finalMsgs[1].ts > finalMsgs[0].ts)
+        // 若末尾已是 assistant，不可强行挂图以免错挂
+        assertNull(SessionStore.attachImagesToLastUserMessage(finalMsgs, listOf("/tmp/other.jpg")))
     }
 }

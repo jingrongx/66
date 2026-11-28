@@ -8,6 +8,8 @@ import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.SessionStore
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
@@ -42,21 +44,46 @@ object SparkChatStore {
     private var sessionId: String? = null
     private var scope: CoroutineScope? = null
     private var appCtx: Context? = null
+    /** 单消费者串行落库队列：严格按内存更新顺序写入 SessionStore，杜绝主线程/IO 线程并发反序 */
+    private var persistQueue: Channel<suspend () -> Unit>? = null
+    private var persistWorkerJob: Job? = null
     /** 当前这条 assistant 是否已经落库（流式只落一次，之后都是就地更新） */
+    @Volatile
     private var assistantPersisted = false
 
     /** 绑定到当前会话：把磁盘上的历史读进来，同时把 LLM 上下文也补齐 */
+    @Synchronized
     fun bind(context: Context, sessionStore: SessionStore, sid: String, coroutineScope: CoroutineScope) {
         appCtx = context.applicationContext
         store = sessionStore
         sessionId = sid
         scope = coroutineScope
+        persistQueue?.close()
+        persistWorkerJob?.cancel()
+        val ch = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+        persistQueue = ch
+        persistWorkerJob = coroutineScope.launch {
+            for (op in ch) {
+                runCatching { op() }
+            }
+        }
         val loaded = sessionStore.get(sid)?.messages.orEmpty()
         messages.value = loaded.map { it.toSpark() }
         history.clear()
         loaded.forEach { history += OutMessage(role = it.role, text = it.toChatText()) }
         assistantPersisted = loaded.lastOrNull()?.let { it.role == "assistant" && it.text.isNotBlank() } == true
         LogStore.log("spark", "会话已打通：载入 " + loaded.size + " 条历史（session=" + sid.take(8) + "）")
+    }
+
+    private fun enqueuePersist(op: suspend (SessionStore, String) -> Unit) {
+        val sid = sessionId ?: return
+        val st = store ?: return
+        val ch = persistQueue
+        if (ch != null) {
+            ch.trySend { op(st, sid) }
+        } else {
+            scope?.launch { op(st, sid) }
+        }
     }
 
     /** 会话消息 → 灵动界面消息（图片按 1/2 降采样解码，别把内存吃穿） */
@@ -84,15 +111,14 @@ object SparkChatStore {
         }
     }
 
+    @Synchronized
     private fun persistAppend(msg: SparkMessage) {
-        val sid = sessionId ?: return
-        val st = store ?: return
-        val sc = scope ?: return
         // assistant 的空占位不落库：请求失败/被打断时不能给历史留一张空卡
         if (msg.role == "assistant" && msg.text.isBlank()) return
         val paths = savePhotos(msg.photos)
         assistantPersisted = msg.role == "assistant"
-        sc.launch {
+        val ts = System.currentTimeMillis()
+        enqueuePersist { st, sid ->
             st.appendMessage(
                 sid,
                 SessionMessage(
@@ -100,50 +126,81 @@ object SparkChatStore {
                     text = msg.text,
                     hadImage = paths.isNotEmpty(),
                     imagePaths = paths,
-                    ts = System.currentTimeMillis(),
+                    ts = ts,
                 ),
             )
         }
     }
 
     /** 流式正文就地更新到最后一条 assistant（没落过库就先落一条） */
+    @Synchronized
     private fun persistAssistantText(text: String) {
         if (text.isBlank()) return
-        val sid = sessionId ?: return
-        val st = store ?: return
-        val sc = scope ?: return
         if (assistantPersisted) {
-            sc.launch { st.updateLastAssistant(sid, text) }
+            enqueuePersist { st, sid -> st.updateLastAssistant(sid, text) }
         } else {
             assistantPersisted = true
-            sc.launch {
+            val ts = System.currentTimeMillis()
+            enqueuePersist { st, sid ->
                 st.appendMessage(
                     sid,
-                    SessionMessage(role = "assistant", text = text, ts = System.currentTimeMillis()),
+                    SessionMessage(role = "assistant", text = text, ts = ts),
                 )
             }
         }
     }
 
+    /** 把抓拍到的照片挂到最近一条 user 气泡上；若末尾非 user 返回 false 交由调用方先补一条 user */
+    @Synchronized
+    fun attachPhotosToLastUser(photos: List<Bitmap>): Boolean {
+        if (photos.isEmpty()) return false
+        val list = messages.value.toMutableList()
+        val lastIdx = list.lastIndex
+        if (lastIdx < 0 || list[lastIdx].role != "user") return false
+        val prev = list[lastIdx]
+        list[lastIdx] = prev.copy(photos = prev.photos + photos)
+        messages.value = list
+        val paths = savePhotos(photos)
+        if (paths.isNotEmpty()) {
+            enqueuePersist { st, sid ->
+                st.attachImageToLastUser(sid, paths)
+            }
+        }
+        return true
+    }
+
+    /** 复用或新建末尾助手占位（如 LOOK 抓拍期间“正在观察”复用进最终流式回答） */
+    @Synchronized
+    fun upsertAssistantPlaceholder(text: String) {
+        val list = messages.value.toMutableList()
+        val last = list.lastOrNull()
+        if (last != null && last.role == "assistant") {
+            list[list.lastIndex] = last.copy(text = text)
+            messages.value = list
+            if (text.isNotBlank()) persistAssistantText(text)
+        } else {
+            append(SparkMessage("assistant", text))
+        }
+    }
 
     /** 把工具带回的地图卡挂到最后一条回答上（内存 + 落库都做，切模式回来也还在） */
+    @Synchronized
     fun attachMapCard(card: com.lvyoubao.app.data.MapCardData) {
         val list = messages.value.toMutableList()
         val idx = list.indexOfLast { it.role == "assistant" }
         if (idx < 0) return
         list[idx] = list[idx].copy(mapCard = card)
         messages.value = list
-        val sid = sessionId ?: return
-        val st = store ?: return
-        val sc = scope ?: return
-        sc.launch { st.attachMapCard(sid, card) }
+        enqueuePersist { st, sid -> st.attachMapCard(sid, card) }
     }
 
+    @Synchronized
     fun append(msg: SparkMessage) {
         messages.value = (messages.value + msg).takeLast(40) // 上限防照片占内存
         persistAppend(msg)
     }
 
+    @Synchronized
     fun updateLastAssistant(text: String) {
         val list = messages.value.toMutableList()
         if (list.isNotEmpty() && list.last().role == "assistant") {
@@ -158,6 +215,7 @@ object SparkChatStore {
      * 若这次请求被新问题顶掉 / 超时没收尾，那条空卡片就永远停在「…」上——
      * 用户看到一串点点，会以为整个界面卡死了。
      */
+    @Synchronized
     fun clearStalePlaceholders() {
         val list = messages.value
         if (list.none { it.role == "assistant" && it.text.isBlank() }) return

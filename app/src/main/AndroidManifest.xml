@@ -52,8 +52,10 @@
         <package android:name="com.autonavi.minimap" />
         <!-- 包可见性：卡片分享判断微信是否安装（未装则退回系统分享面板） -->
         <package android:name="com.tencent.mm" />
-        <!-- 包可见性：卓易通环境检测（鸿蒙 NEXT 的安卓容器里微信拉不起，直接走系统分享面板） -->
+        <!-- 包可见性：卓易通/出境易容器环境检测（鸿蒙 NEXT 的安卓容器里微信与通话路由需专门适配） -->
         <package android:name="com.zhuoyi.appstore.lite" />
+        <package android:name="com.zhuoyi.appstore" />
+        <package android:name="com.droi.tong" />
         <!-- 包可见性：检测 Google 语音唤醒应用与跳转热词设置，防后台强占麦克风 -->
         <package android:name="com.google.android.googlequicksearchbox" />
         <intent>

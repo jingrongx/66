@@ -432,14 +432,19 @@ class SparkViewModel(private val app: TravelApp) : ViewModel() {
         photos: List<PendingPhoto>,
         userLabel: String,
         prompt: String,
+        attachToLastUser: Boolean = false,
     ) {
-        appendMessage(SparkMessage("user", userLabel, photos.map { it.bitmap }))
-        appendMessage(SparkMessage("assistant", "小源正在观察画面…"))
+        val bitmaps = photos.map { it.bitmap }
+        val attached = attachToLastUser && SparkChatStore.attachPhotosToLastUser(bitmaps)
+        if (!attached) {
+            appendMessage(SparkMessage("user", userLabel, bitmaps))
+        }
+        SparkChatStore.upsertAssistantPlaceholder("小源正在观察画面…")
         _pendingPhotos.value = emptyList()
         _showEyes.value = false
         _eyeState.value = SparkEyeState.THINKING
         _statusHint.value = "小源正在观察…"
-        sendAiRequest(context, prompt, photos.map { it.dataUrl })
+        sendAiRequest(context, prompt, photos.map { it.dataUrl }, reuseLastAssistant = true)
     }
 
     /** 统一问答与本地指令入口 */
@@ -492,7 +497,7 @@ class SparkViewModel(private val app: TravelApp) : ViewModel() {
                 speakHint(appContext, outcome.replyText)
             }
             is LocalCommandRouter.Outcome.LookRequested -> {
-                executeLook(appContext, outcome.userAsk)
+                executeLook(appContext, outcome.userAsk, attachToLastUser = true)
             }
             LocalCommandRouter.Outcome.NotHandled -> {
                 sendAiRequest(appContext, clean, photos.map { it.dataUrl })
@@ -529,7 +534,11 @@ class SparkViewModel(private val app: TravelApp) : ViewModel() {
         }
     }
 
-    private suspend fun executeLook(context: Context, userAsk: String? = null) {
+    private suspend fun executeLook(
+        context: Context,
+        userAsk: String? = null,
+        attachToLastUser: Boolean = false,
+    ) {
         if (!CameraSnapshotHelper.hasCameraPermission(context)) {
             appendMessage(SparkMessage("assistant", "需要相机权限才能帮你看，请点一下底部相机按钮授权一次。"))
             _statusHint.value = "需要相机权限"
@@ -555,6 +564,7 @@ class SparkViewModel(private val app: TravelApp) : ViewModel() {
             } else {
                 "这是小源眼前刚拍到的画面，请用通俗易懂的自然口语说说前面有什么：最主要的东西是什么、有没有人，一两句话即可。"
             },
+            attachToLastUser = attachToLastUser,
         )
     }
 
@@ -563,12 +573,17 @@ class SparkViewModel(private val app: TravelApp) : ViewModel() {
         context: Context,
         userText: String,
         imageDataUrls: List<String>,
+        reuseLastAssistant: Boolean = false,
     ) {
         aiRequestJob?.cancel()
         liveTts?.cancel()
         liveTts = null
         SparkChatStore.clearStalePlaceholders()
-        appendMessage(SparkMessage("assistant", ""))
+        if (reuseLastAssistant) {
+            SparkChatStore.upsertAssistantPlaceholder("")
+        } else {
+            appendMessage(SparkMessage("assistant", ""))
+        }
         val tEnter = SystemClock.elapsedRealtime()
 
         val requestJob = viewModelScope.launch(Dispatchers.IO) {

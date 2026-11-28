@@ -98,11 +98,7 @@ class DuplexCallController(
     }
 
     private val pendingMapCards = mutableListOf<MapCardData>()
-    private var answerBuf = ""
-    private var lastAssistantText = ""
-    private var lastAssistantAt = 0L
-    private var suppressedEchoAsr = ""
-    private var suppressedEchoAt = 0L
+    private val tracker = DuplexTurnsTracker(echoGuardWindowMs = ECHO_GUARD_WINDOW_MS)
     private var lastVoiceAt = 0L
     private var lastTurnKey = ""
     private var localHandledAsr = ""
@@ -142,11 +138,7 @@ class DuplexCallController(
         ScreenAwake.pin("豆包通话")
         NetKeep.acquire(appContext, "doubao-call")
 
-        answerBuf = ""
-        lastAssistantText = ""
-        lastAssistantAt = 0L
-        suppressedEchoAsr = ""
-        suppressedEchoAt = 0L
+        tracker.reset()
         lastTurnKey = ""
         localHandledAsr = ""
         localHandledAt = 0L
@@ -239,6 +231,7 @@ class DuplexCallController(
         collapseJob?.cancel()
         timerJob?.cancel()
         client.close()
+        tracker.reset()
         NetKeep.release("doubao-call")
         ScreenAwake.unpin("豆包通话")
         _ui.value = UiState(active = false, uiVisible = false)
@@ -278,32 +271,26 @@ class DuplexCallController(
         }
     }
 
-    private fun handleEvent(ev: DoubaoDuplexClient.Event) {
+    internal fun handleEvent(ev: DoubaoDuplexClient.Event) {
         when (ev) {
             is DoubaoDuplexClient.Event.AsrStarted -> {
-                updateUserTurn("")
+                tracker.onAsrStarted()
+                syncTurns()
+            }
+            is DoubaoDuplexClient.Event.AsrFailed -> {
+                tracker.onAsrFailed()
+                syncTurns()
             }
             is DoubaoDuplexClient.Event.Asr -> {
                 val now = System.currentTimeMillis()
                 lastVoiceAt = now
-                val recentAssistant = answerBuf.ifBlank { lastAssistantText }
-                if (ev.isFinal && ev.text.isNotBlank() &&
-                    recentAssistant.isNotBlank() &&
-                    now - lastAssistantAt <= ECHO_GUARD_WINDOW_MS &&
-                    isLikelyEchoTranscript(ev.text, recentAssistant)
-                ) {
+                if (tracker.onAsr(ev.text, isFinal = ev.isFinal, nowMs = now)) {
                     LogStore.log("duplex", "拦截自述回声 ASR：${ev.text.take(40)}")
-                    suppressedEchoAsr = ev.text
-                    suppressedEchoAt = now
-                    removeEchoTurns(ev.text)
+                    syncTurns()
                     client.cancelResponse()
                     return
                 }
-                if (ev.isFinal && ev.text.isNotBlank()) {
-                    suppressedEchoAsr = ""
-                    suppressedEchoAt = 0L
-                }
-                updateUserTurn(ev.text)
+                syncTurns()
                 if (autoCollapseEnabled && !_ui.value.uiVisible && ev.text.isNotBlank()) {
                     _ui.update { it.copy(uiVisible = true) }
                 }
@@ -315,10 +302,8 @@ class DuplexCallController(
                         if (confirm != null) {
                             client.cancelResponse()
                             client.speak(confirm)
-                            answerBuf = confirm
-                            lastAssistantText = confirm
-                            lastAssistantAt = System.currentTimeMillis()
-                            updateAssistantTurn(confirm, done = true)
+                            tracker.onLocalConfirmAnswer(confirm, System.currentTimeMillis())
+                            syncTurns()
                             localHandledAsr = said
                             localHandledAt = System.currentTimeMillis()
                             onCommitTurn(said, confirm, emptyList())
@@ -329,21 +314,8 @@ class DuplexCallController(
             is DoubaoDuplexClient.Event.Answer -> {
                 val now = System.currentTimeMillis()
                 lastVoiceAt = now
-                if (suppressedEchoAt > 0L && now - suppressedEchoAt < 2_500L) {
-                    return
-                }
-                answerBuf = if (ev.isFinal) {
-                    ev.text
-                } else if (answerBuf.isNotEmpty() && ev.text.startsWith(answerBuf)) {
-                    ev.text
-                } else {
-                    answerBuf + ev.text
-                }
-                if (answerBuf.isNotBlank()) {
-                    lastAssistantText = answerBuf
-                    lastAssistantAt = now
-                }
-                updateAssistantTurn(answerBuf, done = ev.isFinal)
+                tracker.onAnswer(ev.text, isFinal = ev.isFinal, nowMs = now)
+                syncTurns()
             }
             is DoubaoDuplexClient.Event.ToolCall -> {
                 lastVoiceAt = System.currentTimeMillis()
@@ -380,25 +352,13 @@ class DuplexCallController(
             is DoubaoDuplexClient.Event.TurnDone -> {
                 val now = System.currentTimeMillis()
                 lastVoiceAt = now
-                val recentRef = lastAssistantText.ifBlank { answerBuf }
-                val isSuppressedEcho = ev.asr.isNotBlank() && (
-                    (ev.asr == suppressedEchoAsr && now - suppressedEchoAt <= ECHO_GUARD_WINDOW_MS) ||
-                        (recentRef.isNotBlank() && now - lastAssistantAt <= ECHO_GUARD_WINDOW_MS &&
-                            isLikelyEchoTranscript(ev.asr, recentRef))
-                    )
-                if (isSuppressedEcho) {
+                if (tracker.onTurnDone(ev.asr, ev.answer, nowMs = now)) {
                     LogStore.log("duplex", "丢弃回声轮次落库：${ev.asr.take(40)}")
-                    removeEchoTurns(ev.asr)
                     pendingMapCards.clear()
-                    answerBuf = lastAssistantText
+                    syncTurns()
                     return
                 }
-                answerBuf = ev.answer
-                if (ev.answer.isNotBlank()) {
-                    lastAssistantText = ev.answer
-                    lastAssistantAt = now
-                }
-                updateAssistantTurn(ev.answer, done = true)
+                syncTurns()
                 if (ev.answer.isNotBlank()) {
                     val handledLocally = ev.asr.isNotBlank() &&
                         ev.asr == localHandledAsr &&
@@ -417,12 +377,10 @@ class DuplexCallController(
                 pendingMapCards.clear()
             }
             is DoubaoDuplexClient.Event.SessionReady -> {
-                answerBuf = ""
-                lastAssistantText = ""
-                lastAssistantAt = 0L
-                suppressedEchoAsr = ""
-                suppressedEchoAt = 0L
+                tracker.reset()
                 lastTurnKey = ""
+                localHandledAsr = ""
+                localHandledAt = 0L
                 pendingMapCards.clear()
                 _ui.update { it.copy(hint = null, turns = emptyList(), photos = emptyList()) }
             }
@@ -437,48 +395,8 @@ class DuplexCallController(
         }
     }
 
-    private fun updateUserTurn(text: String) {
-        _ui.update { st ->
-            val list = st.turns.toMutableList()
-            val i = list.lastIndex
-            if (i >= 0 && list[i].role == "user") {
-                list[i] = list[i].copy(text = text)
-            } else {
-                list.add(DuplexTurnUi("user", text, streaming = true))
-                if (list.size > 30) list.removeAt(0)
-            }
-            st.copy(turns = list)
-        }
-    }
-
-    private fun removeEchoTurns(echoAsr: String) {
-        _ui.update { st ->
-            val list = st.turns
-            val last = list.lastOrNull() ?: return@update st
-            val normEcho = normalizeEchoText(echoAsr)
-            when {
-                last.role == "user" -> st.copy(turns = list.dropLast(1))
-                list.size >= 2 && last.role == "assistant" &&
-                    list[list.lastIndex - 1].role == "user" &&
-                    (list[list.lastIndex - 1].text.isBlank() ||
-                        normalizeEchoText(list[list.lastIndex - 1].text) == normEcho) ->
-                    st.copy(turns = list.dropLast(2))
-                else -> st
-            }
-        }
-    }
-
-    private fun updateAssistantTurn(text: String, done: Boolean) {
-        _ui.update { st ->
-            val list = st.turns.toMutableList()
-            val i = list.lastIndex
-            if (i >= 0 && list[i].role == "assistant") {
-                list[i] = list[i].copy(text = text, streaming = !done)
-            } else {
-                list.add(DuplexTurnUi("assistant", text, streaming = !done))
-                if (list.size > 30) list.removeAt(0)
-            }
-            st.copy(turns = list)
-        }
+    private fun syncTurns() {
+        val snapshot = tracker.turns
+        _ui.update { it.copy(turns = snapshot) }
     }
 }

@@ -147,20 +147,42 @@ class SessionStore(private val context: Context, private val repo: SettingsRepos
         _sessions.value = _sessions.value.map { s ->
             if (s.id != sessionId) s
             else {
-                val all = s.messages + message
-                if (all.size > MAX_MESSAGES) {
-                    val evicted = all.take(all.size - MAX_MESSAGES)
-                    evictedImages = evicted.flatMap { it.imagePaths }
+                val nextMessages = appendOrdered(s.messages, message, MAX_MESSAGES)
+                if (s.messages.size + 1 > MAX_MESSAGES) {
+                    val keptTs = nextMessages.mapTo(HashSet()) { it.ts }
+                    evictedImages = s.messages.filter { it.ts !in keptTs }.flatMap { it.imagePaths }
                 }
-                val messages = all.takeLast(MAX_MESSAGES)
                 val title = if (message.role == "user" && s.messages.none { it.role == "user" }) {
                     message.text.lineSequence().firstOrNull()?.take(24)?.ifBlank { "新的提问" } ?: "新的提问"
                 } else s.title
-                s.copy(messages = messages, title = title, updatedAt = System.currentTimeMillis())
+                s.copy(messages = nextMessages, title = title, updatedAt = System.currentTimeMillis())
             }
         }.sortedByDescending { it.updatedAt }
         persist()
         deleteImageFiles(evictedImages)
+    }
+
+    /**
+     * 把刚拍下的照片补充挂载到当前会话最后一条 user 消息上（用于看图提问/灵动同步落库）；
+     * 若末尾消息不是 user，返回 false 让调用方在助手回答前先补一条 user 消息。
+     */
+    suspend fun attachImageToLastUser(sessionId: String, imagePaths: List<String>): Boolean = mutex.withLock {
+        if (imagePaths.isEmpty()) return@withLock false
+        var attached = false
+        _sessions.value = _sessions.value.map { s ->
+            if (s.id != sessionId) s
+            else {
+                val updated = attachImagesToLastUserMessage(s.messages, imagePaths)
+                if (updated != null) {
+                    attached = true
+                    s.copy(messages = updated, updatedAt = System.currentTimeMillis())
+                } else {
+                    s
+                }
+            }
+        }.sortedByDescending { it.updatedAt }
+        if (attached) persist()
+        attached
     }
 
     fun search(query: String): List<ChatSession> {
@@ -289,8 +311,36 @@ class SessionStore(private val context: Context, private val repo: SettingsRepos
         }
     }
 
-    private companion object {
+    internal companion object {
         const val MAX_SESSIONS = 100
         const val MAX_MESSAGES = 200
+
+        /** 按追加顺序合并消息并保证时间戳严格递增、不超过上限 */
+        internal fun appendOrdered(
+            existing: List<SessionMessage>,
+            message: SessionMessage,
+            maxMessages: Int = MAX_MESSAGES,
+        ): List<SessionMessage> {
+            val safeTs = maxOf(message.ts, (existing.lastOrNull()?.ts ?: 0L) + 1L)
+            val normalizedMsg = if (safeTs == message.ts) message else message.copy(ts = safeTs)
+            return (existing + normalizedMsg).takeLast(maxMessages)
+        }
+
+        /** 若最后一条是 user 消息，将新图片附到该条消息中；否则返回 null */
+        internal fun attachImagesToLastUserMessage(
+            existing: List<SessionMessage>,
+            imagePaths: List<String>,
+        ): List<SessionMessage>? {
+            if (imagePaths.isEmpty()) return null
+            val lastIdx = existing.lastIndex
+            if (lastIdx < 0 || existing[lastIdx].role != "user") return null
+            val updated = existing.toMutableList()
+            val prev = updated[lastIdx]
+            updated[lastIdx] = prev.copy(
+                hadImage = true,
+                imagePaths = (prev.imagePaths + imagePaths).distinct(),
+            )
+            return updated
+        }
     }
 }

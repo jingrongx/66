@@ -1,41 +1,47 @@
 package com.lvyoubao.app.data.duplex
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.util.Log
+import com.lvyoubao.app.data.CallAudioRouter
+import com.lvyoubao.app.data.CallAudioRouter.DuplexOutputMode
+import com.lvyoubao.app.data.DeviceProfile
+import com.lvyoubao.app.data.LogStore
+import com.lvyoubao.app.ui.common.RnNoise
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
  * 全双工语音的本地音频引擎：
- * - 上行：AudioRecord → 统一降采样到 16kHz / mono / PCM16 小端，按 20ms（640 字节）分片回调；
- * - 下行：AudioTrack 24kHz / mono / PCM16 小端，走 USAGE_VOICE_COMMUNICATION（通话下行流）边收边播，
- *   确保高通 Fluence 等系统硬件 AEC 能拿到远端回声参考信号，避免扬声器声音回灌成 ASR 自问自答；
- * - 路由与音量：未接耳机时主动启用外放免提并在启动时按当前媒体音量比例初始化过低的通话外放档位；
+ * - 上行：AudioRecord → 100Hz 高通滤波 + RNNoise 48kHz 神经降噪 + 系统 AEC/NS →
+ *   统一降采样到 16kHz / mono / PCM16 小端，按 20ms（640 字节）分片回调；
+ * - 下行：
+ *   - 原生安卓及听筒模式：24kHz / mono / PCM16 小端，走 USAGE_VOICE_COMMUNICATION（接入系统硬件 AEC 参考），
+ *     并通过 AudioFocus + setCommunicationDevice + preferredDevice 控制听筒/免提切换；
+ *   - 鸿蒙 NEXT 卓易通容器免提模式：通过 [CallAudioRouter.DuplexOutputMode.MEDIA_SPEAKER_BYPASS]
+ *     自动走 MODE_NORMAL + USAGE_MEDIA（48kHz 线性插值上采样）+ MIC 采集，彻底绕开容器 voip 通路听筒锁死；
+ *     用户在卓易通中切换听筒时再热切回 VOICE_COMMUNICATION，切换免提时再热切回 MEDIA_SPEAKER_BYPASS；
  * - 插话：收到打断时 [flushPlayback] 立刻清空播放队列，实现"按住即停"。
- *
- * 采集兼容性：不同车机/机器人 BSP 对采样率与采集源的实现差异很大。
- * 有的只认 48k（16k 直接返回满量程 -32768 的垃圾数据，识别只会出幻觉），
- * 有的 voip 通道增益被打满。这里按「48k/voip → 48k/mic → 16k/mic → 16k/voip」
- * 逐组降级：任一组连续 3 秒贴满量程就换下一组，保证总能拿到可用波形。
  */
 internal class DuplexAudioEngine(
     private val context: Context,
@@ -46,11 +52,16 @@ internal class DuplexAudioEngine(
     companion object {
         private const val TAG = "DuplexAudio"
         private const val TARGET_RATE = 16000
-        private const val PLAYBACK_RATE = 24000
+        private const val PLAYBACK_SRC_RATE = 24000
+        private const val PLAYBACK_MEDIA_RATE = 48000
         private const val FRAME_MS = 20
+        // 100Hz 一阶高通系数：R/(R+dt)，压掉空调/手持震动等低频轰鸣
+        private const val HP_ALPHA_48K = 0.9871f
+        private const val HP_ALPHA_16K = 0.9622f
 
         private val _callAudioActive = MutableStateFlow(false)
-        /** 当前是否有全双工通话占用通话音频路由（供主界面同步切换音量键目标流） */
+
+        /** 当前是否有全双工通话占用通话音频路由（STREAM_VOICE_CALL），供主界面同步切换音量键目标流 */
         val isCallAudioActive: StateFlow<Boolean> = _callAudioActive.asStateFlow()
 
         /**
@@ -85,53 +96,114 @@ internal class DuplexAudioEngine(
             else -> desired
         }
 
-        private fun hasExternalAudioOutput(am: AudioManager): Boolean {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                return am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { dev ->
-                    when (dev.type) {
-                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-                        AudioDeviceInfo.TYPE_USB_DEVICE,
-                        AudioDeviceInfo.TYPE_USB_ACCESSORY -> true
-                        else -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                            dev.type == AudioDeviceInfo.TYPE_USB_HEADSET
-                    }
-                }
+        /** 24kHz PCM16LE 线性插值上采样到 48kHz，跨音频块保持 [prevCarry] 连续无台阶 */
+        internal fun upsample24kTo48k(src: ByteArray, prevCarry: Short): Pair<ByteArray, Short> {
+            val sampleCount = src.size / 2
+            if (sampleCount <= 0) return ByteArray(0) to prevCarry
+            val out = ByteArray(sampleCount * 4)
+            var carry = prevCarry.toInt()
+            var o = 0
+            for (i in 0 until sampleCount) {
+                val idx = i * 2
+                val curr = ((src[idx + 1].toInt() shl 8) or (src[idx].toInt() and 0xFF)).toShort().toInt()
+                val mid = carry + ((curr - carry) / 2)
+                out[o] = (mid and 0xFF).toByte()
+                out[o + 1] = ((mid shr 8) and 0xFF).toByte()
+                out[o + 2] = (curr and 0xFF).toByte()
+                out[o + 3] = ((curr shr 8) and 0xFF).toByte()
+                o += 4
+                carry = curr
             }
-            @Suppress("DEPRECATION")
-            return am.isWiredHeadsetOn || am.isBluetoothA2dpOn || am.isBluetoothScoOn
+            return out to carry.toShort()
         }
     }
 
     /** 一组采集配置：采样率 × 采集源 */
     private data class CaptureCfg(val rate: Int, val source: Int, val label: String)
 
-    private val ladder = listOf(
+    private data class PlaybackTrack(
+        val track: AudioTrack,
+        val sampleRate: Int,
+        val upsampleTo48k: Boolean,
+    )
+
+    private data class RoutePlan(
+        val targetSpeaker: Boolean,
+        val hasExternal: Boolean,
+        val outputMode: DuplexOutputMode,
+    )
+
+    private val voipLadder = listOf(
         CaptureCfg(48000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "48k/voip"),
         CaptureCfg(48000, MediaRecorder.AudioSource.MIC, "48k/mic"),
         CaptureCfg(16000, MediaRecorder.AudioSource.MIC, "16k/mic"),
         CaptureCfg(16000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "16k/voip"),
     )
+
+    // 卓易通免提专用采集顺序：避开 VOICE_COMMUNICATION 音源，防止容器触发通话会话强锁听筒
+    private val mediaSpeakerLadder = listOf(
+        CaptureCfg(48000, MediaRecorder.AudioSource.MIC, "48k/mic"),
+        CaptureCfg(48000, MediaRecorder.AudioSource.VOICE_RECOGNITION, "48k/asr"),
+        CaptureCfg(16000, MediaRecorder.AudioSource.MIC, "16k/mic"),
+        CaptureCfg(16000, MediaRecorder.AudioSource.VOICE_COMMUNICATION, "16k/voip"),
+    )
+
     private var cfgIndex = 0
     private var saturatedSeconds = 0
     private var needNextCfg = false
 
-    private val audioManager = context.getSystemService(AudioManager::class.java)
+    private val appContext = context.applicationContext
+    private val isZhuoyi = DeviceProfile.isZhuoyiContainer(appContext)
+    private val audioManager = appContext.getSystemService(AudioManager::class.java)
+    private val focusSession = CallAudioRouter.AudioFocusSession()
+    private val switchMutex = Mutex()
+
     private var prevAudioMode: Int? = null
     private var prevSpeakerphoneOn: Boolean? = null
+
     @Volatile private var desiredSpeakerphone = true
     @Volatile private var userOverrodeSpeakerphone = false
+    @Volatile private var activeOutputMode: DuplexOutputMode? = null
+    @Volatile private var stopped = false
     private var speakerVolumeSynced = false
+
     private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
+    private var denoiseSession: RnNoise.Session? = null
     private var recorder: AudioRecord? = null
-    private var player: AudioTrack? = null
     private var captureJob: Job? = null
     private var playbackJob: Job? = null
+    private var switchJob: Job? = null
     @Volatile private var capturing = false
+    @Volatile private var captureGen = 0
+
     private val pcmQueue = ConcurrentLinkedQueue<ByteArray>()
     private val playLock = Any()
+    private var activePlayback: PlaybackTrack? = null
+    private var playCarrySample: Short = 0
+
+    private fun logDuplex(msg: String) {
+        Log.i(TAG, msg)
+        LogStore.log("duplex", msg)
+    }
+
+    private fun currentLadder(): List<CaptureCfg> =
+        if (activeOutputMode == DuplexOutputMode.MEDIA_SPEAKER_BYPASS) mediaSpeakerLadder else voipLadder
+
+    private fun computeDesiredRoute(): RoutePlan {
+        val am = audioManager
+        val hasExternal = am?.let { CallAudioRouter.hasExternalAudioOutput(it) } ?: false
+        val targetSpeaker = resolveSpeakerphoneTarget(
+            desired = desiredSpeakerphone,
+            hasExternal = hasExternal,
+            userOverrode = userOverrodeSpeakerphone,
+        )
+        val mode = CallAudioRouter.resolveDuplexOutputMode(
+            isZhuoyi = isZhuoyi,
+            targetSpeaker = targetSpeaker,
+        )
+        return RoutePlan(targetSpeaker = targetSpeaker, hasExternal = hasExternal, outputMode = mode)
+    }
 
     /** 启动音频前注入默认输出方向（true=免提外放，false=听筒） */
     fun setInitialSpeakerphone(enabled: Boolean) {
@@ -144,87 +216,159 @@ internal class DuplexAudioEngine(
     fun setSpeakerphone(enabled: Boolean) {
         desiredSpeakerphone = enabled
         userOverrodeSpeakerphone = true
-        val am = audioManager ?: return
-        if (am.mode != AudioManager.MODE_IN_COMMUNICATION) {
-            if (prevAudioMode == null) prevAudioMode = am.mode
-            runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
+        if (stopped) return
+        val plan = computeDesiredRoute()
+        val prevMode = activeOutputMode
+
+        if (prevMode != null && prevMode != plan.outputMode) {
+            // 卓易通等容器下要在「音乐播放通道(免提)」与「voip通话通道(听筒)」之间热切换：
+            // 先串行停旧轨+旧录音，等容器释放 voip HAL 后按新通道重建，保持 WebSocket 会话不断
+            logDuplex("触发跨通道热切换：${if (enabled) "免提外放" else "听筒"} ($prevMode → ${plan.outputMode}, zhuoyi=$isZhuoyi)")
+            switchJob?.cancel()
+            switchJob = scope.launch(Dispatchers.Main) {
+                hotSwitchOutputMode()
+            }
+            return
         }
-        applySpeakerphoneRoute(am, enabled)
-        Log.i(
-            TAG,
-            "通话声道切换：${if (enabled) "免提外放" else "听筒"}（mode=${am.mode}, speaker=${isSpeakerOutputActive(am)}）",
+
+        val am = audioManager ?: return
+        applyRoutePlan(am, plan)
+        val currentTrack = synchronized(playLock) { activePlayback?.track }
+        if (plan.outputMode == DuplexOutputMode.VOICE_COMMUNICATION) {
+            CallAudioRouter.applyPreferredDevice(
+                track = currentTrack,
+                am = am,
+                targetSpeaker = plan.targetSpeaker,
+                hasExternal = plan.hasExternal,
+                userOverrode = userOverrodeSpeakerphone,
+            )
+            scheduleRouteCheck(plan.targetSpeaker)
+        } else {
+            CallAudioRouter.applyPreferredDevice(
+                track = currentTrack,
+                am = am,
+                targetSpeaker = true,
+                hasExternal = plan.hasExternal,
+                userOverrode = userOverrodeSpeakerphone,
+            )
+        }
+        logDuplex(
+            "通话声道切换：${if (enabled) "免提外放" else "听筒"}（mode=${am.mode}, outputMode=${plan.outputMode}, speaker=${CallAudioRouter.isSpeakerOutputActive(am)}, zhuoyi=$isZhuoyi）",
         )
-        if (enabled) {
-            scope.launch(Dispatchers.Main) {
-                delay(180)
-                if (_callAudioActive.value && desiredSpeakerphone) {
-                    if (!isSpeakerOutputActive(am)) {
-                        applySpeakerphoneRoute(am, true)
-                    }
-                    syncVoiceVolumeIfNeeded()
+    }
+
+    private suspend fun hotSwitchOutputMode() {
+        switchMutex.withLock {
+            if (stopped) return
+            val plan = computeDesiredRoute()
+            if (plan.outputMode == activeOutputMode) return
+            val am = audioManager ?: return
+
+            // 1. 停旧播放轨与旧录音，阻止旧 voip 通道继续占用宿主路由
+            releasePlaybackTrack()
+            stopCaptureInternal()
+
+            // 2. 清理旧的通信路由和音频焦点，留出约 180ms 让容器彻底注销旧 AudioRenderSink
+            focusSession.abandon()
+            CallAudioRouter.clearCommunicationRoute(am, restoreSpeaker = false)
+            if (plan.outputMode == DuplexOutputMode.MEDIA_SPEAKER_BYPASS) {
+                runCatching { am.mode = AudioManager.MODE_NORMAL }
+            }
+            delay(180)
+            if (stopped) return
+
+            // 3. 重新读取最新意图（防止切换期间用户又点了一次）
+            val latest = computeDesiredRoute()
+            applyRoutePlan(am, latest)
+            openAndMountPlaybackTrack(latest)
+            cfgIndex = 0
+            saturatedSeconds = 0
+            startCaptureWithRetry()
+            if (latest.outputMode == DuplexOutputMode.VOICE_COMMUNICATION) {
+                scheduleRouteCheck(latest.targetSpeaker)
+            }
+            logDuplex(
+                "跨通道热切换完成：mode=${am.mode}, outputMode=${latest.outputMode}, speaker=${CallAudioRouter.isSpeakerOutputActive(am)}",
+            )
+        }
+    }
+
+    private fun scheduleRouteCheck(expectSpeaker: Boolean) {
+        scope.launch(Dispatchers.Main) {
+            delay(180)
+            if (stopped) return@launch
+            val am = audioManager ?: return@launch
+            val plan = computeDesiredRoute()
+            if (plan.outputMode != DuplexOutputMode.VOICE_COMMUNICATION) return@launch
+            if (plan.targetSpeaker != expectSpeaker) return@launch
+            if (CallAudioRouter.isSpeakerOutputActive(am) != expectSpeaker) {
+                val detail = CallAudioRouter.applyCommunicationRoute(
+                    am = am,
+                    enableSpeaker = expectSpeaker,
+                    hasExternal = plan.hasExternal,
+                    userOverrode = userOverrodeSpeakerphone,
+                )
+                val track = synchronized(playLock) { activePlayback?.track }
+                CallAudioRouter.applyPreferredDevice(
+                    track = track,
+                    am = am,
+                    targetSpeaker = expectSpeaker,
+                    hasExternal = plan.hasExternal,
+                    userOverrode = userOverrodeSpeakerphone,
+                )
+                logDuplex("路由二次校准：expect=$expectSpeaker, $detail, actual=${CallAudioRouter.isSpeakerOutputActive(am)}")
+            }
+            if (expectSpeaker) {
+                syncVoiceVolumeIfNeeded()
+            }
+        }
+    }
+
+    private fun applyRoutePlan(am: AudioManager, plan: RoutePlan) {
+        if (prevAudioMode == null) prevAudioMode = am.mode
+        if (prevSpeakerphoneOn == null) prevSpeakerphoneOn = CallAudioRouter.isSpeakerOutputActive(am)
+        activeOutputMode = plan.outputMode
+
+        when (plan.outputMode) {
+            DuplexOutputMode.MEDIA_SPEAKER_BYPASS -> {
+                CallAudioRouter.clearCommunicationRoute(am, restoreSpeaker = false)
+                if (am.mode != AudioManager.MODE_NORMAL) {
+                    runCatching { am.mode = AudioManager.MODE_NORMAL }
                 }
+                focusSession.acquire(am, useVoiceCall = false)
+                _callAudioActive.value = false
+            }
+            DuplexOutputMode.VOICE_COMMUNICATION -> {
+                focusSession.acquire(am, useVoiceCall = true)
+                if (am.mode != AudioManager.MODE_IN_COMMUNICATION) {
+                    runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
+                }
+                val detail = CallAudioRouter.applyCommunicationRoute(
+                    am = am,
+                    enableSpeaker = plan.targetSpeaker,
+                    hasExternal = plan.hasExternal,
+                    userOverrode = userOverrodeSpeakerphone,
+                )
+                _callAudioActive.value = true
+                logDuplex("应用通话路由：$detail（targetSpeaker=${plan.targetSpeaker}, ext=${plan.hasExternal}, zhuoyi=$isZhuoyi）")
             }
         }
     }
 
-    /** 统一切换免提/听筒路由：API 31+ 走 setCommunicationDevice，老版本及兜底走 isSpeakerphoneOn */
-    private fun applySpeakerphoneRoute(am: AudioManager, enableSpeaker: Boolean) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val targetType = if (enableSpeaker) {
-                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
-            } else {
-                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-            }
-            val targetDev = runCatching {
-                am.availableCommunicationDevices.firstOrNull { it.type == targetType }
-            }.getOrNull()
-            if (targetDev != null) {
-                runCatching { am.setCommunicationDevice(targetDev) }
-            } else if (!enableSpeaker) {
-                runCatching { am.clearCommunicationDevice() }
-            }
-        }
-        @Suppress("DEPRECATION")
-        runCatching { am.isSpeakerphoneOn = enableSpeaker }
-    }
-
-    private fun isSpeakerOutputActive(am: AudioManager): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val commType = runCatching { am.communicationDevice?.type }.getOrNull()
-            if (commType == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) return true
-            if (commType == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) return false
-        }
-        @Suppress("DEPRECATION")
-        return runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
-    }
-
-    /** 确保语音采集具备 AEC/AGC 通信模式，并按设置或手动切换路由到免提外放 / 听筒 */
-    private fun ensureAudioRouting() {
-        val am = audioManager ?: return
-        // voip 通道要靠 AudioManager 的通信模式才会启用 AEC/AGC，否则增益可能失控
-        if (prevAudioMode == null) {
-            prevAudioMode = am.mode
-            runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
-        }
-        if (prevSpeakerphoneOn == null) {
-            prevSpeakerphoneOn = isSpeakerOutputActive(am)
-        }
-        val targetSpeaker = resolveSpeakerphoneTarget(
-            desired = desiredSpeakerphone,
-            hasExternal = hasExternalAudioOutput(am),
-            userOverrode = userOverrodeSpeakerphone,
-        )
-        if (isSpeakerOutputActive(am) != targetSpeaker || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            applySpeakerphoneRoute(am, targetSpeaker)
-        }
-        _callAudioActive.value = true
+    /** 确保音频路由与焦点处于当前期望状态 */
+    private fun ensureAudioRouting(): RoutePlan? {
+        val am = audioManager ?: return null
+        val plan = computeDesiredRoute()
+        applyRoutePlan(am, plan)
+        return plan
     }
 
     /** 切到免提外放后同步一次过低的通话外放音量，避免系统默认 1 格听不清 */
     private fun syncVoiceVolumeIfNeeded() {
         if (speakerVolumeSynced) return
+        if (activeOutputMode != DuplexOutputMode.VOICE_COMMUNICATION) return
         val am = audioManager ?: return
-        val isSpeakerActive = isSpeakerOutputActive(am)
+        val isSpeakerActive = CallAudioRouter.isSpeakerOutputActive(am)
         if (!isSpeakerActive) return
         speakerVolumeSynced = true
         val minVoice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -239,7 +383,7 @@ internal class DuplexAudioEngine(
         val target = computeSyncedVoiceVolume(curVoice, minVoice, maxVoice, curMusic, maxMusic)
         if (target != null) {
             runCatching { am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0) }
-            Log.i(TAG, "通话音量初始化同步：$curVoice → $target/$maxVoice（对齐媒体 $curMusic/$maxMusic）")
+            logDuplex("通话音量初始化同步：$curVoice → $target/$maxVoice（对齐媒体 $curMusic/$maxMusic）")
         } else {
             Log.d(TAG, "当前通话音量=$curVoice/$maxVoice 媒体=$curMusic/$maxMusic speaker=$isSpeakerActive")
         }
@@ -247,17 +391,13 @@ internal class DuplexAudioEngine(
 
     private fun restoreAudioRouting() {
         _callAudioActive.value = false
+        activeOutputMode = null
         speakerVolumeSynced = false
         userOverrodeSpeakerphone = false
+        focusSession.abandon()
         val am = audioManager ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching { am.clearCommunicationDevice() }
-        }
-        prevSpeakerphoneOn?.let { wasOn ->
-            @Suppress("DEPRECATION")
-            runCatching { am.isSpeakerphoneOn = wasOn }
-            prevSpeakerphoneOn = null
-        }
+        CallAudioRouter.clearCommunicationRoute(am, restoreSpeaker = prevSpeakerphoneOn)
+        prevSpeakerphoneOn = null
         // 还原系统音频模式，别把整机留在通信模式（会影响媒体音量/铃声路由）
         prevAudioMode?.let { mode ->
             runCatching { am.mode = mode }
@@ -265,38 +405,51 @@ internal class DuplexAudioEngine(
         }
     }
 
-    /** 48k/32k 采集降采样到 16k（factor 点均值，够 ASR 用，还能压掉部分高频噪声） */
-    private fun downsampleTo16k(src: ByteArray, factor: Int): ByteArray {
-        if (factor <= 1) return src
-        val samples = src.size / 2
-        val outSamples = samples / factor
+    /** 将处理完（48k 或 16k）的 ShortArray 帧转为 16k 小端 PCM ByteArray */
+    private fun to16kPcmBytes(src: ShortArray, factor: Int): ByteArray {
+        val f = factor.coerceAtLeast(1)
+        val outSamples = src.size / f
         val out = ByteArray(outSamples * 2)
         var o = 0
         var i = 0
-        while (i + factor <= samples) {
-            var sum = 0
-            var k = 0
-            while (k < factor) {
-                val idx = (i + k) * 2
-                val v = (src[idx].toInt() and 0xff) or (src[idx + 1].toInt() shl 8)
-                sum += v
-                k++
+        while (i + f <= src.size) {
+            val v = if (f == 1) {
+                src[i].toInt()
+            } else {
+                var sum = 0
+                var k = 0
+                while (k < f) {
+                    sum += src[i + k].toInt()
+                    k++
+                }
+                (sum / f).coerceIn(-32768, 32767)
             }
-            val v = (sum / factor).coerceIn(-32768, 32767)
             out[o] = (v and 0xff).toByte()
             out[o + 1] = ((v shr 8) and 0xff).toByte()
             o += 2
-            i += factor
+            i += f
         }
         return out
+    }
+
+    private suspend fun startCaptureWithRetry(): Boolean {
+        repeat(3) { attempt ->
+            if (stopped) return false
+            if (attempt > 0) delay(100)
+            if (startCapture()) return true
+        }
+        return false
     }
 
     /** 开始采集。调用前需已拿到 RECORD_AUDIO 权限。 */
     fun startCapture(): Boolean {
         if (capturing) return true
-        ensureAudioRouting()
-        val cfg = ladder[cfgIndex.coerceIn(0, ladder.lastIndex)]
-        val frameBytes = cfg.rate * FRAME_MS / 1000 * 2
+        if (stopped) return false
+        if (activeOutputMode == null) ensureAudioRouting()
+        val activeLadder = currentLadder()
+        val cfg = activeLadder[cfgIndex.coerceIn(0, activeLadder.lastIndex)]
+        val frameSamples = cfg.rate * FRAME_MS / 1000
+        val frameBytes = frameSamples * 2
         val minBuf = AudioRecord.getMinBufferSize(
             cfg.rate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -323,58 +476,74 @@ internal class DuplexAudioEngine(
             rec.release()
             return advanceCfg()
         }
-        Log.i(TAG, "开始采集 ${cfg.label}")
         recorder = rec
-        // 显式打开 AEC（VOICE_COMMUNICATION 一般自带；切到 MIC 后必须自己开，否则会把播报当成用户说话）
-        val aecAvailable = AcousticEchoCanceler.isAvailable()
-        if (aecAvailable) {
+        // 显式打开系统 AEC 与 NS（切到 MIC 后必须自己开，压掉稳态噪声与扬声器回声）
+        val aecAvail = AcousticEchoCanceler.isAvailable()
+        if (aecAvail) {
             aec = runCatching { AcousticEchoCanceler.create(rec.audioSessionId) }.getOrNull()
             runCatching { aec?.enabled = true }
         }
-        Log.i(
-            TAG,
-            "采集回声消除状态：avail=$aecAvailable created=${aec != null} enabled=${aec?.enabled == true}",
+        val nsAvail = NoiseSuppressor.isAvailable()
+        if (nsAvail) {
+            ns = runCatching { NoiseSuppressor.create(rec.audioSessionId) }.getOrNull()
+            runCatching { ns?.enabled = true }
+        }
+        denoiseSession?.close()
+        denoiseSession = RnNoise.createSession()
+        logDuplex(
+            "开始采集 ${cfg.label}（mode=$activeOutputMode, AEC=${aec?.enabled == true}, NS=${ns?.enabled == true}, RNNoise=${denoiseSession != null}）",
         )
         capturing = true
+        val myCaptureGen = ++captureGen
         try {
             rec.startRecording()
         } catch (e: IllegalStateException) {
             Log.e(TAG, "AudioRecord.startRecording 失败", e)
             capturing = false
-            runCatching { aec?.release() }
-            aec = null
-            rec.release()
-            recorder = null
+            releaseRecorder()
             return false
         }
         if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             Log.w(TAG, "配置 ${cfg.label} 启动后未进入录音态（可能被占用），释放并换下一组")
             capturing = false
-            runCatching { aec?.release() }
-            aec = null
-            runCatching { rec.stop() }
-            rec.release()
-            recorder = null
+            releaseRecorder()
             return advanceCfg()
         }
+        val sessionDenoise = denoiseSession
         captureJob = scope.launch(Dispatchers.IO) {
-            val frame = ByteArray(frameBytes)
+            val frame = ShortArray(frameSamples)
+            val hpAlpha = if (cfg.rate >= 48000) HP_ALPHA_48K else HP_ALPHA_16K
+            var hpPrevIn = 0f
+            var hpPrevOut = 0f
             var frames = 0
             var secPeak = 0
-            while (isActive && capturing) {
+            while (isActive && capturing && captureGen == myCaptureGen) {
                 var filled = 0
-                // AudioRecord 可能短读，补齐满一帧再发，保证 20ms 节奏
-                while (filled < frame.size && capturing) {
+                // AudioRecord 可能短读，补齐满一帧再处理，保证 20ms 节奏与 RNNoise 10ms 整数倍对齐
+                while (filled < frame.size && capturing && captureGen == myCaptureGen) {
                     val n = rec.read(frame, filled, frame.size - filled)
                     if (n <= 0) break
                     filled += n
                 }
+                if (!capturing || captureGen != myCaptureGen) break
                 if (filled == frame.size) {
-                    val pcm16 = downsampleTo16k(frame, cfg.rate / TARGET_RATE)
+                    // 1. 100Hz 一阶高通滤波：滤除空调/桌面低频轰鸣，减少嘈杂环境对云端 VAD 的误触发
+                    for (i in frame.indices) {
+                        val x = frame[i].toFloat()
+                        val y = hpAlpha * (hpPrevOut + x - hpPrevIn)
+                        hpPrevIn = x
+                        hpPrevOut = y
+                        frame[i] = y.toInt().coerceIn(-32768, 32767).toShort()
+                    }
+                    // 2. RNNoise 48kHz 神经降噪：压制非稳态人声背景/电视杂音
+                    sessionDenoise?.processInPlace(frame, cfg.rate)
+
+                    // 3. 降采样至 16kHz 20ms PCM16LE 上行，并测峰值供削顶降级
+                    val pcm16 = to16kPcmBytes(frame, cfg.rate / TARGET_RATE)
                     var peak = 0
                     var i = 0
                     while (i < pcm16.size) {
-                        val v = (pcm16[i].toInt() and 0xff) or (pcm16[i + 1].toInt() shl 8)
+                        val v = ((pcm16[i + 1].toInt() shl 8) or (pcm16[i].toInt() and 0xFF)).toShort().toInt()
                         val a = abs(v)
                         if (a > peak) peak = a
                         i += 2
@@ -384,11 +553,10 @@ internal class DuplexAudioEngine(
                     frames++
                     if (frames % 50 == 0) {
                         Log.i(TAG, "上行电平 peak=$secPeak (${"%.3f".format(secPeak / 32768f)}) ${cfg.label}")
-                        // 连续 3 秒贴满量程 = 波形已被削平，识别只会出幻觉文字 → 换下一组配置
                         if (secPeak >= 32000) saturatedSeconds++ else saturatedSeconds = 0
                         if (saturatedSeconds >= 3) {
                             saturatedSeconds = 0
-                            if (cfgIndex < ladder.lastIndex) {
+                            if (cfgIndex < activeLadder.lastIndex) {
                                 needNextCfg = true
                                 Log.w(TAG, "上行持续削顶，${cfg.label} 换下一组采集配置")
                                 capturing = false
@@ -400,7 +568,7 @@ internal class DuplexAudioEngine(
                 }
             }
             Log.d(TAG, "采集循环结束 ${cfg.label}")
-            if (needNextCfg) {
+            if (needNextCfg && captureGen == myCaptureGen && !stopped) {
                 needNextCfg = false
                 releaseRecorder()
                 advanceCfg()
@@ -413,13 +581,28 @@ internal class DuplexAudioEngine(
         runCatching { if (recorder?.state == AudioRecord.STATE_INITIALIZED) recorder?.stop() }
         runCatching { aec?.release() }
         aec = null
-        recorder?.release()
+        runCatching { ns?.release() }
+        ns = null
+        runCatching { denoiseSession?.close() }
+        denoiseSession = null
+        runCatching { recorder?.release() }
         recorder = null
+    }
+
+    private suspend fun stopCaptureInternal() {
+        captureGen++
+        capturing = false
+        needNextCfg = false
+        runCatching { if (recorder?.state == AudioRecord.STATE_INITIALIZED) recorder?.stop() }
+        captureJob?.cancelAndJoin()
+        captureJob = null
+        releaseRecorder()
     }
 
     /** 换下一组采集配置并重启；已是最后一组返回 false */
     private fun advanceCfg(): Boolean {
-        if (cfgIndex >= ladder.lastIndex) {
+        val activeLadder = currentLadder()
+        if (cfgIndex >= activeLadder.lastIndex) {
             Log.e(TAG, "所有采集配置都不可用")
             return false
         }
@@ -428,67 +611,99 @@ internal class DuplexAudioEngine(
         return startCapture()
     }
 
-    /** 启动播放（24kHz 原生采样率走 USAGE_VOICE_COMMUNICATION 通话流，接入系统硬件 AEC 参考）。 */
-    fun startPlayback() {
-        if (player != null) return
-        ensureAudioRouting()
+    private fun openAndMountPlaybackTrack(plan: RoutePlan): Boolean {
+        val isMediaBypass = plan.outputMode == DuplexOutputMode.MEDIA_SPEAKER_BYPASS
+        val outRate = if (isMediaBypass) PLAYBACK_MEDIA_RATE else PLAYBACK_SRC_RATE
         val minBuf = AudioTrack.getMinBufferSize(
-            PLAYBACK_RATE,
+            outRate,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
-        // 必须走 USAGE_VOICE_COMMUNICATION（非 USAGE_MEDIA）与 24kHz 主混音器：
-        // 实测高通等硬件 AEC 在 MODE_IN_COMMUNICATION 下仅拿通话下行流做远端参考，
-        // 改为 USAGE_MEDIA + 48k 单声道 DIRECT 会绕开 AEC 参考线导致外放回声灌麦自问自答。
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(PLAYBACK_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setBufferSizeInBytes(maxOf(minBuf * 2, PLAYBACK_RATE * 2)) // 约 1s 缓冲
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
+        val track = CallAudioRouter.createStreamingAudioTrack(
+            useVoiceCall = !isMediaBypass,
+            sampleRate = outRate,
+            channelMask = AudioFormat.CHANNEL_OUT_MONO,
+            bufferSizeInBytes = maxOf(minBuf * 2, outRate * 2), // 约 1s 缓冲
+        )
+        CallAudioRouter.applyPreferredDevice(
+            track = track,
+            am = audioManager,
+            targetSpeaker = if (isMediaBypass) true else plan.targetSpeaker,
+            hasExternal = plan.hasExternal,
+            userOverrode = userOverrodeSpeakerphone,
+        )
         try {
             track.play()
         } catch (e: IllegalStateException) {
             Log.e(TAG, "AudioTrack.play 失败", e)
             track.release()
-            return
+            return false
         }
         synchronized(playLock) {
-            player = track
+            playCarrySample = 0
+            activePlayback = PlaybackTrack(track = track, sampleRate = outRate, upsampleTo48k = isMediaBypass)
         }
-        // 建流后先立即确认路由，再延迟 180ms 待异步切到 speaker 后校验外放路由与通话音量
-        ensureAudioRouting()
-        Log.d(TAG, "AudioTrack 已启动（${PLAYBACK_RATE}Hz / USAGE_VOICE_COMMUNICATION）")
-        scope.launch(Dispatchers.Main) {
-            delay(180)
-            if (player === track) {
-                ensureAudioRouting()
-                syncVoiceVolumeIfNeeded()
+        logDuplex(
+            "AudioTrack 已启动（${outRate}Hz / ${if (isMediaBypass) "USAGE_MEDIA 卓易通免提" else "USAGE_VOICE_COMMUNICATION"}）",
+        )
+        return true
+    }
+
+    private fun releasePlaybackTrack() {
+        val old = synchronized(playLock) {
+            val prev = activePlayback
+            activePlayback = null
+            playCarrySample = 0
+            prev
+        }
+        old?.let {
+            runCatching {
+                if (it.track.state == AudioTrack.STATE_INITIALIZED) {
+                    it.track.pause()
+                    it.track.flush()
+                    it.track.stop()
+                }
             }
+            runCatching { it.track.release() }
+        }
+    }
+
+    /** 启动播放（普通设备走 USAGE_VOICE_COMMUNICATION；卓易通免提走 USAGE_MEDIA 48kHz）。 */
+    fun startPlayback() {
+        if (stopped) return
+        if (synchronized(playLock) { activePlayback != null }) return
+        val plan = ensureAudioRouting() ?: return
+        if (!openAndMountPlaybackTrack(plan)) return
+
+        if (plan.outputMode == DuplexOutputMode.VOICE_COMMUNICATION) {
+            scheduleRouteCheck(plan.targetSpeaker)
         }
 
+        if (playbackJob?.isActive == true) return
         playbackJob = scope.launch(Dispatchers.IO) {
-            while (isActive) {
-                val pcm = synchronized(playLock) { pcmQueue.poll() }
-                if (pcm == null) {
+            while (isActive && !stopped) {
+                val (payload, target) = synchronized(playLock) {
+                    val active = activePlayback ?: return@synchronized null to null
+                    val pcm = pcmQueue.poll() ?: return@synchronized null to active
+                    val bytes = if (active.upsampleTo48k) {
+                        val (up, nextCarry) = upsample24kTo48k(pcm, playCarrySample)
+                        playCarrySample = nextCarry
+                        up
+                    } else {
+                        pcm
+                    }
+                    bytes to active
+                }
+                if (payload == null || target == null) {
                     delay(10)
                     continue
                 }
                 var offset = 0
-                while (offset < pcm.size && isActive) {
+                while (offset < payload.size && isActive && !stopped) {
+                    val current = synchronized(playLock) { activePlayback }
+                    if (current !== target) break
                     val w = runCatching {
-                        track.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_BLOCKING)
+                        target.track.write(payload, offset, payload.size - offset, AudioTrack.WRITE_BLOCKING)
                     }.getOrDefault(-1)
                     if (w <= 0) break
                     offset += w
@@ -499,26 +714,33 @@ internal class DuplexAudioEngine(
 
     /** 喂入一段 24k PCM16LE 音频（来自下行 delta 的 Base64 解码结果） */
     fun enqueuePlayback(pcm: ByteArray) {
-        if (pcm.isEmpty()) return
+        if (pcm.isEmpty() || stopped) return
         synchronized(playLock) { pcmQueue.add(pcm) }
     }
 
     /** 插话打断：立刻停掉当前播报，丢弃未播缓冲（对应 response.cancel 的本地侧） */
     fun flushPlayback() {
-        synchronized(playLock) {
+        val track = synchronized(playLock) {
             pcmQueue.clear()
+            playCarrySample = 0
+            activePlayback?.track
         }
         try {
-            player?.pause()
-            player?.flush()
-            player?.play()
+            track?.pause()
+            track?.flush()
+            track?.play()
         } catch (e: IllegalStateException) {
             Log.w(TAG, "flushPlayback 异常", e)
         }
     }
 
     fun stop() {
+        stopped = true
+        switchJob?.cancel()
+        switchJob = null
+        captureGen++
         capturing = false
+        needNextCfg = false
         // 先停 AudioRecord 唤醒阻塞在 rec.read() 的采集协程，再释放句柄
         runCatching { if (recorder?.state == AudioRecord.STATE_INITIALIZED) recorder?.stop() }
         captureJob?.cancel()
@@ -528,14 +750,8 @@ internal class DuplexAudioEngine(
         playbackJob = null
         synchronized(playLock) {
             pcmQueue.clear()
-            try {
-                if (player?.state == AudioTrack.STATE_INITIALIZED) player?.stop()
-            } catch (e: IllegalStateException) {
-                Log.w(TAG, "player.stop 异常", e)
-            }
-            player?.release()
-            player = null
         }
+        releasePlaybackTrack()
         restoreAudioRouting()
         Log.d(TAG, "音频引擎已停止")
     }

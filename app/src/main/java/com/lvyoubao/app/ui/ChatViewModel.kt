@@ -302,49 +302,53 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
      * FC 之后一轮可能分多段收口（模型先说「我查一下」→ 工具 → 再说结果）：
      * 同一句识别的后续段落就地并进最后一条 assistant，不再叠新卡片。
      */
+    private val duplexCommitMutex = Mutex()
+
     fun appendDuplexTurn(asr: String, answer: String, imagePaths: List<String> = emptyList()) {
         if (asr.isBlank() && answer.isBlank() && imagePaths.isEmpty()) return
         viewModelScope.launch {
-            var sid = sessions.currentSessionId.firstOrNull()
-            if (sid == null || sessions.get(sid) == null) sid = sessions.create().id
-            val msgs = sessions.get(sid)?.messages.orEmpty()
-            val norm = { s: String -> s.filterNot { it.isWhitespace() } }
-            val lastTwo = msgs.takeLast(2)
-            val sameTurn = lastTwo.size == 2 &&
-                lastTwo[0].role == "user" && lastTwo[1].role == "assistant" &&
-                asr.isNotBlank() && norm(lastTwo[0].text) == norm(asr) &&
-                System.currentTimeMillis() - lastTwo[1].ts < 30_000L
-            if (sameTurn && answer.isNotBlank()) {
-                val prev = lastTwo[1].text
-                // 整段重复（同一轮被二次下发）直接吞掉；真是新段落才拼接
-                if (norm(answer) != norm(prev)) {
-                    val merged = if (norm(answer).startsWith(norm(prev))) answer
-                    else prev.trimEnd() + "\n" + answer.trimStart()
-                    sessions.updateLastAssistant(sid, merged)
+            duplexCommitMutex.withLock {
+                var sid = sessions.currentSessionId.firstOrNull()
+                if (sid == null || sessions.get(sid) == null) sid = sessions.create().id
+                val msgs = sessions.get(sid)?.messages.orEmpty()
+                val norm = { s: String -> s.filterNot { it.isWhitespace() } }
+                val lastTwo = msgs.takeLast(2)
+                val sameTurn = lastTwo.size == 2 &&
+                    lastTwo[0].role == "user" && lastTwo[1].role == "assistant" &&
+                    asr.isNotBlank() && norm(lastTwo[0].text) == norm(asr) &&
+                    System.currentTimeMillis() - lastTwo[1].ts < 30_000L
+                if (sameTurn && answer.isNotBlank()) {
+                    val prev = lastTwo[1].text
+                    // 整段重复（同一轮被二次下发）直接吞掉；真是新段落才拼接
+                    if (norm(answer) != norm(prev)) {
+                        val merged = if (norm(answer).startsWith(norm(prev))) answer
+                        else prev.trimEnd() + "\n" + answer.trimStart()
+                        sessions.updateLastAssistant(sid, merged)
+                    }
+                    return@withLock
                 }
-                return@launch
-            }
-            val hadImage = imagePaths.isNotEmpty()
-            sessions.appendMessage(
-                sid,
-                SessionMessage(
-                    role = "user",
-                    text = asr.ifBlank { if (hadImage) "（看看这个）" else "（语音）" },
-                    hadImage = hadImage,
-                    imagePaths = imagePaths,
-                    ts = System.currentTimeMillis(),
-                ),
-            )
-            if (answer.isNotBlank()) {
+                val hadImage = imagePaths.isNotEmpty()
                 sessions.appendMessage(
                     sid,
                     SessionMessage(
-                        role = "assistant",
-                        text = answer,
+                        role = "user",
+                        text = asr.ifBlank { if (hadImage) "（看看这个）" else "（语音）" },
+                        hadImage = hadImage,
+                        imagePaths = imagePaths,
                         ts = System.currentTimeMillis(),
-                        fromDuplexCall = true,
                     ),
                 )
+                if (answer.isNotBlank()) {
+                    sessions.appendMessage(
+                        sid,
+                        SessionMessage(
+                            role = "assistant",
+                            text = answer,
+                            ts = System.currentTimeMillis(),
+                            fromDuplexCall = true,
+                        ),
+                    )
+                }
             }
         }
     }
@@ -1291,6 +1295,22 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
         val out = ByteArrayOutputStream()
         snap.bitmap.compress(Bitmap.CompressFormat.JPEG, 75, out)
         val path = saveSentImage(context, out.toByteArray())
+        // 先把抓拍图关联到刚才的 user 消息（若末尾不是 user 则在回答前补一条），确保对话始终是「用户在前、助手在后」
+        if (path != null) {
+            val attached = sessions.attachImageToLastUser(sessionId, listOf(path))
+            if (!attached) {
+                sessions.appendMessage(
+                    sessionId,
+                    SessionMessage(
+                        role = "user",
+                        text = "📷 刚才拍的画面",
+                        hadImage = true,
+                        imagePaths = listOf(path),
+                        ts = System.currentTimeMillis(),
+                    ),
+                )
+            }
+        }
         val prompt = "这是刚拍到的画面，用户问题是：「$userAsk」。请直接给出清晰答案，不用重复客套。"
         val payload = listOf(
             OutMessage("system", AiClient.SYSTEM_PROMPT),
@@ -1328,13 +1348,6 @@ class ChatViewModel(app: TravelApp) : ViewModel() {
                         ts = System.currentTimeMillis(),
                     ),
                 )
-                // 把刚拍下的图补记到刚才那条用户消息里，方便回顾
-                path?.let {
-                    sessions.appendMessage(
-                        sessionId,
-                        SessionMessage(role = "user", text = "📷 刚才拍的画面", hadImage = true, imagePaths = listOf(it), ts = System.currentTimeMillis() - 1),
-                    )
-                }
                 _stream.value = null
                 _ui.update { it.copy(sending = false, question = "", attachments = emptyList(), error = null) }
                 val live = liveTts
