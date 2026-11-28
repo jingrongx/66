@@ -58,6 +58,11 @@ internal class DuplexAudioEngine(
         // 100Hz 一阶高通系数：R/(R+dt)，压掉空调/手持震动等低频轰鸣
         private const val HP_ALPHA_48K = 0.9871f
         private const val HP_ALPHA_16K = 0.9622f
+        // 本地播报结束后继续静音上行的保护时长：盖住扬声器余音 + AudioTrack 缓冲 + 麦克风物理延迟，
+        // 避免最后一帧播完的尾音被上行录回。插话打断会主动清零该时间戳以立即恢复上行。
+        private const val UPLINK_GATE_TAIL_MS = 450L
+        // 16kHz / 20ms / mono / PCM16 的静音帧（640 字节全 0），门控期间替代真实上行
+        private val SILENCE_FRAME_16K = ByteArray(TARGET_RATE * FRAME_MS / 1000 * 2)
 
         private val _callAudioActive = MutableStateFlow(false)
 
@@ -181,6 +186,16 @@ internal class DuplexAudioEngine(
     private val playLock = Any()
     private var activePlayback: PlaybackTrack? = null
     private var playCarrySample: Short = 0
+
+    // 上行门控：本地正在播报（或刚播完的尾音保护期内）时，上行发静音帧而非真实麦克风音频，
+    // 从源头杜绝扬声器播报声被录回 ASR 造成"自问自答"。这是 AEC 之外的兜底，
+    // 在 AEC 压不住外放回声的设备上尤其关键。用户插话打断时主动清零以立即恢复上行。
+    @Volatile private var lastLocalPlayAtMs = 0L
+    @Volatile private var uplinkGateLogged = false
+
+    /** 本地是否正在/刚刚播报（含尾音保护期），采集侧据此决定是否静音上行 */
+    private fun isLocalPlaybackGated(): Boolean =
+        lastLocalPlayAtMs > 0L && System.currentTimeMillis() - lastLocalPlayAtMs < UPLINK_GATE_TAIL_MS
 
     private fun logDuplex(msg: String) {
         Log.i(TAG, msg)
@@ -566,7 +581,21 @@ internal class DuplexAudioEngine(
                         }
                         secPeak = 0
                     }
-                    onPcmFrame(pcm16)
+                    // 上行门控：本地播报期间发静音帧（保持 20ms 帧节奏维持会话），
+                    // 杜绝播报声回灌被识别成"我"的消息；播报结束尾音保护期后自动恢复真实上行。
+                    if (isLocalPlaybackGated()) {
+                        if (!uplinkGateLogged) {
+                            uplinkGateLogged = true
+                            logDuplex("上行门控开启：本地播报中，上行改发静音帧防回声回灌")
+                        }
+                        onPcmFrame(SILENCE_FRAME_16K)
+                    } else {
+                        if (uplinkGateLogged) {
+                            uplinkGateLogged = false
+                            logDuplex("上行门控关闭：恢复真实麦克风上行")
+                        }
+                        onPcmFrame(pcm16)
+                    }
                 }
             }
             Log.d(TAG, "采集循环结束 ${cfg.label}")
@@ -715,6 +744,9 @@ internal class DuplexAudioEngine(
                     }.getOrDefault(-1)
                     if (w <= 0) break
                     offset += w
+                    // AudioTrack 有缓冲，播报真正出声晚于 enqueue 时刻；每次成功写入都续期，
+                    // 保证"正在响"的整段时间上行都保持静音
+                    lastLocalPlayAtMs = System.currentTimeMillis()
                 }
             }
         }
@@ -723,11 +755,17 @@ internal class DuplexAudioEngine(
     /** 喂入一段 24k PCM16LE 音频（来自下行 delta 的 Base64 解码结果） */
     fun enqueuePlayback(pcm: ByteArray) {
         if (pcm.isEmpty() || stopped) return
+        // 标记本地正在播报：采集侧据此静音上行，避免播报声回灌。每收到一段下行续期，
+        // 播报彻底停止后超过 UPLINK_GATE_TAIL_MS 自动恢复真实上行。
+        lastLocalPlayAtMs = System.currentTimeMillis()
         synchronized(playLock) { pcmQueue.add(pcm) }
     }
 
     /** 插话打断：立刻停掉当前播报，丢弃未播缓冲（对应 response.cancel 的本地侧） */
     fun flushPlayback() {
+        // 打断即恢复真实上行：用户马上要说话，不能再静音，否则插话内容被吞
+        lastLocalPlayAtMs = 0L
+        uplinkGateLogged = false
         val track = synchronized(playLock) {
             pcmQueue.clear()
             playCarrySample = 0
@@ -756,6 +794,8 @@ internal class DuplexAudioEngine(
         releaseRecorder()
         playbackJob?.cancel()
         playbackJob = null
+        lastLocalPlayAtMs = 0L
+        uplinkGateLogged = false
         synchronized(playLock) {
             pcmQueue.clear()
         }
