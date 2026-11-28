@@ -53,6 +53,8 @@ data class AiSettings(
     val asrAutoSendEnabled: Boolean = false, // 松手自动发送独立开关（关时 asrAutoSendSeconds 无效）
     // 实时通话（全屏）：引擎 doubao 全双工 / classic 经典串行（预留 realtime 音视频暂不开放）
     val callEngine: String = "doubao",
+    // 实时通话默认声音输出：true 免提外放（默认） / false 听筒（通话界面中也可随时切换）
+    val callSpeakerphone: Boolean = true,
     // 经典串行链路三段独立选模型，空字符串=跟随全局/默认
     val callAsrModel: String = "",
     val callLlmModel: String = "",

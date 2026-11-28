@@ -52,6 +52,7 @@ class DuplexCallController(
         val photos: List<ChatViewModel.PendingAttachment> = emptyList(),
         val startedAtMs: Long = 0L,
         val elapsedSec: Int = 0,
+        val speakerphone: Boolean = true,
     )
 
     private val appContext = context.applicationContext
@@ -161,6 +162,7 @@ class DuplexCallController(
             photos = emptyList(),
             startedAtMs = now,
             elapsedSec = 0,
+            speakerphone = settings.callSpeakerphone,
         )
 
         if (settings.duplexApiKey.isBlank()) {
@@ -187,8 +189,19 @@ class DuplexCallController(
             historyContext = setup.dialogContext,
             dialect = setup.dialect,
             music = setup.music,
+            speakerphone = settings.callSpeakerphone,
         )
         startClockAndAutoCollapse()
+    }
+
+    fun toggleSpeakerphone() {
+        setSpeakerphone(!_ui.value.speakerphone)
+    }
+
+    fun setSpeakerphone(enabled: Boolean) {
+        if (!_ui.value.active) return
+        _ui.update { it.copy(speakerphone = enabled) }
+        client.setSpeakerphone(enabled)
     }
 
     fun expandUi() {

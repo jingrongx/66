@@ -50,6 +50,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -82,6 +83,8 @@ fun DoubaoCallOverlay(
     onHangUp: () -> Unit,
     showPhotoActions: Boolean = true,
     startedAtMs: Long = 0L,
+    speakerphone: Boolean = true,
+    onToggleSpeakerphone: () -> Unit = {},
 ) {
     val baseMs = remember(startedAtMs) {
         if (startedAtMs > 0L) startedAtMs else System.currentTimeMillis()
@@ -108,47 +111,69 @@ fun DoubaoCallOverlay(
     }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
             ) {
-                val dotColor = when (state) {
-                    DoubaoDuplexClient.State.LISTENING -> Color(0xFF16A34A)
-                    DoubaoDuplexClient.State.SPEAKING -> MaterialTheme.colorScheme.primary
-                    DoubaoDuplexClient.State.ERROR -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.secondary
-                }
-                Box(
-                    modifier = Modifier
-                        .size(12.dp)
-                        .clip(CircleShape)
-                        .background(dotColor),
-                )
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("语音通话中", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    Text(statusText, fontSize = 15.sp, color = MaterialTheme.colorScheme.primary)
-                }
-                Text(
-                    "%02d:%02d".format(seconds.value / 60, seconds.value % 60),
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.width(12.dp))
-                Button(
-                    onClick = onHangUp,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.height(48.dp),
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_spark_hangup),
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                    val dotColor = when (state) {
+                        DoubaoDuplexClient.State.LISTENING -> Color(0xFF16A34A)
+                        DoubaoDuplexClient.State.SPEAKING -> MaterialTheme.colorScheme.primary
+                        DoubaoDuplexClient.State.ERROR -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.secondary
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(dotColor),
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Text("挂断", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "语音通话中",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "%02d:%02d".format(seconds.value / 60, seconds.value % 60),
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Button(
+                        onClick = onHangUp,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.height(48.dp),
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_spark_hangup),
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("挂断", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        statusText,
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.weight(1f).padding(start = 22.dp, end = 8.dp),
+                    )
+                    CallSpeakerToggleChip(
+                        speakerphone = speakerphone,
+                        onToggle = onToggleSpeakerphone,
+                    )
                 }
             }
 
@@ -322,9 +347,12 @@ fun VoiceCallOverlay(
     onHangUp: () -> Unit,
     showPhotoActions: Boolean = true,
     holdState: HoldTalkController.State? = null,
+    defaultSpeakerphone: Boolean = true,
 ) {
+    val context = LocalContext.current
+    var speakerphone by remember(defaultSpeakerphone) { mutableStateOf(defaultSpeakerphone) }
     DisposableEffect(Unit) {
-        TtsPlayer.setCallMode(true)
+        TtsPlayer.setCallMode(true, context, speakerphone)
         WakeHub.stopStandby()
         onDispose {
             TtsPlayer.setCallMode(false)
@@ -363,6 +391,15 @@ fun VoiceCallOverlay(
                     Text("语音通话中", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(12.dp))
                     Text(formatCallDuration(seconds), fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.weight(1f))
+                    CallSpeakerToggleChip(
+                        speakerphone = speakerphone,
+                        onToggle = {
+                            val next = !speakerphone
+                            speakerphone = next
+                            TtsPlayer.setCallSpeakerphone(context, next)
+                        },
+                    )
                 }
                 Spacer(Modifier.height(10.dp))
                 val status = when {
@@ -650,6 +687,60 @@ fun VoiceCallOverlay(
         }
         if (holdState != null) {
             HoldTalkFullScreenOverlay(state = holdState, releaseLabel = "发出去")
+        }
+    }
+}
+
+/** 通话界面右上角「免提 / 听筒」切换胶囊（豆包全双工与经典串行通话共用） */
+@Composable
+private fun CallSpeakerToggleChip(
+    speakerphone: Boolean,
+    onToggle: () -> Unit,
+) {
+    val bg = if (speakerphone) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+    val fg = if (speakerphone) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val borderColor = if (speakerphone) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    }
+    Surface(
+        modifier = Modifier
+            .height(38.dp)
+            .clip(RoundedCornerShape(19.dp))
+            .clickable(onClick = onToggle),
+        shape = RoundedCornerShape(19.dp),
+        color = bg,
+        border = BorderStroke(1.dp, borderColor),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painter = painterResource(
+                    if (speakerphone) R.drawable.ic_lt_speaker else R.drawable.ic_spark_phone,
+                ),
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(17.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                text = if (speakerphone) "免提" else "听筒",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = fg,
+                maxLines = 1,
+            )
         }
     }
 }

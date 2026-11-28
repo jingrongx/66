@@ -74,6 +74,17 @@ internal class DuplexAudioEngine(
             return target.takeIf { it > curVoice }
         }
 
+        /** 解析实际是否启用免提：用户界面手动切换优先；否则若插着耳机让位给耳机，无耳机跟随设置 */
+        internal fun resolveSpeakerphoneTarget(
+            desired: Boolean,
+            hasExternal: Boolean,
+            userOverrode: Boolean,
+        ): Boolean = when {
+            userOverrode -> desired
+            hasExternal -> false
+            else -> desired
+        }
+
         private fun hasExternalAudioOutput(am: AudioManager): Boolean {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 return am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { dev ->
@@ -110,7 +121,9 @@ internal class DuplexAudioEngine(
     private val audioManager = context.getSystemService(AudioManager::class.java)
     private var prevAudioMode: Int? = null
     private var prevSpeakerphoneOn: Boolean? = null
-    private var voiceVolumeSynced = false
+    @Volatile private var desiredSpeakerphone = true
+    @Volatile private var userOverrodeSpeakerphone = false
+    private var speakerVolumeSynced = false
     private var aec: AcousticEchoCanceler? = null
     private var recorder: AudioRecord? = null
     private var player: AudioTrack? = null
@@ -120,7 +133,38 @@ internal class DuplexAudioEngine(
     private val pcmQueue = ConcurrentLinkedQueue<ByteArray>()
     private val playLock = Any()
 
-    /** 确保语音采集具备 AEC/AGC 通信模式，同时未插耳机时走外放免提避免误切听筒或音量偏小 */
+    /** 启动音频前注入默认输出方向（true=免提外放，false=听筒） */
+    fun setInitialSpeakerphone(enabled: Boolean) {
+        desiredSpeakerphone = enabled
+        userOverrodeSpeakerphone = false
+        speakerVolumeSynced = false
+    }
+
+    /** 通话中手动切换免提/听筒并立即应用到系统音频路由 */
+    fun setSpeakerphone(enabled: Boolean) {
+        desiredSpeakerphone = enabled
+        userOverrodeSpeakerphone = true
+        val am = audioManager ?: return
+        if (am.mode != AudioManager.MODE_IN_COMMUNICATION) {
+            if (prevAudioMode == null) prevAudioMode = am.mode
+            runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
+        }
+        runCatching { am.isSpeakerphoneOn = enabled }
+        Log.i(TAG, "通话声道切换：${if (enabled) "免提外放" else "听筒"}")
+        if (enabled) {
+            scope.launch(Dispatchers.Main) {
+                delay(180)
+                if (_callAudioActive.value && desiredSpeakerphone) {
+                    if (!runCatching { am.isSpeakerphoneOn }.getOrDefault(false)) {
+                        runCatching { am.isSpeakerphoneOn = true }
+                    }
+                    syncVoiceVolumeIfNeeded()
+                }
+            }
+        }
+    }
+
+    /** 确保语音采集具备 AEC/AGC 通信模式，并按设置或手动切换路由到免提外放 / 听筒 */
     private fun ensureAudioRouting() {
         val am = audioManager ?: return
         // voip 通道要靠 AudioManager 的通信模式才会启用 AEC/AGC，否则增益可能失控
@@ -128,22 +172,28 @@ internal class DuplexAudioEngine(
             prevAudioMode = am.mode
             runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
         }
-        if (!hasExternalAudioOutput(am)) {
-            if (prevSpeakerphoneOn == null) {
-                prevSpeakerphoneOn = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
-            }
-            if (!runCatching { am.isSpeakerphoneOn }.getOrDefault(false)) {
-                runCatching { am.isSpeakerphoneOn = true }
-            }
+        if (prevSpeakerphoneOn == null) {
+            prevSpeakerphoneOn = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+        }
+        val targetSpeaker = resolveSpeakerphoneTarget(
+            desired = desiredSpeakerphone,
+            hasExternal = hasExternalAudioOutput(am),
+            userOverrode = userOverrodeSpeakerphone,
+        )
+        val curSpeaker = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+        if (curSpeaker != targetSpeaker) {
+            runCatching { am.isSpeakerphoneOn = targetSpeaker }
         }
         _callAudioActive.value = true
     }
 
-    /** 通话音轨就绪后同步一次过低的通话外放音量，避免系统默认 1 格听不清 */
+    /** 切到免提外放后同步一次过低的通话外放音量，避免系统默认 1 格听不清 */
     private fun syncVoiceVolumeIfNeeded() {
-        if (voiceVolumeSynced) return
+        if (speakerVolumeSynced) return
         val am = audioManager ?: return
-        voiceVolumeSynced = true
+        val isSpeakerActive = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+        if (!isSpeakerActive) return
+        speakerVolumeSynced = true
         val minVoice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             runCatching { am.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL) }.getOrDefault(1)
         } else {
@@ -158,13 +208,14 @@ internal class DuplexAudioEngine(
             runCatching { am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0) }
             Log.i(TAG, "通话音量初始化同步：$curVoice → $target/$maxVoice（对齐媒体 $curMusic/$maxMusic）")
         } else {
-            Log.d(TAG, "当前通话音量=$curVoice/$maxVoice 媒体=$curMusic/$maxMusic speaker=${am.isSpeakerphoneOn}")
+            Log.d(TAG, "当前通话音量=$curVoice/$maxVoice 媒体=$curMusic/$maxMusic speaker=$isSpeakerActive")
         }
     }
 
     private fun restoreAudioRouting() {
         _callAudioActive.value = false
-        voiceVolumeSynced = false
+        speakerVolumeSynced = false
+        userOverrodeSpeakerphone = false
         val am = audioManager ?: return
         prevSpeakerphoneOn?.let { wasOn ->
             runCatching { am.isSpeakerphoneOn = wasOn }

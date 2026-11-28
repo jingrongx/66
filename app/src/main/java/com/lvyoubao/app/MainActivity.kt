@@ -98,8 +98,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             val callAudioActive by com.lvyoubao.app.data.duplex.DuplexAudioEngine.isCallAudioActive
                 .collectAsState()
-            LaunchedEffect(callAudioActive) {
-                volumeControlStream = if (callAudioActive) {
+            val ttsVoiceCallStream by com.lvyoubao.app.ui.common.TtsPlayer.useVoiceCallStream
+                .collectAsState()
+            LaunchedEffect(callAudioActive, ttsVoiceCallStream) {
+                volumeControlStream = if (callAudioActive || ttsVoiceCallStream) {
                     android.media.AudioManager.STREAM_VOICE_CALL
                 } else {
                     android.media.AudioManager.STREAM_MUSIC

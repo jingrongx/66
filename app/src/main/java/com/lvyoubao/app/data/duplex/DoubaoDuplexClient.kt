@@ -112,6 +112,7 @@ class DoubaoDuplexClient(private val context: Context) {
     /** 方言（explicit_dialect，空=关）与唱歌开关 */
     private var dialect: String = ""
     private var music: Boolean = false
+    private var defaultSpeakerphone: Boolean = true
     @Volatile private var muted = false
     @Volatile private var userSpeaking = false
 
@@ -353,6 +354,7 @@ class DoubaoDuplexClient(private val context: Context) {
         historyContext: List<DialogTurn> = emptyList(),
         dialect: String = "",
         music: Boolean = false,
+        speakerphone: Boolean = true,
     ): Boolean {
         if (key.isBlank()) {
             _events.tryEmit(Event.Error("CONFIG", "未配置实时语音 API Key"))
@@ -369,6 +371,7 @@ class DoubaoDuplexClient(private val context: Context) {
         dialogContext = historyContext
         this.dialect = dialect
         this.music = music
+        this.defaultSpeakerphone = speakerphone
         retries = 0
         idleReconnects = 0
         userClosed = false
@@ -418,9 +421,16 @@ class DoubaoDuplexClient(private val context: Context) {
             },
             onLevel = { _events.tryEmit(Event.Level(it)) },
         )
+        engine.setInitialSpeakerphone(defaultSpeakerphone)
         audio = engine
         engine.startPlayback()
         engine.startCapture()
+    }
+
+    /** 通话中切换免提外放 / 听筒 */
+    fun setSpeakerphone(enabled: Boolean) {
+        defaultSpeakerphone = enabled
+        audio?.setSpeakerphone(enabled)
     }
 
     /** 插话打断：本地停播 + 发 response.cancel（对应服务端的 response.canceled） */

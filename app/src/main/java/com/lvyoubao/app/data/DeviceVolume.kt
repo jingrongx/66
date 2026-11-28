@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.os.Build
 import com.lvyoubao.app.data.duplex.DuplexAudioEngine
+import com.lvyoubao.app.ui.common.TtsPlayer
 import kotlin.math.roundToInt
 
 /**
@@ -43,9 +44,10 @@ object DeviceVolume {
     fun apply(context: Context, action: Action, percent: Int = 60): String {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             ?: return "这台设备调不了音量"
-        val inDuplexCall = DuplexAudioEngine.isCallAudioActive.value ||
+        val inVoiceCall = DuplexAudioEngine.isCallAudioActive.value ||
+            TtsPlayer.useVoiceCallStream.value ||
             am.mode == AudioManager.MODE_IN_COMMUNICATION
-        val stream = if (inDuplexCall) AudioManager.STREAM_VOICE_CALL else AudioManager.STREAM_MUSIC
+        val stream = if (inVoiceCall) AudioManager.STREAM_VOICE_CALL else AudioManager.STREAM_MUSIC
         val max = am.getStreamMaxVolume(stream)
         if (max <= 0) return "这台设备调不了音量"
         val minVol = if (stream == AudioManager.STREAM_VOICE_CALL) {

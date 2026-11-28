@@ -1,12 +1,14 @@
 package com.lvyoubao.app.ui.common
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaPlayer
+import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.io.File
@@ -129,6 +131,18 @@ object TtsPlayer {
     @Volatile
     private var callMode = false
 
+    /** 经典通话模式下的声道选择：true=免提外放（走 STREAM_MUSIC），false=听筒（走 STREAM_VOICE_CALL） */
+    @Volatile
+    private var callSpeakerphone = true
+
+    private val _useVoiceCallStream = MutableStateFlow(false)
+    /** 经典通话切到听筒时为 true，供主界面与语音调节同步切换至 STREAM_VOICE_CALL */
+    val useVoiceCallStream: StateFlow<Boolean> = _useVoiceCallStream.asStateFlow()
+
+    private var callAudioManager: AudioManager? = null
+    private var prevCallAudioMode: Int? = null
+    private var prevCallSpeakerphone: Boolean? = null
+
     /** DeepSeek TTS 用的主对话 Key（复用 apiKey；与硅基流动 cloudKey 分开存） */
     @Volatile
     private var deepSeekKey: String? = null
@@ -141,12 +155,62 @@ object TtsPlayer {
         ttsLog("引擎配置：普通=$preferredEngine 通话=${callEngine.ifBlank { "跟随普通" }} DeepSeekKey=${deepSeekKey != null}")
     }
 
-    /** 通话场景切换：进入时优先用 callTtsModel，退出恢复 voiceTtsModel */
-    fun setCallMode(active: Boolean) {
-        if (callMode == active) return
-        callMode = active
-        ttsLog("通话播报模式：${if (active) "开" else "关"}")
+    /** 通话场景切换：进入时优先用 callTtsModel，并按设置应用默认免提/听筒路由；退出时还原系统音频模式 */
+    fun setCallMode(active: Boolean, context: Context? = null, defaultSpeakerphone: Boolean = true) {
+        if (active) {
+            callMode = true
+            if (context != null) {
+                setCallSpeakerphone(context, defaultSpeakerphone)
+            } else {
+                callSpeakerphone = defaultSpeakerphone
+                _useVoiceCallStream.value = !defaultSpeakerphone
+            }
+            ttsLog("通话播报模式：开（默认${if (callSpeakerphone) "免提外放" else "听筒"}）")
+        } else {
+            if (!callMode && prevCallAudioMode == null && prevCallSpeakerphone == null) return
+            callMode = false
+            callSpeakerphone = true
+            _useVoiceCallStream.value = false
+            restoreCallAudioRoute()
+            ttsLog("通话播报模式：关")
+        }
     }
+
+    /** 经典通话中切换免提外放 / 听筒，立即切换系统音频模式与后续播报流 */
+    fun setCallSpeakerphone(context: Context, speakerphone: Boolean) {
+        callSpeakerphone = speakerphone
+        _useVoiceCallStream.value = callMode && !speakerphone
+        if (!callMode) return
+        val am = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        if (!speakerphone) {
+            callAudioManager = am
+            if (prevCallAudioMode == null) prevCallAudioMode = am.mode
+            if (prevCallSpeakerphone == null) {
+                prevCallSpeakerphone = runCatching { am.isSpeakerphoneOn }.getOrDefault(false)
+            }
+            runCatching { am.mode = AudioManager.MODE_IN_COMMUNICATION }
+            runCatching { am.isSpeakerphoneOn = false }
+        } else {
+            restoreCallAudioRoute()
+        }
+        ttsLog("经典通话声道切换：${if (speakerphone) "免提外放" else "听筒"}")
+    }
+
+    private fun restoreCallAudioRoute() {
+        val am = callAudioManager ?: return
+        prevCallSpeakerphone?.let { wasOn ->
+            runCatching { am.isSpeakerphoneOn = wasOn }
+            prevCallSpeakerphone = null
+        }
+        prevCallAudioMode?.let { mode ->
+            runCatching { am.mode = mode }
+            prevCallAudioMode = null
+        }
+        callAudioManager = null
+    }
+
+    private fun activeAudioStreamType(): Int =
+        if (callMode && !callSpeakerphone) AudioManager.STREAM_VOICE_CALL else AudioManager.STREAM_MUSIC
 
     /** 当前实际生效的首选引擎 */
     private fun activeEngine(): String = if (callMode && callEngine.isNotBlank()) callEngine else preferredEngine
@@ -604,6 +668,16 @@ object TtsPlayer {
                 mp = candidate
                 player = candidate
                 started = try {
+                    val useVoice = activeAudioStreamType() == AudioManager.STREAM_VOICE_CALL
+                    candidate.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(
+                                if (useVoice) AudioAttributes.USAGE_VOICE_COMMUNICATION
+                                else AudioAttributes.USAGE_MEDIA,
+                            )
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build(),
+                    )
                     candidate.setDataSource(file.absolutePath)
                     candidate.prepare()
                     if (gen == generation) {
@@ -702,10 +776,13 @@ object TtsPlayer {
                             if (cont.isActive) cont.resume(Unit)
                         }
                     })
+                    val ttsParams = Bundle().apply {
+                        putString(TextToSpeech.Engine.KEY_PARAM_STREAM, activeAudioStreamType().toString())
+                    }
                     val result = engine.speak(
                         text,
                         TextToSpeech.QUEUE_FLUSH,
-                        null,
+                        ttsParams,
                         "lvyoubao_${System.currentTimeMillis()}",
                     )
                     if (result != TextToSpeech.SUCCESS) {
@@ -772,6 +849,7 @@ object TtsPlayer {
         private val onStarted: () -> Unit,
     ) {
         @Volatile private var track: AudioTrack? = null
+        private var streamType = AudioManager.STREAM_MUSIC
         private var channels = 1
         private var writtenBytes = 0L
         private var started = false
@@ -817,19 +895,29 @@ object TtsPlayer {
          * 这一层不确定性就没了。
          */
         fun ensureTrack(rate: Int, ch: Int) {
+            val wantStream = activeAudioStreamType()
+            if (track != null && streamType != wantStream) {
+                runCatching { if (track?.playState == AudioTrack.PLAYSTATE_PLAYING) track?.pause() }
+                runCatching { track?.release() }
+                track = null
+                started = false
+                writtenBytes = 0L
+            }
             if (!alive || track != null) return
+            streamType = wantStream
             channels = if (ch > 0) ch else 1
             val chMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
             val minBuf = AudioTrack.getMinBufferSize(OUT_RATE, chMask, AudioFormat.ENCODING_PCM_16BIT)
             // 缓冲 ≈4 秒 @48kHz：解码耗时、合成空档、录音抢麦都靠它吸收
             val bufSize = maxOf(minBuf * 4, 384_000)
             track = runCatching {
+                @Suppress("DEPRECATION")
                 AudioTrack(
-                    AudioManager.STREAM_MUSIC, OUT_RATE, chMask, AudioFormat.ENCODING_PCM_16BIT,
+                    wantStream, OUT_RATE, chMask, AudioFormat.ENCODING_PCM_16BIT,
                     bufSize, AudioTrack.MODE_STREAM,
                 )
             }.getOrNull()
-            ttsLog("共用音轨就绪：${OUT_RATE}Hz ${channels}ch 缓冲 ${bufSize}B（源 ${rate}Hz → 线性上采样）")
+            ttsLog("共用音轨就绪：${OUT_RATE}Hz ${channels}ch 缓冲 ${bufSize}B（源 ${rate}Hz → 线性上采样，流=$wantStream）")
         }
 
         /** 这一段能不能原样写进已建的轨道（声道数不一致会彻底错位，直接刺耳破音） */
@@ -1518,8 +1606,9 @@ object TtsPlayer {
             val minBuf = AudioTrack.getMinBufferSize(sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT)
             // 缓冲给足：Edge 下发快于实时，写入端要能吸收突发（64KB ≈ 1.3 秒 @24kHz 单声道）
             val bufSize = maxOf(minBuf * 4, 64_000)
+            @Suppress("DEPRECATION")
             track = AudioTrack(
-                AudioManager.STREAM_MUSIC, sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT,
+                activeAudioStreamType(), sampleRate, chMask, AudioFormat.ENCODING_PCM_16BIT,
                 bufSize, AudioTrack.MODE_STREAM,
             )
         }

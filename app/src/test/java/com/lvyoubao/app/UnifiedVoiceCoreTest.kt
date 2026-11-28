@@ -1,9 +1,12 @@
 package com.lvyoubao.app
 
+import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.CallTimer
+import com.lvyoubao.app.data.ConfigSyncCodec
 import com.lvyoubao.app.data.DeviceVolume
 import com.lvyoubao.app.data.LocalCommandRouter
 import com.lvyoubao.app.data.SessionMessage
+import com.lvyoubao.app.data.SyncableConfig
 import com.lvyoubao.app.data.duplex.DuplexAudioEngine
 import com.lvyoubao.app.data.duplex.DuplexCallController
 import com.lvyoubao.app.ui.common.AUTO_SPEAK_FRESH_WINDOW_MS
@@ -266,5 +269,27 @@ class UnifiedVoiceCoreTest {
         // 带着部分关键词的真实追问不误伤
         assertFalse(DuplexCallController.isLikelyEchoTranscript("你说气温14度是不是太冷了，要不要穿羽绒服", weatherReply))
         assertFalse(DuplexCallController.isLikelyEchoTranscript("那世博文化公园开车怎么走", coatReply))
+    }
+
+    @Test
+    fun `DuplexAudioEngine resolveSpeakerphoneTarget 默认与手动切换优先级`() {
+        assertTrue(DuplexAudioEngine.resolveSpeakerphoneTarget(desired = true, hasExternal = false, userOverrode = false))
+        assertFalse(DuplexAudioEngine.resolveSpeakerphoneTarget(desired = false, hasExternal = false, userOverrode = false))
+        // 未手动切换且外接耳机在线时让位给耳机
+        assertFalse(DuplexAudioEngine.resolveSpeakerphoneTarget(desired = true, hasExternal = true, userOverrode = false))
+        // 通话中用户主动点免提时优先尊重手点状态
+        assertTrue(DuplexAudioEngine.resolveSpeakerphoneTarget(desired = true, hasExternal = true, userOverrode = true))
+    }
+
+    @Test
+    fun `ConfigSyncCodec 同步默认声音输出且兼容旧版空字段载荷`() {
+        val synced = ConfigSyncCodec.fromSettings(AiSettings(callSpeakerphone = false))
+        assertEquals(false, synced.callSpeakerphone)
+        val merged = ConfigSyncCodec.merge(AiSettings(callSpeakerphone = true), synced)
+        assertFalse(merged.callSpeakerphone)
+
+        // 旧版二维码缺少 callSpeakerphone（null）时保留接收端原有配置
+        val legacyMerged = ConfigSyncCodec.merge(AiSettings(callSpeakerphone = false), SyncableConfig())
+        assertFalse(legacyMerged.callSpeakerphone)
     }
 }

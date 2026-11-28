@@ -66,6 +66,7 @@ class SettingsRepository(private val context: Context) {
         val voiceTtsModel = stringPreferencesKey("voice_tts_model")
         val asrAutoSendEnabled = booleanPreferencesKey("asr_auto_send_enabled")
         val callEngine = stringPreferencesKey("call_engine")
+        val callSpeakerphone = booleanPreferencesKey("call_speakerphone")
         val callAsrModel = stringPreferencesKey("call_asr_model")
         val callLlmModel = stringPreferencesKey("call_llm_model")
         val callTtsModel = stringPreferencesKey("call_tts_model")
@@ -128,6 +129,7 @@ class SettingsRepository(private val context: Context) {
             voiceTtsModel = p[Keys.voiceTtsModel] ?: "",
             asrAutoSendEnabled = p[Keys.asrAutoSendEnabled] ?: false,
             callEngine = p[Keys.callEngine] ?: "doubao",
+            callSpeakerphone = p[Keys.callSpeakerphone] ?: defaults.callSpeakerphone,
             callAsrModel = p[Keys.callAsrModel] ?: "",
             callLlmModel = p[Keys.callLlmModel] ?: "",
             callTtsModel = p[Keys.callTtsModel] ?: "",
@@ -186,6 +188,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.voiceTtsModel] = settings.voiceTtsModel
             p[Keys.asrAutoSendEnabled] = settings.asrAutoSendEnabled
             p[Keys.callEngine] = settings.callEngine
+            p[Keys.callSpeakerphone] = settings.callSpeakerphone
             p[Keys.callAsrModel] = settings.callAsrModel
             p[Keys.callLlmModel] = settings.callLlmModel
             p[Keys.callTtsModel] = settings.callTtsModel

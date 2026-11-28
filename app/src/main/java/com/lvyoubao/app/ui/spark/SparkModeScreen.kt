@@ -804,6 +804,8 @@ fun SparkModeScreen(
                 startedAtMs = duplexUi.startedAtMs,
                 onHangUp = hangUpCall,
                 showPhotoActions = false,
+                speakerphone = duplexUi.speakerphone,
+                onToggleSpeakerphone = { vm.callController.toggleSpeakerphone() },
             )
         } else if (showClassicCall) {
             VoiceCallOverlay(
@@ -837,6 +839,7 @@ fun SparkModeScreen(
                 },
                 showPhotoActions = false,
                 holdState = holdState,
+                defaultSpeakerphone = settings.callSpeakerphone,
             )
         }
 

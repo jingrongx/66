@@ -838,6 +838,8 @@ fun AskScreen(
             onHangUp = { vm.callController.hangUp() },
             showPhotoActions = false,
             startedAtMs = duplexUi.startedAtMs,
+            speakerphone = duplexUi.speakerphone,
+            onToggleSpeakerphone = { vm.callController.toggleSpeakerphone() },
         )
     } else if (showClassicCall) {
         VoiceCallOverlay(
@@ -870,6 +872,7 @@ fun AskScreen(
             },
             showPhotoActions = true,
             holdState = holdState,
+            defaultSpeakerphone = settings.callSpeakerphone,
         )
     } else {
         HoldTalkFullScreenOverlay(state = holdState, releaseLabel = "记下来")

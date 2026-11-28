@@ -258,6 +258,35 @@ internal fun VoiceConfigCard(state: SettingsViewModel.UiState, vm: SettingsViewM
                 lineHeight = 15.sp,
             )
 
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(p.inset)
+                    .border(1.dp, p.insetBorder, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    CsLabel("默认声音输出")
+                    Text(
+                        "两种通话引擎均适用 · 通话界面可随时切换",
+                        color = p.muted,
+                        fontSize = 10.sp,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                PillGroup(
+                    options = listOf(true, false),
+                    selected = d.callSpeakerphone,
+                    label = { if (it) "免提外放" else "听筒" },
+                    onSelect = { useSpeaker -> vm.updateDraft { it.copy(callSpeakerphone = useSpeaker) } },
+                    itemPaddingH = 10,
+                    itemPaddingV = 5,
+                )
+            }
+
             if (d.callEngine == "classic") {
                 Spacer(Modifier.height(10.dp))
                 Text(

@@ -621,6 +621,8 @@ fun LargeTextScreen(
             onHangUp = { vm.callController.hangUp() },
             showPhotoActions = true,
             startedAtMs = duplexUi.startedAtMs,
+            speakerphone = duplexUi.speakerphone,
+            onToggleSpeakerphone = { vm.callController.toggleSpeakerphone() },
         )
     } else if (showClassicCall) {
         VoiceCallOverlay(
@@ -653,6 +655,7 @@ fun LargeTextScreen(
             },
             showPhotoActions = true,
             holdState = holdState,
+            defaultSpeakerphone = settings.callSpeakerphone,
         )
     } else if (!showHistory && !showSettings && !showUpdate) {
         // 按住说话全屏动态声波与上滑取消浮层
