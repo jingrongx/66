@@ -436,9 +436,8 @@ class DoubaoDuplexClient(private val context: Context) {
         )
         engine.setInitialSpeakerphone(defaultSpeakerphone)
         audio = engine
-        // 先建录音（拿 audioSessionId 并挂 AEC），再建播放轨复用同一会话，AEC 才有参考可抵消回声
-        engine.startCapture()
         engine.startPlayback()
+        engine.startCapture()
     }
 
     /** 通话中切换免提外放 / 听筒 */
