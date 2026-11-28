@@ -92,10 +92,19 @@ class MainActivity : ComponentActivity() {
             registerReceiver(screenReceiver, filter)
         }
         com.lvyoubao.app.ui.common.ScreenAwake.bind(this)
-        // 统一让硬件音量键始终调节媒体流（与微软 TTS 及实时语音通话下行保持同一通道）
+        // 默认调节媒体流（与微软 TTS 一致）；全双工通话期间随音频路由切到通话流，确保音量键直接生效
         volumeControlStream = android.media.AudioManager.STREAM_MUSIC
         enableEdgeToEdge()
         setContent {
+            val callAudioActive by com.lvyoubao.app.data.duplex.DuplexAudioEngine.isCallAudioActive
+                .collectAsState()
+            LaunchedEffect(callAudioActive) {
+                volumeControlStream = if (callAudioActive) {
+                    android.media.AudioManager.STREAM_VOICE_CALL
+                } else {
+                    android.media.AudioManager.STREAM_MUSIC
+                }
+            }
             val app = LocalContext.current.applicationContext as TravelApp
             // 先等 DataStore 首帧真实配置就绪再挂业务屏，防止首帧拿默认值先进 AskScreen 起麦、
             // 100ms 后又被真实模式替换导致连续两次启停待机唤醒抢麦

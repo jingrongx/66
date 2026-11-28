@@ -4,6 +4,7 @@ import android.content.Context
 import com.lvyoubao.app.data.AiSettings
 import com.lvyoubao.app.data.AppTools
 import com.lvyoubao.app.data.DeviceTools
+import com.lvyoubao.app.data.LogStore
 import com.lvyoubao.app.data.MapCardData
 import com.lvyoubao.app.data.OutMessage
 import com.lvyoubao.app.ui.ChatViewModel
@@ -58,8 +59,49 @@ class DuplexCallController(
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
+    companion object {
+        private const val ECHO_GUARD_WINDOW_MS = 8_000L
+
+        /** 归一化对比文本：展开常见口语读法差异，并去掉空格与标点 */
+        internal fun normalizeEchoText(text: String): String {
+            val expanded = text.lowercase()
+                .replace("°c", "摄氏度")
+                .replace("℃", "摄氏度")
+                .replace("%", "百分之")
+            return buildString(expanded.length) {
+                for (ch in expanded) {
+                    if (ch.isLetterOrDigit() || ch.code in 0x4E00..0x9FFF) {
+                        append(ch)
+                    }
+                }
+            }
+        }
+
+        /**
+         * 兜底识别「扬声器外放被自己麦克风回灌」的自述回声（硬件 AEC 缺失或偶发残余时保护）：
+         * 要求清洗后长度 >= 8 字且与最近助手回复的 2-gram 重合率 >= 65%（含直接子串），
+         * 确保正常短语打断（「嗯」「好的」「再见」）及正常追问绝对不会被误拦。
+         */
+        internal fun isLikelyEchoTranscript(asr: String, recentAssistant: String): Boolean {
+            val a = normalizeEchoText(asr)
+            val b = normalizeEchoText(recentAssistant)
+            if (a.length < 8 || b.length < 8) return false
+            if (b.contains(a)) return true
+            val totalBigrams = a.length - 1
+            var hits = 0
+            for (i in 0 until totalBigrams) {
+                if (b.contains(a.substring(i, i + 2))) hits++
+            }
+            return hits >= 6 && hits.toFloat() / totalBigrams.toFloat() >= 0.65f
+        }
+    }
+
     private val pendingMapCards = mutableListOf<MapCardData>()
     private var answerBuf = ""
+    private var lastAssistantText = ""
+    private var lastAssistantAt = 0L
+    private var suppressedEchoAsr = ""
+    private var suppressedEchoAt = 0L
     private var lastVoiceAt = 0L
     private var lastTurnKey = ""
     private var localHandledAsr = ""
@@ -100,6 +142,10 @@ class DuplexCallController(
         NetKeep.acquire(appContext, "doubao-call")
 
         answerBuf = ""
+        lastAssistantText = ""
+        lastAssistantAt = 0L
+        suppressedEchoAsr = ""
+        suppressedEchoAt = 0L
         lastTurnKey = ""
         localHandledAsr = ""
         localHandledAt = 0L
@@ -225,8 +271,26 @@ class DuplexCallController(
                 updateUserTurn("")
             }
             is DoubaoDuplexClient.Event.Asr -> {
+                val now = System.currentTimeMillis()
+                lastVoiceAt = now
+                val recentAssistant = answerBuf.ifBlank { lastAssistantText }
+                if (ev.isFinal && ev.text.isNotBlank() &&
+                    recentAssistant.isNotBlank() &&
+                    now - lastAssistantAt <= ECHO_GUARD_WINDOW_MS &&
+                    isLikelyEchoTranscript(ev.text, recentAssistant)
+                ) {
+                    LogStore.log("duplex", "拦截自述回声 ASR：${ev.text.take(40)}")
+                    suppressedEchoAsr = ev.text
+                    suppressedEchoAt = now
+                    removeEchoTurns(ev.text)
+                    client.cancelResponse()
+                    return
+                }
+                if (ev.isFinal && ev.text.isNotBlank()) {
+                    suppressedEchoAsr = ""
+                    suppressedEchoAt = 0L
+                }
                 updateUserTurn(ev.text)
-                lastVoiceAt = System.currentTimeMillis()
                 if (autoCollapseEnabled && !_ui.value.uiVisible && ev.text.isNotBlank()) {
                     _ui.update { it.copy(uiVisible = true) }
                 }
@@ -239,6 +303,8 @@ class DuplexCallController(
                             client.cancelResponse()
                             client.speak(confirm)
                             answerBuf = confirm
+                            lastAssistantText = confirm
+                            lastAssistantAt = System.currentTimeMillis()
                             updateAssistantTurn(confirm, done = true)
                             localHandledAsr = said
                             localHandledAt = System.currentTimeMillis()
@@ -248,13 +314,21 @@ class DuplexCallController(
                 }
             }
             is DoubaoDuplexClient.Event.Answer -> {
-                lastVoiceAt = System.currentTimeMillis()
+                val now = System.currentTimeMillis()
+                lastVoiceAt = now
+                if (suppressedEchoAt > 0L && now - suppressedEchoAt < 2_500L) {
+                    return
+                }
                 answerBuf = if (ev.isFinal) {
                     ev.text
                 } else if (answerBuf.isNotEmpty() && ev.text.startsWith(answerBuf)) {
                     ev.text
                 } else {
                     answerBuf + ev.text
+                }
+                if (answerBuf.isNotBlank()) {
+                    lastAssistantText = answerBuf
+                    lastAssistantAt = now
                 }
                 updateAssistantTurn(answerBuf, done = ev.isFinal)
             }
@@ -291,13 +365,31 @@ class DuplexCallController(
                 hangUp()
             }
             is DoubaoDuplexClient.Event.TurnDone -> {
-                lastVoiceAt = System.currentTimeMillis()
+                val now = System.currentTimeMillis()
+                lastVoiceAt = now
+                val recentRef = lastAssistantText.ifBlank { answerBuf }
+                val isSuppressedEcho = ev.asr.isNotBlank() && (
+                    (ev.asr == suppressedEchoAsr && now - suppressedEchoAt <= ECHO_GUARD_WINDOW_MS) ||
+                        (recentRef.isNotBlank() && now - lastAssistantAt <= ECHO_GUARD_WINDOW_MS &&
+                            isLikelyEchoTranscript(ev.asr, recentRef))
+                    )
+                if (isSuppressedEcho) {
+                    LogStore.log("duplex", "丢弃回声轮次落库：${ev.asr.take(40)}")
+                    removeEchoTurns(ev.asr)
+                    pendingMapCards.clear()
+                    answerBuf = lastAssistantText
+                    return
+                }
                 answerBuf = ev.answer
+                if (ev.answer.isNotBlank()) {
+                    lastAssistantText = ev.answer
+                    lastAssistantAt = now
+                }
                 updateAssistantTurn(ev.answer, done = true)
                 if (ev.answer.isNotBlank()) {
                     val handledLocally = ev.asr.isNotBlank() &&
                         ev.asr == localHandledAsr &&
-                        System.currentTimeMillis() - localHandledAt < 15_000L
+                        now - localHandledAt < 15_000L
                     if (!handledLocally) {
                         val key = ev.asr.filterNot { it.isWhitespace() } + "|" + ev.answer.filterNot { it.isWhitespace() }
                         if (key != lastTurnKey) {
@@ -313,6 +405,10 @@ class DuplexCallController(
             }
             is DoubaoDuplexClient.Event.SessionReady -> {
                 answerBuf = ""
+                lastAssistantText = ""
+                lastAssistantAt = 0L
+                suppressedEchoAsr = ""
+                suppressedEchoAt = 0L
                 lastTurnKey = ""
                 pendingMapCards.clear()
                 _ui.update { it.copy(hint = null, turns = emptyList(), photos = emptyList()) }
@@ -339,6 +435,23 @@ class DuplexCallController(
                 if (list.size > 30) list.removeAt(0)
             }
             st.copy(turns = list)
+        }
+    }
+
+    private fun removeEchoTurns(echoAsr: String) {
+        _ui.update { st ->
+            val list = st.turns
+            val last = list.lastOrNull() ?: return@update st
+            val normEcho = normalizeEchoText(echoAsr)
+            when {
+                last.role == "user" -> st.copy(turns = list.dropLast(1))
+                list.size >= 2 && last.role == "assistant" &&
+                    list[list.lastIndex - 1].role == "user" &&
+                    (list[list.lastIndex - 1].text.isBlank() ||
+                        normalizeEchoText(list[list.lastIndex - 1].text) == normEcho) ->
+                    st.copy(turns = list.dropLast(2))
+                else -> st
+            }
         }
     }
 

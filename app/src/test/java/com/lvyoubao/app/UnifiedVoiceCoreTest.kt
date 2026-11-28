@@ -5,6 +5,7 @@ import com.lvyoubao.app.data.DeviceVolume
 import com.lvyoubao.app.data.LocalCommandRouter
 import com.lvyoubao.app.data.SessionMessage
 import com.lvyoubao.app.data.duplex.DuplexAudioEngine
+import com.lvyoubao.app.data.duplex.DuplexCallController
 import com.lvyoubao.app.ui.common.AUTO_SPEAK_FRESH_WINDOW_MS
 import com.lvyoubao.app.ui.common.HoldTalkController
 import com.lvyoubao.app.ui.common.WakeHub
@@ -227,37 +228,43 @@ class UnifiedVoiceCoreTest {
     }
 
     @Test
-    fun `DuplexAudioEngine upsample24kTo48k 线性插值倍率与跨块连续`() {
-        fun encodeSamples(vararg values: Short): ByteArray {
-            val bytes = ByteArray(values.size * 2)
-            values.forEachIndexed { idx, s ->
-                bytes[idx * 2] = (s.toInt() and 0xFF).toByte()
-                bytes[idx * 2 + 1] = ((s.toInt() shr 8) and 0xFF).toByte()
-            }
-            return bytes
-        }
+    fun `DuplexAudioEngine computeSyncedVoiceVolume 仅在通话最低底档时对齐媒体比例`() {
+        // 默认外放通话音量只有 1/6，而媒体开到 17/30（57%）-> 对齐到 3/6
+        assertEquals(3, DuplexAudioEngine.computeSyncedVoiceVolume(curVoice = 1, minVoice = 1, maxVoice = 6, curMusic = 17, maxMusic = 30))
+        // 媒体开到满格 -> 对齐到 6/6
+        assertEquals(6, DuplexAudioEngine.computeSyncedVoiceVolume(curVoice = 1, minVoice = 1, maxVoice = 6, curMusic = 30, maxMusic = 30))
+        // 用户已自己调过通话音量（非最低档）-> 不覆写用户偏好
+        assertNull(DuplexAudioEngine.computeSyncedVoiceVolume(curVoice = 2, minVoice = 1, maxVoice = 6, curMusic = 30, maxMusic = 30))
+        // 媒体音量很低（<=25%）-> 不强行拉高
+        assertNull(DuplexAudioEngine.computeSyncedVoiceVolume(curVoice = 1, minVoice = 1, maxVoice = 6, curMusic = 5, maxMusic = 30))
+    }
 
-        fun decodeSamples(bytes: ByteArray): List<Short> =
-            (0 until bytes.size / 2).map { i ->
-                ((bytes[i * 2 + 1].toInt() shl 8) or (bytes[i * 2].toInt() and 0xFF)).toShort()
-            }
+    @Test
+    fun `DeviceVolume computeTargetStep 兼容通话流非零下限`() {
+        // 通话流 minVol=1, maxVol=6，静音命令钳制到 1，提升/最大正确缩放
+        assertEquals(1 to 0, DeviceVolume.computeTargetStep(DeviceVolume.Action.MUTE, cur = 3, minVol = 1, maxVol = 6))
+        assertEquals(6 to 100, DeviceVolume.computeTargetStep(DeviceVolume.Action.MAX, cur = 2, minVol = 1, maxVol = 6))
+        assertEquals(4 to 65, DeviceVolume.computeTargetStep(DeviceVolume.Action.UP, cur = 3, minVol = 1, maxVol = 6))
+        // 媒体流 minVol=0, maxVol=30 允许真正静音到 0
+        assertEquals(0 to 0, DeviceVolume.computeTargetStep(DeviceVolume.Action.MUTE, cur = 15, minVol = 0, maxVol = 30))
+    }
 
-        val (emptyOut, preservedCarry) = DuplexAudioEngine.upsample24kTo48k(ByteArray(0), 123)
-        assertEquals(0, emptyOut.size)
-        assertEquals(123.toShort(), preservedCarry)
+    @Test
+    fun `DuplexCallController isLikelyEchoTranscript 精准识别自述回声且不误伤追问与打断`() {
+        val weatherReply = "今天上海浦东是多云，气温14°C，西风不超过3级，湿度41%，整体挺舒服的，出门不用穿太厚。"
+        val weatherEcho = "今天上海浦东是多云，气温 14 摄氏度，西风不超过 3 级，湿度 41%，整体挺舒服的，出门不用穿太厚。"
+        assertTrue(DuplexCallController.isLikelyEchoTranscript(weatherEcho, weatherReply))
 
-        val (firstOut, firstCarry) = DuplexAudioEngine.upsample24kTo48k(encodeSamples(100, 300), 0)
-        assertEquals(listOf<Short>(50, 100, 200, 300), decodeSamples(firstOut))
-        assertEquals(300.toShort(), firstCarry)
+        val coatReply = "看你一直在翻东西，是在找出门要带的东西吗？今天多云，带件薄外套就行，不用备雨具。"
+        val coatEcho = "看你一直在翻东西，是在找出门要带的东西吗？今天多云，带件薄外套就行，不用被雨具。"
+        assertTrue(DuplexCallController.isLikelyEchoTranscript(coatEcho, coatReply))
 
-        // 下一块沿用上一块结尾样本 300 做中点插值，消除块间台阶
-        val (secondOut, secondCarry) = DuplexAudioEngine.upsample24kTo48k(encodeSamples(500), firstCarry)
-        assertEquals(listOf<Short>(400, 500), decodeSamples(secondOut))
-        assertEquals(500.toShort(), secondCarry)
-
-        // 负奇数差值与 TtsPlayer (prev + (curr - prev) / 2) 舍入口径一致
-        val (negOut, negCarry) = DuplexAudioEngine.upsample24kTo48k(encodeSamples(-1), 0)
-        assertEquals(listOf<Short>(0, -1), decodeSamples(negOut))
-        assertEquals((-1).toShort(), negCarry)
+        // 短应答与短打断绝不拦截
+        assertFalse(DuplexCallController.isLikelyEchoTranscript("好的", weatherReply))
+        assertFalse(DuplexCallController.isLikelyEchoTranscript("知道了", weatherReply))
+        assertFalse(DuplexCallController.isLikelyEchoTranscript("停", weatherReply))
+        // 带着部分关键词的真实追问不误伤
+        assertFalse(DuplexCallController.isLikelyEchoTranscript("你说气温14度是不是太冷了，要不要穿羽绒服", weatherReply))
+        assertFalse(DuplexCallController.isLikelyEchoTranscript("那世博文化公园开车怎么走", coatReply))
     }
 }
